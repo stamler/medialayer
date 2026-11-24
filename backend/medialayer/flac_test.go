@@ -156,3 +156,15 @@ func TestFLACHeaderRejectsBlockPastEndOfFile(t *testing.T) {
 		t.Fatalf("err = %v, want errNotFLAC", err)
 	}
 }
+
+// A read that comes back short is a failure to retry, not a non-FLAC file.
+func TestFLACHeaderShortReadIsAnError(t *testing.T) {
+	file, _ := makeFLAC(t, 0, typicalBlocks(1000), randomBytes(100_000, 3))
+	short := func(offset, length int64) ([]byte, error) {
+		return file[offset : offset+length/2], nil
+	}
+	_, _, err := flacHeader(short, int64(len(file)), 16<<20)
+	if err == nil || errors.Is(err, errNotFLAC) {
+		t.Fatalf("err = %v, want a read error that is not errNotFLAC", err)
+	}
+}

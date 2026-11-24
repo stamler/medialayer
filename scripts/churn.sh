@@ -17,9 +17,10 @@ cd "$work"
 echo "== rclone $version"
 # Start from a fresh go.mod so every dependency comes from that rclone
 # release, not from the versions pinned for the current one.
+goversion="$(sed -n 's/^go //p' go.mod)"
 rm -f go.mod go.sum
-go mod init github.com/stamler/medialayer >/dev/null 2>&1
-go mod edit -go="$(go env GOVERSION | sed 's/^go//')"
+go mod init github.com/stamler/medialayer
+go mod edit -go="$goversion"
 go get "github.com/rclone/rclone@$version"
 go mod tidy
 if go build ./... && go vet ./... && go test -count=1 ./...; then

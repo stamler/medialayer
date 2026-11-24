@@ -24,6 +24,18 @@ checks, each with a pass mark. Checks 1, 2 and 3 need a Mac.
 The header store is a local directory standing in for the header packs that
 will live in the cloud repository.
 
+A stored header is used only while it still describes the file. The size
+must match, the modification time must match exactly, and where the remote
+has a content hash without reading the file (Google Drive, S3 and most
+clouds), that must match too. The hash catches a retag that keeps the size
+and the time, which FLAC padding and "preserve timestamps" options make
+common. `prime` refuses a remote with neither times nor a quick hash.
+
+One gap is known. If a file is replaced while a mount still holds its old
+listing, a read can get the old header followed by the new file's audio.
+The repository index will close this by pinning a file version (revision or
+etag) where the remote has one.
+
 ## What the tests already show
 
 Reads through rclone's VFS (what `nfsmount` and `mount` serve) were tested

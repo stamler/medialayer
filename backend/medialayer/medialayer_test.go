@@ -13,6 +13,7 @@ import (
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/config"
 	"github.com/rclone/rclone/fs/config/configmap"
+	"github.com/rclone/rclone/fs/hash"
 	"github.com/rclone/rclone/fs/object"
 	"github.com/rclone/rclone/vfs"
 	"github.com/rclone/rclone/vfs/vfscommon"
@@ -283,5 +284,54 @@ func TestVFSReadAheadStillReachesCloud(t *testing.T) {
 				t.Fatalf("stats = %v, want a local answer plus one background cloud read", st)
 			}
 		})
+	}
+}
+
+// A retag that keeps the size and modification time (taggers can preserve
+// timestamps, and FLAC padding keeps the size) is caught when the record
+// holds a content hash.
+func TestHashCatchesRetagWithSameSizeAndTime(t *testing.T) {
+	lib := newLibrary(t)
+	ctx := context.Background()
+	base, err := lib.f.Fs.NewObject(ctx, "Artist/Album/01 Track.flac")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum, err := base.Hash(ctx, hash.MD5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := &headerRecord{Size: base.Size(), ModTime: base.ModTime(ctx), HashType: hash.MD5, Hash: sum}
+	if !lib.f.matches(ctx, rec, base) {
+		t.Fatal("record with the right hash does not match")
+	}
+	rec.Hash = "0123456789abcdef0123456789abcdef"
+	if lib.f.matches(ctx, rec, base) {
+		t.Fatal("record with a different hash matches")
+	}
+	rec.HashType, rec.Hash = hash.None, ""
+	rec.ModTime = rec.ModTime.Add(time.Nanosecond)
+	if lib.f.matches(ctx, rec, base) {
+		t.Fatal("record 1ns off the file's modification time matches")
+	}
+}
+
+// Open must not change the caller's options: rclone may reuse them.
+func TestOpenLeavesCallerOptionsAlone(t *testing.T) {
+	lib := newLibrary(t)
+	lib.prime()
+	suffix := &fs.RangeOption{Start: -1, End: 100}
+	options := []fs.OpenOption{suffix}
+	rc := lib.open(options...)
+	got, err := io.ReadAll(rc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = rc.Close()
+	if options[0] != fs.OpenOption(suffix) || suffix.Start != -1 || suffix.End != 100 {
+		t.Fatalf("options changed to %v", options[0])
+	}
+	if !bytes.Equal(got, lib.file[len(lib.file)-100:]) {
+		t.Fatal("suffix range returned the wrong bytes")
 	}
 }

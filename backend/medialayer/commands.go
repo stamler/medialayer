@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/rclone/rclone/fs"
+	"github.com/rclone/rclone/fs/hash"
 	"github.com/rclone/rclone/fs/walk"
 )
 
@@ -72,6 +73,9 @@ type primeResult struct {
 
 // prime stores headers for every media file under dir.
 func (f *Fs) prime(ctx context.Context, dir string) (*primeResult, error) {
+	if !f.canTrackChanges() {
+		return nil, errors.New("the wrapped remote has neither modification times nor a quick content hash, so a changed file could not be told apart from its stored header")
+	}
 	start := time.Now()
 	var objects []fs.Object
 	err := walk.ListR(ctx, f.Fs, dir, true, -1, walk.ListObjects, func(entries fs.DirEntries) error {
@@ -106,8 +110,9 @@ func (f *Fs) prime(ctx context.Context, dir string) (*primeResult, error) {
 		go func() {
 			defer wg.Done()
 			for base := range work {
-				o := f.wrapObject(base)
-				if o.freshRecord(ctx) != nil {
+				// Checked here rather than with freshRecord, so priming
+				// does not count towards the mount's stale_records_seen.
+				if rec := f.store.get(f.key(base.Remote())); rec != nil && f.matches(ctx, rec, base) {
 					fresh.Add(1)
 					continue
 				}
@@ -129,12 +134,22 @@ func (f *Fs) prime(ctx context.Context, dir string) (*primeResult, error) {
 					continue
 				}
 				if err == nil {
-					err = f.store.put(f.key(base.Remote()), &headerRecord{
+					rec := &headerRecord{
 						Size:     base.Size(),
 						ModTime:  base.ModTime(ctx),
 						Complete: complete,
 						Header:   header,
-					})
+					}
+					if f.hashType != hash.None {
+						if sum, herr := base.Hash(ctx, f.hashType); herr == nil && sum != "" {
+							rec.HashType, rec.Hash = f.hashType, sum
+						}
+					}
+					if f.matches(ctx, rec, base) {
+						err = f.store.put(f.key(base.Remote()), rec)
+					} else {
+						err = errors.New("no modification time or hash to check this file against later")
+					}
 				}
 				if err != nil {
 					failed.Add(1)

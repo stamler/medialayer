@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 )
 
 // fetchFunc reads length bytes of a file starting at offset. It may return
@@ -39,7 +40,17 @@ func flacHeader(fetch fetchFunc, size, maxLen int64) (header []byte, complete bo
 	if size < 4 {
 		return nil, false, errNotFLAC
 	}
-	buf, err := fetch(0, min(initialFetch, size))
+	// A fetch that returns fewer bytes than asked for, inside the file, is
+	// a failed read, not a sign the file isn't FLAC.
+	read := func(offset, length int64) ([]byte, error) {
+		got, err := fetch(offset, length)
+		if err == nil && int64(len(got)) < length {
+			err = fmt.Errorf("read %d of %d bytes at offset %d: %w", len(got), length, offset, io.ErrUnexpectedEOF)
+		}
+		return got, err
+	}
+
+	buf, err := read(0, min(initialFetch, size))
 	if err != nil {
 		return nil, false, err
 	}
@@ -52,7 +63,7 @@ func flacHeader(fetch fetchFunc, size, maxLen int64) (header []byte, complete bo
 			return nil
 		}
 		want := min(end+extraFetch, size, maxLen) - int64(len(buf))
-		more, err := fetch(int64(len(buf)), want)
+		more, err := read(int64(len(buf)), want)
 		if err != nil {
 			return err
 		}

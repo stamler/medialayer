@@ -32,6 +32,7 @@ import (
 	"github.com/rclone/rclone/fs/config/configmap"
 	"github.com/rclone/rclone/fs/config/configstruct"
 	"github.com/rclone/rclone/fs/fspath"
+	"github.com/rclone/rclone/fs/hash"
 	"github.com/rclone/rclone/fs/list"
 )
 
@@ -85,6 +86,7 @@ type Fs struct {
 	opt      Options
 	store    *headerStore
 	exts     map[string]bool
+	hashType hash.Type // content hash stored with each record, or hash.None
 	stats    *stats
 	stopOnce sync.Once
 	stop     chan struct{} // closed by Shutdown to end the stats logger
@@ -147,16 +149,40 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 		}
 	}
 
+	// Mask ANDs these with the wrapped remote's, so setting them here passes
+	// the wrapped remote's values through. Only object-level features the
+	// overlay forwards are listed.
 	f.features = (&fs.Features{
+		CaseInsensitive:         true,
+		DuplicateFiles:          true,
 		CanHaveEmptyDirectories: true,
+		BucketBased:             true,
+		BucketBasedRootOK:       true,
 		ReadMimeType:            true,
 		WriteMimeType:           true,
 		ReadMetadata:            true,
 		WriteMetadata:           true,
 		UserMetadata:            true,
+		SetTier:                 true,
+		GetTier:                 true,
+		SlowModTime:             true,
+		SlowHash:                true,
 		PartialUploads:          true,
+		NoMultiThreading:        true,
+		DoubleSlash:             true,
 	}).Fill(ctx, f).Mask(ctx, f.Fs).WrapsFs(f, f.Fs)
 	f.features.ListP = f.ListP
+
+	// A content hash makes the freshness check catch a retag that keeps the
+	// size and modification time. Use one only where the remote has it
+	// without reading the file (Drive, S3 ...), not where it is computed
+	// (local disk).
+	// Wrappers (chunker, hasher ...) do not always pass SlowHash on, so the
+	// innermost remote is checked too.
+	inner := fs.UnWrapFs(f.Fs)
+	if !f.Fs.Features().SlowHash && !inner.Features().SlowHash && !inner.Features().IsLocal {
+		f.hashType = f.Fs.Hashes().GetOne()
+	}
 
 	cache.PinUntilFinalized(f.Fs, f)
 	go f.logStats(30 * time.Second)
@@ -279,6 +305,7 @@ func (f *Fs) NewObject(ctx context.Context, remote string) (fs.Object, error) {
 // Put uploads a new object.
 func (f *Fs) Put(ctx context.Context, in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) (fs.Object, error) {
 	f.forget(src.Remote())
+	defer f.forget(src.Remote()) // and again after, in case a prime ran meanwhile
 	o, err := f.Fs.Put(ctx, in, src, options...)
 	if err != nil {
 		return nil, err
@@ -293,6 +320,7 @@ func (f *Fs) PutStream(ctx context.Context, in io.Reader, src fs.ObjectInfo, opt
 		return nil, errors.New("PutStream not supported")
 	}
 	f.forget(src.Remote())
+	defer f.forget(src.Remote()) // and again after, in case a prime ran meanwhile
 	o, err := do(ctx, in, src, options...)
 	if err != nil {
 		return nil, err
@@ -308,6 +336,7 @@ func (f *Fs) Copy(ctx context.Context, src fs.Object, remote string) (fs.Object,
 		return nil, fs.ErrorCantCopy
 	}
 	f.forget(remote)
+	defer f.forget(remote) // and again after, in case a prime ran meanwhile
 	o, err := do(ctx, srcObj.Object, remote)
 	if err != nil {
 		return nil, err
@@ -323,7 +352,9 @@ func (f *Fs) Move(ctx context.Context, src fs.Object, remote string) (fs.Object,
 		return nil, fs.ErrorCantMove
 	}
 	srcObj.f.forget(srcObj.Remote())
+	defer srcObj.f.forget(srcObj.Remote()) // and again after, in case a prime ran meanwhile
 	f.forget(remote)
+	defer f.forget(remote) // and again after, in case a prime ran meanwhile
 	o, err := do(ctx, srcObj.Object, remote)
 	if err != nil {
 		return nil, err
@@ -419,6 +450,41 @@ func (o *Object) ID() string {
 	return ""
 }
 
+// Metadata returns the wrapped object's metadata.
+func (o *Object) Metadata(ctx context.Context) (fs.Metadata, error) {
+	return fs.GetMetadata(ctx, o.Object)
+}
+
+// SetMetadata sets the wrapped object's metadata and, once that worked,
+// drops its stored header.
+func (o *Object) SetMetadata(ctx context.Context, metadata fs.Metadata) error {
+	do, ok := o.Object.(fs.SetMetadataer)
+	if !ok {
+		return fs.ErrorNotImplemented
+	}
+	if err := do.SetMetadata(ctx, metadata); err != nil {
+		return err
+	}
+	o.f.forget(o.Remote())
+	return nil
+}
+
+// GetTier returns the wrapped object's storage tier.
+func (o *Object) GetTier() string {
+	if do, ok := o.Object.(fs.GetTierer); ok {
+		return do.GetTier()
+	}
+	return ""
+}
+
+// SetTier sets the wrapped object's storage tier.
+func (o *Object) SetTier(tier string) error {
+	if do, ok := o.Object.(fs.SetTierer); ok {
+		return do.SetTier(tier)
+	}
+	return fs.ErrorNotImplemented
+}
+
 // MimeType returns the wrapped object's MIME type, if known.
 func (o *Object) MimeType(ctx context.Context) string {
 	if doer, ok := o.Object.(fs.MimeTyper); ok {
@@ -430,17 +496,19 @@ func (o *Object) MimeType(ctx context.Context) string {
 // Update replaces the object's content and drops its stored header.
 func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) error {
 	o.f.forget(o.Remote())
+	defer o.f.forget(o.Remote()) // and again after, in case a prime ran meanwhile
 	return o.Object.Update(ctx, in, src, options...)
 }
 
 // Remove deletes the object and its stored header.
 func (o *Object) Remove(ctx context.Context) error {
 	o.f.forget(o.Remote())
+	defer o.f.forget(o.Remote()) // and again after, in case a prime ran meanwhile
 	return o.Object.Remove(ctx)
 }
 
 // freshRecord returns the stored header for this object if it still
-// matches the file's size and modification time, or nil.
+// describes the file, or nil.
 func (o *Object) freshRecord(ctx context.Context) *headerRecord {
 	if !o.f.isMedia(o.Remote()) {
 		return nil
@@ -449,23 +517,44 @@ func (o *Object) freshRecord(ctx context.Context) *headerRecord {
 	if rec == nil {
 		return nil
 	}
-	if rec.Size != o.Size() || !sameModTime(rec.ModTime, o.ModTime(ctx), o.f.Fs.Precision()) {
+	if !o.f.matches(ctx, rec, o.Object) {
 		o.f.stats.staleRecords.Add(1)
 		return nil
 	}
 	return rec
 }
 
-// sameModTime compares modification times within the remote's precision.
-func sameModTime(a, b time.Time, precision time.Duration) bool {
-	if precision == fs.ModTimeNotSupported {
-		return true
+// canTrackChanges reports whether this remote gives a way to tell that a
+// file changed: modification times, or a content hash.
+func (f *Fs) canTrackChanges() bool {
+	return f.Fs.Precision() != fs.ModTimeNotSupported || f.hashType != hash.None
+}
+
+// matches reports whether rec was made from o's current content. The size
+// must match, the modification time must match exactly where the remote has
+// them (the record came from the same remote, so an unchanged file reports
+// the same time), and the content hash must match where one was stored. A
+// record is never trusted on size alone: retaggers reuse FLAC padding, so a
+// retagged file usually keeps its size.
+func (f *Fs) matches(ctx context.Context, rec *headerRecord, o fs.Object) bool {
+	if rec.Size != o.Size() {
+		return false
 	}
-	d := a.Sub(b)
-	if d < 0 {
-		d = -d
+	checked := false
+	if f.Fs.Precision() != fs.ModTimeNotSupported {
+		if !rec.ModTime.Equal(o.ModTime(ctx)) {
+			return false
+		}
+		checked = true
 	}
-	return d <= max(precision, time.Nanosecond)
+	if rec.HashType != hash.None {
+		sum, err := o.Hash(ctx, rec.HashType)
+		if err != nil || sum == "" || sum != rec.Hash {
+			return false
+		}
+		checked = true
+	}
+	return checked
 }
 
 // Open opens the object for reading. A read that starts inside the stored
@@ -479,10 +568,13 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (io.ReadClo
 	o.f.stats.opens.Add(1)
 
 	size := o.Size()
-	fs.FixRangeOption(options, size)
+	// FixRangeOption replaces entries of the slice it is given, so fix a
+	// copy and keep the caller's options for a pass-through open.
+	fixed := append([]fs.OpenOption(nil), options...)
+	fs.FixRangeOption(fixed, size)
 	var offset, limit int64 = 0, -1
 	var rest []fs.OpenOption // options other than the range, kept for the remote
-	for _, option := range options {
+	for _, option := range fixed {
 		switch x := option.(type) {
 		case *fs.SeekOption:
 			offset = x.Offset
@@ -501,6 +593,13 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (io.ReadClo
 		end = min(offset+limit, size)
 	}
 
+	// The header bytes come from the record and any later bytes from a
+	// remote open made when the reader gets there. If the file is replaced
+	// between the freshness check above and that open, the reader gets the
+	// old header followed by the new file's bytes. rclone's VFS hands out
+	// an object it listed earlier (up to --dir-cache-time), so this window
+	// exists; the cloud repository's index will close it by pinning a
+	// version (revision or etag) where the remote has one.
 	o.f.stats.localOpens.Add(1)
 	fs.Debugf(o, "medialayer: range %d-%d starts in the %d stored header bytes", offset, end, len(rec.Header))
 	openAt := func(off, lim int64) (io.ReadCloser, error) {
@@ -535,5 +634,9 @@ var (
 	_ fs.Object          = (*Object)(nil)
 	_ fs.IDer            = (*Object)(nil)
 	_ fs.MimeTyper       = (*Object)(nil)
+	_ fs.Metadataer      = (*Object)(nil)
+	_ fs.SetMetadataer   = (*Object)(nil)
+	_ fs.GetTierer       = (*Object)(nil)
+	_ fs.SetTierer       = (*Object)(nil)
 	_ fs.ObjectUnWrapper = (*Object)(nil)
 )
