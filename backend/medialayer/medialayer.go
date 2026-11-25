@@ -88,6 +88,7 @@ type Fs struct {
 	exts     map[string]bool
 	hashType hash.Type // content hash stored with each record, or hash.None
 	stats    *stats
+	streams  *streamPool // remote streams kept open between NFS reads
 	stopOnce sync.Once
 	stop     chan struct{} // closed by Shutdown to end the stats logger
 }
@@ -99,7 +100,16 @@ type stats struct {
 	localOpens       atomic.Int64 // Open calls answered from the header store
 	cloudFallbacks   atomic.Int64 // local opens that later had to read past the header
 	staleRecords     atomic.Int64 // records ignored because the file changed
+	reusedStreams    atomic.Int64 // remote reads that continued a parked stream
 }
+
+// Parked streams are kept this long, and at most this many at once. A
+// sequential reader through nfsmount comes back within milliseconds; the
+// limit bounds the idle connections held open to the cloud.
+const (
+	streamParkTime = 10 * time.Second
+	maxParked      = 32
+)
 
 // NewFs constructs an Fs from the remote:path string.
 func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, error) {
@@ -130,14 +140,15 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 	}
 
 	f := &Fs{
-		Fs:    baseFs,
-		name:  name,
-		root:  root,
-		opt:   opt,
-		store: store,
-		exts:  map[string]bool{},
-		stats: &stats{},
-		stop:  make(chan struct{}),
+		Fs:      baseFs,
+		name:    name,
+		root:    root,
+		opt:     opt,
+		store:   store,
+		exts:    map[string]bool{},
+		stats:   &stats{},
+		streams: newStreamPool(streamParkTime, maxParked),
+		stop:    make(chan struct{}),
 	}
 	for _, ext := range opt.Extensions {
 		f.exts["."+strings.ToLower(strings.TrimPrefix(ext, "."))] = true
@@ -194,20 +205,20 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 func (f *Fs) logStats(every time.Duration) {
 	ticker := time.NewTicker(every)
 	defer ticker.Stop()
-	var last [5]int64
+	var last [6]int64
 	for {
 		select {
 		case <-f.stop:
 			return
 		case <-ticker.C:
 		}
-		now := [5]int64{
+		now := [6]int64{
 			f.stats.opens.Load(), f.stats.localOpens.Load(), f.stats.passthroughOpens.Load(),
-			f.stats.cloudFallbacks.Load(), f.stats.staleRecords.Load(),
+			f.stats.cloudFallbacks.Load(), f.stats.staleRecords.Load(), f.stats.reusedStreams.Load(),
 		}
 		if now != last {
-			fs.Infof(f, "medialayer stats: %d opens with a stored header, %d served locally, %d passed through, %d read past the header, %d stale records",
-				now[0], now[1], now[2], now[3], now[4])
+			fs.Infof(f, "medialayer stats: %d opens with a stored header, %d served locally, %d passed through, %d read past the header, %d stale records, %d cloud reads continued an open stream",
+				now[0], now[1], now[2], now[3], now[4], now[5])
 			last = now
 		}
 	}
@@ -248,6 +259,7 @@ func (f *Fs) isMedia(remote string) bool {
 // forget drops the stored header for remote, after the file was written,
 // moved or deleted through this overlay.
 func (f *Fs) forget(remote string) {
+	f.streams.drop(f.key(remote))
 	if !f.isMedia(remote) {
 		return
 	}
@@ -413,7 +425,10 @@ func (f *Fs) DirCacheFlush() {
 
 // Shutdown the wrapped remote.
 func (f *Fs) Shutdown(ctx context.Context) error {
-	f.stopOnce.Do(func() { close(f.stop) })
+	f.stopOnce.Do(func() {
+		close(f.stop)
+		f.streams.close()
+	})
 	if do := f.Fs.Features().Shutdown; do != nil {
 		return do(ctx)
 	}
@@ -559,38 +574,51 @@ func (f *Fs) matches(ctx context.Context, rec *headerRecord, o fs.Object) bool {
 
 // Open opens the object for reading. A read that starts inside the stored
 // header is answered from it, and the cloud is contacted only if the reader
-// goes past the header.
+// goes past the header. Ranged reads that do reach the cloud continue a
+// parked stream where one stops at the right offset (see streamPool).
 func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (io.ReadCloser, error) {
-	rec := o.freshRecord(ctx)
-	if rec == nil {
-		return o.Object.Open(ctx, options...)
-	}
-	o.f.stats.opens.Add(1)
-
 	size := o.Size()
 	// FixRangeOption replaces entries of the slice it is given, so fix a
 	// copy and keep the caller's options for a pass-through open.
 	fixed := append([]fs.OpenOption(nil), options...)
 	fs.FixRangeOption(fixed, size)
 	var offset, limit int64 = 0, -1
+	ranged := false
 	var rest []fs.OpenOption // options other than the range, kept for the remote
 	for _, option := range fixed {
 		switch x := option.(type) {
 		case *fs.SeekOption:
-			offset = x.Offset
+			offset, ranged = x.Offset, true
 		case *fs.RangeOption:
 			offset, limit = x.Decode(size)
+			ranged = true
 		default:
 			rest = append(rest, option)
 		}
 	}
-	if offset < 0 || offset >= int64(len(rec.Header)) {
-		o.f.stats.passthroughOpens.Add(1)
-		return o.Object.Open(ctx, options...)
-	}
 	end := size
 	if limit >= 0 {
 		end = min(offset+limit, size)
+	}
+	// Unknown sizes and ranges outside the file go to the remote as asked,
+	// so it reports them as it normally would.
+	usable := size >= 0 && offset >= 0 && offset <= end
+
+	rec := o.freshRecord(ctx)
+	if rec == nil {
+		if !ranged || !usable || offset == end {
+			return o.Object.Open(ctx, options...)
+		}
+		return o.openRemote(ctx, offset, end, rest)
+	}
+	o.f.stats.opens.Add(1)
+	if !usable {
+		o.f.stats.passthroughOpens.Add(1)
+		return o.Object.Open(ctx, options...)
+	}
+	if offset >= int64(len(rec.Header)) {
+		o.f.stats.passthroughOpens.Add(1)
+		return o.openRemote(ctx, offset, end, rest)
 	}
 
 	// The header bytes come from the record and any later bytes from a
@@ -603,14 +631,71 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (io.ReadClo
 	o.f.stats.localOpens.Add(1)
 	fs.Debugf(o, "medialayer: range %d-%d starts in the %d stored header bytes", offset, end, len(rec.Header))
 	openAt := func(off, lim int64) (io.ReadCloser, error) {
-		opts := append([]fs.OpenOption{&fs.RangeOption{Start: off, End: off + lim - 1}}, rest...)
-		return o.Object.Open(ctx, opts...)
+		return o.openRemote(ctx, off, off+lim, rest)
 	}
 	onOpen := func() {
 		o.f.stats.cloudFallbacks.Add(1)
 		fs.Debugf(o, "medialayer: read went past the stored header, opening the remote")
 	}
 	return newStitchReader(rec.Header, offset, end, openAt, onOpen), nil
+}
+
+// reusableOptions reports whether a stream opened with these options (on
+// top of its range) returns plain file bytes, so it can be parked and
+// continued. The VFS adds an empty hash request, which changes nothing.
+// Anything else (headers, options of other backends) might change what the
+// remote returns, so such streams are neither reused nor parked.
+func reusableOptions(options []fs.OpenOption) bool {
+	for _, option := range options {
+		switch x := option.(type) {
+		case fs.NullOption:
+		case *fs.HashesOption:
+			if x.Hashes.Count() != 0 {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// openRemote reads bytes [offset, end) of the object from the wrapped
+// remote. It continues a parked stream that stops at offset if there is
+// one, and parks its own stream when closed with bytes left.
+func (o *Object) openRemote(ctx context.Context, offset, end int64, rest []fs.OpenOption) (io.ReadCloser, error) {
+	open := func(off, lim int64) (io.ReadCloser, error) {
+		opts := append([]fs.OpenOption{&fs.RangeOption{Start: off, End: off + lim - 1}}, rest...)
+		return o.Object.Open(ctx, opts...)
+	}
+	r := &pooledReader{
+		pool: o.f.streams,
+		key:  o.f.key(o.Remote()),
+		// A file replaced by one of the same size is told apart by its
+		// modification time.
+		version: fmt.Sprintf("%d/%d", o.Size(), o.ModTime(ctx).UnixNano()),
+		open:    open,
+		pos:     offset,
+		limit:   end,
+		noPark:  !reusableOptions(rest),
+	}
+	if offset >= end {
+		return io.NopCloser(strings.NewReader("")), nil
+	}
+	if !r.noPark {
+		if s := r.pool.take(r.key, r.version, offset); s != nil {
+			o.f.stats.reusedStreams.Add(1)
+			fs.Debugf(o, "medialayer: continuing an open stream at %d", offset)
+			r.rc, r.streamEnd, r.reused = s.rc, s.end, true
+			return r, nil
+		}
+	}
+	rc, err := open(offset, end-offset)
+	if err != nil {
+		return nil, err
+	}
+	r.rc, r.streamEnd = rc, end
+	return r, nil
 }
 
 // Check the interfaces are satisfied.

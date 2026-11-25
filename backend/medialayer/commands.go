@@ -47,6 +47,7 @@ func (f *Fs) Command(ctx context.Context, name string, arg []string, opt map[str
 			"opens_with_header":  f.stats.opens.Load(),
 			"served_locally":     f.stats.localOpens.Load(),
 			"passed_through":     f.stats.passthroughOpens.Load(),
+			"streams_continued":  f.stats.reusedStreams.Load(),
 			"read_past_header":   f.stats.cloudFallbacks.Load(),
 			"stale_records_seen": f.stats.staleRecords.Load(),
 		}, nil

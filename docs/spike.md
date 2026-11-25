@@ -89,7 +89,7 @@ Prime the headers, then mount the overlay:
 mkdir -p ~/mnt/ml
 ./mlspike nfsmount ml: ~/mnt/ml \
   --vfs-cache-mode off --buffer-size 0 --read-only --dir-cache-time 1h \
-  --rc --rc-no-auth -v
+  --rc --rc-no-auth -v -o readahead=0
 ```
 
 `prime` prints how many files it stored, how many range requests it made
@@ -100,12 +100,19 @@ and time the import again. Then, while the mount is running:
 ./mlspike rc backend/command command=stats fs=ml:
 ```
 
-`served_locally` should be about the number of files Tauon read, and
-`read_past_header` should be close to zero. The mount also logs the same
-numbers every 30 seconds with `-v`. A high `read_past_header` means the
-macOS NFS client is reading ahead past the tags. `nfsmount` passes `-o`
-options to `mount_nfs`, so try remounting with `-o readahead=0` (see
-`man mount_nfs`) and note what changed.
+The counters are per open, not per file. Through `nfsmount` every NFS
+READ (32 KiB on macOS) opens the file again, so one file read in 40 blocks
+counts 40 opens. `served_locally` counts opens answered from the stored
+header, `passed_through` opens that started past it, and
+`streams_continued` how many cloud reads (of any file, primed or not)
+continued a stream left open by the previous block instead of making a new
+request. Tauon reads about 1 MiB of audio past the tags of each file, so
+`passed_through` is expected to be high; most of those reads should show
+up in `streams_continued`. The mount also logs
+these numbers every 30 seconds with `-v`.
+
+Mount with `-o readahead=0` (passed to `mount_nfs`, see `man mount_nfs`)
+so the macOS NFS client does not read further ahead on its own.
 
 Directory listings still come from Google Drive in this spike; the
 repository index will answer them later. `--dir-cache-time 1h` keeps a
