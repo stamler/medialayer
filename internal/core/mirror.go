@@ -381,12 +381,14 @@ type target struct {
 // secondary that fails or pauses doesn't stop the others; its status
 // says what happened.
 //
-// Probe files make sure no secondary is the primary, inside it, or holds
-// it, however it was reached (another sign-in to the same account, a
-// shortcut, a local path): the primary's must not be seen through the
-// secondary, and each secondary's must not be seen in the primary's
-// listing. They are kept and rewritten in place, one per device and
-// folder, so Drive's own trash doesn't fill with them.
+// A probe file written to each secondary makes sure it is not the
+// primary, nor inside it, however it was reached (another sign-in to the
+// same account, a shortcut, a local path): it must not be readable at the
+// same path in the primary, nor seen anywhere in the primary's listing. A
+// secondary that holds the primary is refused for the .medialayer inside
+// it. Nothing is written to the primary, which may be full. Probes are
+// kept and rewritten in place, one per device and folder, so Drive's own
+// trash doesn't fill with them.
 func (c *Core) mirrorAll(ctx context.Context, f fs.Fs) error {
 	c.mu.Lock()
 	secs := append([]source(nil), c.settings.Secondaries...)
@@ -416,15 +418,6 @@ func (c *Core) mirrorAll(ctx context.Context, f fs.Fs) error {
 	}
 	c.setJob(func(j *jobStatus) { j.Phase, j.Done, j.Total, j.Current = PhaseMirroring, 0, 0, "" })
 	run := index.NewID()
-	if err := putBytes(ctx, f, repoDir+"/probe/"+device, []byte(run)); err != nil {
-		// A full primary can't take a new probe; the last one written
-		// still tells it apart, failing safe on an old copy of it.
-		b, rerr := readSmall(ctx, f, repoDir+"/probe/"+device)
-		if !isFull(err) || rerr != nil || len(b) == 0 {
-			return fmt.Errorf("write a probe file: %w", err)
-		}
-		run = string(b)
-	}
 
 	fail := func(s source, err error) {
 		fs.Errorf(nil, "secondary %s: %v", s.Folder, err)
@@ -435,7 +428,7 @@ func (c *Core) mirrorAll(ctx context.Context, f fs.Fs) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		t, err := c.check(ctx, s, repo, device, run)
+		t, err := c.check(ctx, f, s, repo, device, run)
 		if err != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()
@@ -491,30 +484,20 @@ func (c *Core) mirrorAll(ctx context.Context, f fs.Fs) error {
 // copy of this library (or a first copy of it that was cut short), and
 // not the primary, nor holding it. It then writes the secondary's probe
 // file and, before the first copy, its member record.
-func (c *Core) check(ctx context.Context, s source, repo *repoRecord, device, run string) (target, error) {
+func (c *Core) check(ctx context.Context, f fs.Fs, s source, repo *repoRecord, device, run string) (target, error) {
 	t := target{s: s, probe: repoDir + "/probe/" + device + "-" + s.ID}
 	dst, err := openSource(ctx, s)
 	if err != nil {
 		return t, err
 	}
 	t.dst = dst
-	b, err := readSmall(ctx, dst, repoDir+"/probe/"+device)
-	if err != nil && !absent(err) {
-		return t, err // can't tell whether it's the primary
-	}
-	if err == nil && string(b) == run {
-		return t, errors.New("this folder is the primary itself")
-	}
 	have, err := listLibrary(ctx, dst, true)
 	if err != nil {
 		return t, fmt.Errorf("list %s: %w", s.Folder, err)
 	}
 	t.have = have
-	if _, ok := have.probes[device]; ok {
-		return t, errors.New("this folder holds the primary; pick one outside it")
-	}
 	if have.nested {
-		return t, errors.New("this folder holds another MediaLayer library inside it")
+		return t, errors.New("this folder holds a MediaLayer library inside it, perhaps the primary; pick one outside it")
 	}
 	theirs, err := readRepo(ctx, dst)
 	if err != nil {
@@ -543,6 +526,13 @@ func (c *Core) check(ctx context.Context, s source, repo *repoRecord, device, ru
 	}
 	if err := putBytes(ctx, dst, t.probe, []byte(run)); err != nil {
 		return t, fmt.Errorf("write a probe file: %w", err)
+	}
+	b, err := readSmall(ctx, f, t.probe)
+	if err != nil && !absent(err) {
+		return t, err // can't tell whether it's the primary
+	}
+	if err == nil && string(b) == run {
+		return t, errors.New("this folder is the primary itself")
 	}
 	t.writeMember = mine.LibraryID != repo.LibraryID
 	return t, nil
