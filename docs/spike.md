@@ -68,7 +68,8 @@ Set up remotes. The Google Drive step opens a browser to sign in:
 ./mlspike config create ml medialayer remote=gdrive:Music/SpikeLibrary
 ```
 
-`gdrive:Music/SpikeLibrary` is the test folder of about 1,000 FLAC files.
+`gdrive:Music/SpikeLibrary` is the test folder: 397 FLAC files plus 10 MP3s. Only
+FLAC is primed, so Tauon reads the MP3s from the cloud on every import.
 
 Baseline, plain rclone (unmount with `umount ~/mnt/plain` afterwards):
 
