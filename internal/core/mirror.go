@@ -368,13 +368,11 @@ func putBytes(ctx context.Context, f fs.Fs, remote string, b []byte) error {
 
 // target is a secondary that passed the checks before syncing.
 type target struct {
-	s     source
-	dst   fs.Fs
-	have  *listing
-	probe string // its probe file, under .medialayer/probe/
-	// writeMember is set until the folder has a member.json for this
-	// library, which is written before the first copy.
-	writeMember bool
+	s      source
+	dst    fs.Fs
+	have   *listing
+	probe  string       // its probe file, under .medialayer/probe/
+	member memberRecord // the folder's member.json, if any
 }
 
 // mirrorAll brings every secondary up to date with the primary f. A
@@ -534,7 +532,9 @@ func (c *Core) check(ctx context.Context, f fs.Fs, s source, repo *repoRecord, d
 	if err == nil && string(b) == run {
 		return t, errors.New("this folder is the primary itself")
 	}
-	t.writeMember = mine.LibraryID != repo.LibraryID
+	if mine.LibraryID == repo.LibraryID {
+		t.member = mine
+	}
 	return t, nil
 }
 
@@ -556,10 +556,16 @@ func absent(err error) bool {
 }
 
 // memberRecord is a secondary's .medialayer/member.json: which library
-// it is a copy of.
+// it is a copy of, and whether the last sync to it finished. It says
+// "copying" from before the first change of a sync until the sync ends,
+// so a reader can tell a finished copy from one in progress or cut
+// short; repo.json alone only says what it was last a copy of.
 type memberRecord struct {
-	LibraryID string `json:"library_id"`
-	Replica   string `json:"replica"`
+	LibraryID string    `json:"library_id"`
+	Replica   string    `json:"replica"`
+	State     string    `json:"state"`              // "copying" or "synced"
+	Snapshot  string    `json:"snapshot,omitempty"` // the primary's snapshot it matches, when synced
+	SyncedAt  time.Time `json:"synced_at,omitzero"`
 }
 
 // readSmall reads a small file.
@@ -704,11 +710,19 @@ func (c *Core) mirror(ctx context.Context, f fs.Fs, src *listing, repo *repoReco
 		return nil
 	}
 
-	if t.writeMember {
-		b, _ := json.Marshal(memberRecord{LibraryID: repo.LibraryID, Replica: s.ID})
+	writeMember := func(m memberRecord) error {
+		b, _ := json.Marshal(m)
 		if err := putBytes(ctx, dst, repoDir+"/member.json", b); err != nil {
+			return fmt.Errorf("write member.json: %w", err)
+		}
+		return nil
+	}
+	member := memberRecord{LibraryID: repo.LibraryID, Replica: s.ID, State: "copying"}
+	if len(copies)+changes > 0 || t.member.State != "synced" {
+		if err := writeMember(member); err != nil {
 			return err
 		}
+		t.member = member
 	}
 	c.setJob(func(j *jobStatus) { j.Done, j.Total, j.Current = 0, int64(len(copies)+changes), "" })
 	// One trash folder per sync, unique even within a second.
@@ -745,8 +759,15 @@ func (c *Core) mirror(ctx context.Context, f fs.Fs, src *listing, repo *repoReco
 		}
 		step(p)
 	}
-	if err := c.mirrorRepo(ctx, f, dst, repo); err != nil {
+	snap, err := c.mirrorRepo(ctx, f, dst, repo)
+	if err != nil {
 		return fmt.Errorf("copy .medialayer: %w", err)
+	}
+	if t.member.State != "synced" || t.member.Snapshot != snap {
+		member.State, member.Snapshot, member.SyncedAt = "synced", snap, time.Now().UTC()
+		if err := writeMember(member); err != nil {
+			return err
+		}
 	}
 	if err := emptyTrash(ctx, dst, time.Now()); err != nil {
 		fs.Errorf(dst, "empty trash: %v", err)
@@ -760,30 +781,32 @@ func (c *Core) mirror(ctx context.Context, f fs.Fs, src *listing, repo *repoReco
 
 // mirrorRepo copies the primary's art packs, newest snapshot and
 // repo.json to dst, repo.json last, so a secondary with a repo.json can
-// always open the library.
-func (c *Core) mirrorRepo(ctx context.Context, f, dst fs.Fs, repo *repoRecord) error {
+// always open the library. It returns the snapshot's name.
+func (c *Core) mirrorRepo(ctx context.Context, f, dst fs.Fs, repo *repoRecord) (string, error) {
+	snapName := ""
 	for _, dir := range []string{"art", "snapshots"} {
 		ours, err := listRepoDir(ctx, f, dir)
 		if err != nil {
-			return err
+			return "", err
 		}
 		theirs, err := listRepoDir(ctx, dst, dir)
 		if err != nil {
-			return err
+			return "", err
 		}
 		if dir == "snapshots" {
 			snap, _ := newestSnapshot(ours)
 			if snap == nil {
-				return errors.New("the primary has no snapshot yet")
+				return "", errors.New("the primary has no snapshot yet")
 			}
-			ours = map[string]fs.Object{path.Base(snap.Remote()): snap}
+			snapName = path.Base(snap.Remote())
+			ours = map[string]fs.Object{snapName: snap}
 		}
 		for name, o := range ours {
 			if t, ok := theirs[name]; ok && t.Size() == o.Size() {
 				continue // packs and snapshots never change once written
 			}
 			if _, err := operations.Copy(ctx, dst, theirs[name], o.Remote(), o); err != nil {
-				return err
+				return "", err
 			}
 		}
 		if dir == "snapshots" {
@@ -796,7 +819,7 @@ func (c *Core) mirrorRepo(ctx context.Context, f, dst fs.Fs, repo *repoRecord) e
 			}
 		}
 	}
-	return c.writeRepo(ctx, dst, repo)
+	return snapName, c.writeRepo(ctx, dst, repo)
 }
 
 // emptyTrash deletes trash folders older than trashKeep.

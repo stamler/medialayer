@@ -94,6 +94,11 @@ func TestMirrorCopiesLibraryAndRepository(t *testing.T) {
 	if repo.Primary.Replica != replica {
 		t.Errorf("primary = %+v", repo.Primary)
 	}
+	var m memberRecord
+	b, _ = os.ReadFile(filepath.Join(sec, ".medialayer/member.json"))
+	if err := json.Unmarshal(b, &m); err != nil || m.State != "synced" || m.Snapshot != "000001.sqlite" || m.LibraryID != repo.LibraryID {
+		t.Errorf("member.json = %s (%v)", b, err)
+	}
 
 	// Nothing changed: nothing copied.
 	if err := c.sync(ctx); err != nil {
