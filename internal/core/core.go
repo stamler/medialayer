@@ -44,7 +44,10 @@ type Core struct {
 	// tracks is the index's track count, kept here so Status never waits
 	// on the database while the indexer writes.
 	tracks atomic.Int64
-	stream *streamServer
+	// badCovers are folder images that failed to read or decode, so later
+	// syncs in this session don't download them again.
+	badCovers map[string]bool
+	stream    *streamServer
 }
 
 // settings are kept in settings.json in the data directory.

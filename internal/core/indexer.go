@@ -236,11 +236,13 @@ func coverScore(base string) (score int, ok bool) {
 			return 0, false
 		}
 	}
-	if strings.Contains(name, "back") {
-		return 0, false // "backcover"
+	if strings.Contains(name, "backcover") || strings.Contains(name, "coverback") {
+		return 0, false
 	}
-	scans := map[string]bool{"cd": true, "disc": true, "disk": true, "booklet": true,
-		"matrix": true, "scan": true, "label": true}
+	front := words["front"] || words["cover"] || words["folder"] ||
+		strings.Contains(name, "frontcover") || strings.Contains(name, "albumcover")
+	scans := map[string]bool{"cd": true, "cds": true, "disc": true, "discs": true, "disk": true,
+		"booklet": true, "matrix": true, "scan": true, "scans": true, "label": true}
 	if strings.HasPrefix(name, "00") {
 		// Scene releases name the cover 00-artist-album-source-year-group.jpg,
 		// where the source ("cd") is a tag, not what the image shows. A scan
@@ -248,14 +250,16 @@ func coverScore(base string) (score int, ok bool) {
 		if len(list) > 0 && scans[list[len(list)-1]] {
 			return 0, false
 		}
-		if strings.Contains(name, "front") || strings.Contains(name, "cover") {
+		if front {
 			return 1, true
 		}
 		return 2, true
 	}
-	for w := range scans {
-		if words[w] {
-			return 0, false
+	if !front { // "CD Cover.jpg" is still a cover; "cd.jpg" is a disc scan
+		for w := range scans {
+			if words[w] {
+				return 0, false
+			}
 		}
 	}
 	switch name {
@@ -263,7 +267,7 @@ func coverScore(base string) (score int, ok bool) {
 		return 0, true
 	}
 	switch {
-	case strings.Contains(name, "front") || strings.Contains(name, "cover") || strings.Contains(name, "folder"):
+	case front:
 		return 1, true
 	}
 	return 4, true
@@ -271,7 +275,7 @@ func coverScore(base string) (score int, ok bool) {
 
 // discFolder matches the per-disc folders of a multi-disc album, whose
 // cover is usually in the album folder above.
-var discFolder = regexp.MustCompile(`(?i)^(cd|dis[ck])[\s_-]*\d+$`)
+var discFolder = regexp.MustCompile(`(?i)^(cd|dis[ck])[\s_-]*\d+\b`)
 
 // folderArt gives tracks with no art of their own the front cover from
 // their folder, stored once in the art pack. It runs on every sync, so a
@@ -301,6 +305,9 @@ func (c *Core) folderArt(ctx context.Context, db *index.DB, pack *artPack, image
 			return err
 		}
 		o := pickCover(images[dir])
+		if o != nil && c.badCover(o, false) {
+			o = nil // failed earlier in this session; don't download it again
+		}
 		if o == nil {
 			c.setJob(func(j *jobStatus) { j.Done++ })
 			continue
@@ -335,6 +342,9 @@ func (c *Core) folderArt(ctx context.Context, db *index.DB, pack *artPack, image
 			}
 			return db.AddFileArt(ids, sum[:], 3)
 		}()
+		if err != nil && ctx.Err() == nil {
+			c.badCover(o, true)
+		}
 		c.setJob(func(j *jobStatus) {
 			j.Done++
 			if err != nil {
@@ -347,6 +357,21 @@ func (c *Core) folderArt(ctx context.Context, db *index.DB, pack *artPack, image
 		})
 	}
 	return nil
+}
+
+// badCover reports whether this version of an image failed as a cover
+// earlier in this session, and with add, records that it did.
+func (c *Core) badCover(o fs.Object, add bool) bool {
+	key := fmt.Sprintf("%s|%d|%d", o.Remote(), o.Size(), o.ModTime(context.Background()).UnixNano())
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if add {
+		if c.badCovers == nil {
+			c.badCovers = map[string]bool{}
+		}
+		c.badCovers[key] = true
+	}
+	return c.badCovers[key]
 }
 
 // currentDB returns the open index.
@@ -445,6 +470,7 @@ func (a *artPack) store(sha []byte, p media.Picture) error {
 	if _, err := a.f.Write(p.Data); err != nil {
 		// A partial write would shift every later offset: start a new
 		// pack for the next image instead.
+		_ = a.f.Sync() // earlier images in it are already in the index
 		_ = a.f.Close()
 		a.f, a.size = nil, 0
 		return err
