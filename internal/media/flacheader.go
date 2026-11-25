@@ -1,4 +1,6 @@
-package medialayer
+// Package media reads metadata from audio files: FLAC (STREAMINFO, Vorbis
+// comments, pictures) and MP3 (ID3v2), from the bytes at the start of a file.
+package media
 
 import (
 	"bytes"
@@ -7,12 +9,12 @@ import (
 	"io"
 )
 
-// fetchFunc reads length bytes of a file starting at offset. It may return
+// FetchFunc reads length bytes of a file starting at offset. It may return
 // fewer bytes only at the end of the file.
-type fetchFunc func(offset, length int64) ([]byte, error)
+type FetchFunc func(offset, length int64) ([]byte, error)
 
-// errNotFLAC is returned when a file does not start with a FLAC stream.
-var errNotFLAC = errors.New("not a FLAC stream")
+// ErrNotFLAC is returned when a file does not start with a FLAC stream.
+var ErrNotFLAC = errors.New("not a FLAC stream")
 
 const (
 	// initialFetch is the size of the first read made when finding where a
@@ -26,7 +28,7 @@ const (
 	maxBlocks = 1024
 )
 
-// flacHeader reads the start of a FLAC file through fetch and returns the
+// FLACHeader reads the start of a FLAC file through fetch and returns the
 // bytes that precede the first audio frame: an optional ID3v2 tag, the
 // "fLaC" marker and every metadata block (STREAMINFO, VORBIS_COMMENT,
 // PICTURE, SEEKTABLE, CUESHEET, PADDING ...).
@@ -36,9 +38,9 @@ const (
 // it holds are correct, only the remainder has to come from the cloud.
 //
 // size is the length of the whole file; reads never go past it.
-func flacHeader(fetch fetchFunc, size, maxLen int64) (header []byte, complete bool, err error) {
+func FLACHeader(fetch FetchFunc, size, maxLen int64) (header []byte, complete bool, err error) {
 	if size < 4 {
-		return nil, false, errNotFLAC
+		return nil, false, ErrNotFLAC
 	}
 	// A fetch that returns fewer bytes than asked for, inside the file, is
 	// a failed read, not a sign the file isn't FLAC.
@@ -87,9 +89,9 @@ func flacHeader(fetch fetchFunc, size, maxLen int64) (header []byte, complete bo
 	}
 	if int64(len(buf)) < pos+4 || !bytes.Equal(buf[pos:pos+4], []byte("fLaC")) {
 		if pos+4 > maxLen {
-			return nil, false, fmt.Errorf("ID3v2 tag larger than the header limit: %w", errNotFLAC)
+			return nil, false, fmt.Errorf("ID3v2 tag larger than the header limit: %w", ErrNotFLAC)
 		}
-		return nil, false, errNotFLAC
+		return nil, false, ErrNotFLAC
 	}
 	pos += 4
 
@@ -102,17 +104,17 @@ func flacHeader(fetch fetchFunc, size, maxLen int64) (header []byte, complete bo
 			if pos+4 > maxLen {
 				return buf[:min(int64(len(buf)), maxLen)], false, nil
 			}
-			return nil, false, fmt.Errorf("file ends inside FLAC metadata: %w", errNotFLAC)
+			return nil, false, fmt.Errorf("file ends inside FLAC metadata: %w", ErrNotFLAC)
 		}
 		last := buf[pos]&0x80 != 0
 		blockType := buf[pos] & 0x7f
 		length := int64(buf[pos+1])<<16 | int64(buf[pos+2])<<8 | int64(buf[pos+3])
 		if blockType == 127 {
-			return nil, false, fmt.Errorf("invalid FLAC metadata block type: %w", errNotFLAC)
+			return nil, false, fmt.Errorf("invalid FLAC metadata block type: %w", ErrNotFLAC)
 		}
 		pos += 4 + length
 		if pos > size {
-			return nil, false, fmt.Errorf("FLAC metadata block runs past end of file: %w", errNotFLAC)
+			return nil, false, fmt.Errorf("FLAC metadata block runs past end of file: %w", ErrNotFLAC)
 		}
 		if last {
 			if pos > maxLen {
@@ -125,10 +127,10 @@ func flacHeader(fetch fetchFunc, size, maxLen int64) (header []byte, complete bo
 				return nil, false, err
 			}
 			if int64(len(buf)) < pos {
-				return nil, false, fmt.Errorf("short read of FLAC metadata: %w", errNotFLAC)
+				return nil, false, fmt.Errorf("short read of FLAC metadata: %w", ErrNotFLAC)
 			}
 			return buf[:pos], true, nil
 		}
 	}
-	return nil, false, fmt.Errorf("more than %d FLAC metadata blocks: %w", maxBlocks, errNotFLAC)
+	return nil, false, fmt.Errorf("more than %d FLAC metadata blocks: %w", maxBlocks, ErrNotFLAC)
 }

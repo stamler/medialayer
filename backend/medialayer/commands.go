@@ -12,6 +12,8 @@ import (
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/hash"
 	"github.com/rclone/rclone/fs/walk"
+
+	"github.com/stamler/medialayer/internal/media"
 )
 
 var commandHelp = []fs.CommandHelp{{
@@ -129,7 +131,7 @@ func (f *Fs) prime(ctx context.Context, dir string) (*primeResult, error) {
 					bytesRead.Add(int64(len(buf)))
 					return buf, err
 				}
-				header, complete, err := flacHeader(fetch, base.Size(), int64(f.opt.MaxHeader))
+				header, complete, err := media.FLACHeader(fetch, base.Size(), int64(f.opt.MaxHeader))
 				if err == nil && complete {
 					if want := f.storeLen(int64(len(header)), base.Size()); want > int64(len(header)) {
 						more, ferr := fetch(int64(len(header)), want-int64(len(header)))
@@ -144,7 +146,7 @@ func (f *Fs) prime(ctx context.Context, dir string) (*primeResult, error) {
 						}
 					}
 				}
-				if errors.Is(err, errNotFLAC) {
+				if errors.Is(err, media.ErrNotFLAC) {
 					notMedia.Add(1)
 					fs.Debugf(base, "medialayer: not primed: %v", err)
 					continue

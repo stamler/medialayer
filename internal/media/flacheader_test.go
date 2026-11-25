@@ -1,4 +1,4 @@
-package medialayer
+package media
 
 import (
 	"bytes"
@@ -61,7 +61,7 @@ func typicalBlocks(pictureSize int) []flacBlock {
 }
 
 // fetcherFor serves reads from file and counts them.
-func fetcherFor(file []byte, calls *int) fetchFunc {
+func fetcherFor(file []byte, calls *int) FetchFunc {
 	return func(offset, length int64) ([]byte, error) {
 		*calls++
 		end := min(offset+length, int64(len(file)))
@@ -75,7 +75,7 @@ func fetcherFor(file []byte, calls *int) fetchFunc {
 func TestFLACHeaderSmallMetadataInOneRead(t *testing.T) {
 	file, audioStart := makeFLAC(t, 0, typicalBlocks(10_000), randomBytes(500_000, 3))
 	var calls int
-	header, complete, err := flacHeader(fetcherFor(file, &calls), int64(len(file)), 16<<20)
+	header, complete, err := FLACHeader(fetcherFor(file, &calls), int64(len(file)), 16<<20)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,7 +90,7 @@ func TestFLACHeaderSmallMetadataInOneRead(t *testing.T) {
 func TestFLACHeaderLargePictureNeedsOneMoreRead(t *testing.T) {
 	file, audioStart := makeFLAC(t, 0, typicalBlocks(700_000), randomBytes(500_000, 3))
 	var calls int
-	header, complete, err := flacHeader(fetcherFor(file, &calls), int64(len(file)), 16<<20)
+	header, complete, err := FLACHeader(fetcherFor(file, &calls), int64(len(file)), 16<<20)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -105,7 +105,7 @@ func TestFLACHeaderLargePictureNeedsOneMoreRead(t *testing.T) {
 func TestFLACHeaderSkipsID3v2Prefix(t *testing.T) {
 	file, audioStart := makeFLAC(t, 3000, typicalBlocks(1000), randomBytes(100_000, 3))
 	var calls int
-	header, complete, err := flacHeader(fetcherFor(file, &calls), int64(len(file)), 16<<20)
+	header, complete, err := FLACHeader(fetcherFor(file, &calls), int64(len(file)), 16<<20)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -118,7 +118,7 @@ func TestFLACHeaderTruncatesAtMaxLen(t *testing.T) {
 	file, _ := makeFLAC(t, 0, typicalBlocks(700_000), randomBytes(500_000, 3))
 	const maxLen = 300_000
 	var calls int
-	header, complete, err := flacHeader(fetcherFor(file, &calls), int64(len(file)), maxLen)
+	header, complete, err := FLACHeader(fetcherFor(file, &calls), int64(len(file)), maxLen)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -139,9 +139,9 @@ func TestFLACHeaderRejectsOtherFiles(t *testing.T) {
 	for name, file := range tests {
 		t.Run(name, func(t *testing.T) {
 			var calls int
-			_, _, err := flacHeader(fetcherFor(file, &calls), int64(len(file)), 16<<20)
-			if !errors.Is(err, errNotFLAC) {
-				t.Fatalf("err = %v, want errNotFLAC", err)
+			_, _, err := FLACHeader(fetcherFor(file, &calls), int64(len(file)), 16<<20)
+			if !errors.Is(err, ErrNotFLAC) {
+				t.Fatalf("err = %v, want ErrNotFLAC", err)
 			}
 		})
 	}
@@ -151,9 +151,9 @@ func TestFLACHeaderRejectsBlockPastEndOfFile(t *testing.T) {
 	file, _ := makeFLAC(t, 0, typicalBlocks(1000), nil)
 	file = file[:len(file)-100] // cut into the padding block
 	var calls int
-	_, _, err := flacHeader(fetcherFor(file, &calls), int64(len(file)), 16<<20)
-	if !errors.Is(err, errNotFLAC) {
-		t.Fatalf("err = %v, want errNotFLAC", err)
+	_, _, err := FLACHeader(fetcherFor(file, &calls), int64(len(file)), 16<<20)
+	if !errors.Is(err, ErrNotFLAC) {
+		t.Fatalf("err = %v, want ErrNotFLAC", err)
 	}
 }
 
@@ -163,8 +163,8 @@ func TestFLACHeaderShortReadIsAnError(t *testing.T) {
 	short := func(offset, length int64) ([]byte, error) {
 		return file[offset : offset+length/2], nil
 	}
-	_, _, err := flacHeader(short, int64(len(file)), 16<<20)
-	if err == nil || errors.Is(err, errNotFLAC) {
-		t.Fatalf("err = %v, want a read error that is not errNotFLAC", err)
+	_, _, err := FLACHeader(short, int64(len(file)), 16<<20)
+	if err == nil || errors.Is(err, ErrNotFLAC) {
+		t.Fatalf("err = %v, want a read error that is not ErrNotFLAC", err)
 	}
 }
