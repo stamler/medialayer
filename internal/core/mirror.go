@@ -743,7 +743,11 @@ func (c *Core) mirror(ctx context.Context, f fs.Fs, src *listing, repo *repoReco
 		}
 		t.member = member
 	}
-	c.setJob(func(j *jobStatus) { j.Done, j.Total, j.Current = 0, int64(len(copies)+changes), "" })
+	// Progress counts the whole library, so a resumed copy carries on
+	// from the files already there rather than starting again at 0.
+	todo := len(copies) + changes
+	total := len(src.files) - len(skip) + len(deletes)
+	c.setJob(func(j *jobStatus) { j.Done, j.Total, j.Current = int64(total-todo), int64(total), "" })
 	// One trash folder per sync, unique even within a second.
 	stamp := time.Now().UTC().Format(trashStamp) + "-" + strings.ToLower(index.NewID()[20:])
 	toTrash := func(o fs.Object) error {
