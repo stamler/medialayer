@@ -281,7 +281,7 @@ struct Scrubber: View {
 }
 
 /// Liquid Glass on macOS 26, a material before it.
-struct TransportBackground<S: Shape>: ViewModifier {
+struct TransportBackground<S: InsettableShape>: ViewModifier {
     let shape: S
 
     func body(content: Content) -> some View {
@@ -458,7 +458,7 @@ struct StatusBar: View {
         HStack {
             jobText.foregroundStyle(.secondary)
             Spacer()
-            Text("\(tracks.count) songs, \(formatLong(ms)), \(ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file))")
+            Text("\(tracks.count) \(tracks.count == 1 ? "song" : "songs"), \(formatLong(ms)), \(ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file))")
             Spacer()
             if let l = clock.startLatency {
                 Text(String(format: "started in %.1f s", l)).foregroundStyle(.secondary)
