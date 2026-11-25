@@ -2,7 +2,12 @@ module github.com/stamler/medialayer
 
 go 1.26.0
 
-require github.com/rclone/rclone v1.76.0
+require (
+	github.com/oklog/ulid/v2 v2.1.2
+	github.com/rclone/rclone v1.76.0
+	golang.org/x/text v0.43.0
+	modernc.org/sqlite v1.53.0
+)
 
 require (
 	bazil.org/fuse v0.0.0-20230120002735-62a210ff1fd5 // indirect
@@ -167,7 +172,6 @@ require (
 	github.com/ncw/swift/v2 v2.0.5 // indirect
 	github.com/nwaples/rardecode/v2 v2.2.5 // indirect
 	github.com/nxadm/tail v1.4.11 // indirect
-	github.com/oklog/ulid/v2 v2.1.2 // indirect
 	github.com/oracle/oci-go-sdk/v65 v65.127.0 // indirect
 	github.com/panjf2000/ants/v2 v2.12.1 // indirect
 	github.com/patrickmn/go-cache v2.1.0+incompatible // indirect
@@ -244,7 +248,6 @@ require (
 	golang.org/x/sync v0.24.0 // indirect
 	golang.org/x/sys v0.49.0 // indirect
 	golang.org/x/term v0.47.0 // indirect
-	golang.org/x/text v0.43.0 // indirect
 	golang.org/x/time v0.16.0 // indirect
 	golang.org/x/tools v0.52.0 // indirect
 	google.golang.org/api v0.304.0 // indirect
@@ -258,7 +261,6 @@ require (
 	modernc.org/libc v1.73.4 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
-	modernc.org/sqlite v1.53.0 // indirect
 	moul.io/http2curl/v2 v2.3.0 // indirect
 	sigs.k8s.io/yaml v1.6.0 // indirect
 	storj.io/common v0.0.0-20260818140313-d38275a3768b // indirect

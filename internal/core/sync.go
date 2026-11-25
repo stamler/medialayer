@@ -47,6 +47,7 @@ type Status struct {
 	// Accounts are the connected Google accounts (rclone remotes), the
 	// primary's first.
 	Accounts []string `json:"accounts"`
+	Notice   string   `json:"notice,omitempty"`
 }
 
 // Status returns the current state.
@@ -63,6 +64,7 @@ func (c *Core) Status() Status {
 	s.Job.Failures = append([]string(nil), c.job.Failures...)
 	s.Sources = c.sourcesLocked()
 	s.Accounts = driveAccounts()
+	s.Notice = c.notice
 	if s.Job.Phase == "" {
 		s.Job.Phase = PhaseIdle
 	}
@@ -96,6 +98,7 @@ func (c *Core) StartSync() error {
 	ctx, cancel := context.WithCancel(context.Background())
 	c.jobDone, c.cancel = done, cancel
 	c.job = jobStatus{Phase: PhaseOpening, Started: time.Now()}
+	c.notice = ""
 	go func() {
 		defer close(done)
 		err := c.sync(ctx)

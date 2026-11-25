@@ -20,6 +20,7 @@ import (
 	"github.com/rclone/rclone/fs/config"
 	"github.com/rclone/rclone/fs/operations"
 	"github.com/rclone/rclone/fs/walk"
+	"golang.org/x/text/unicode/norm"
 
 	"github.com/stamler/medialayer/internal/index"
 )
@@ -266,6 +267,7 @@ func (c *Core) dropSecondaries() error {
 		return nil
 	}
 	fs.Logf(nil, "the primary has no repo.json any more; secondaries need adding again")
+	c.notice = "The primary folder had lost its .medialayer, so its secondaries were set aside. Add them again to keep copying to them."
 	c.settings.Secondaries, c.mirrors = nil, nil
 	return c.saveSettings()
 }
@@ -289,7 +291,7 @@ type listing struct {
 	// library inside it, or a folder that holds the primary. probes are
 	// the probe files seen in those.
 	nested bool
-	probes map[string]bool
+	probes map[string]string // file name -> path
 }
 
 // systemName reports names that the operating system keeps in folders,
@@ -307,7 +309,7 @@ func systemName(base string) bool {
 // missingOK, as for a secondary not yet written to, and an error
 // otherwise.
 func listLibrary(ctx context.Context, f fs.Fs, missingOK bool) (*listing, error) {
-	l := &listing{files: map[string]fs.Object{}, dupes: map[string]bool{}, probes: map[string]bool{}}
+	l := &listing{files: map[string]fs.Object{}, dupes: map[string]bool{}, probes: map[string]string{}}
 	// Check first, as walk logs a missing folder as an error.
 	if _, err := f.List(ctx, ""); errors.Is(err, fs.ErrorDirNotFound) {
 		if missingOK {
@@ -331,7 +333,7 @@ func listLibrary(ctx context.Context, f fs.Fs, missingOK bool) (*listing, error)
 				if part == repoDir {
 					l.nested = true
 					if i+2 < len(parts) && parts[i+1] == "probe" {
-						l.probes[parts[len(parts)-1]] = true
+						l.probes[parts[len(parts)-1]] = r
 					}
 					continue next
 				}
@@ -363,6 +365,9 @@ type target struct {
 	dst   fs.Fs
 	have  *listing
 	probe string // its probe file, under .medialayer/probe/
+	// writeMember is set until the folder has a member.json for this
+	// library, which is written before the first copy.
+	writeMember bool
 }
 
 // mirrorAll brings every secondary up to date with the primary f. A
@@ -438,9 +443,16 @@ func (c *Core) mirrorAll(ctx context.Context, f fs.Fs) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if src.probes[path.Base(t.probe)] {
-			fail(t.s, errors.New("this folder is inside the primary; pick one outside it"))
-			continue
+		if p, ok := src.probes[path.Base(t.probe)]; ok {
+			b, err := readSmall(ctx, f, p)
+			if err != nil && !absent(err) {
+				fail(t.s, err)
+				continue
+			}
+			if string(b) == run {
+				fail(t.s, errors.New("this folder is inside the primary; pick one outside it"))
+				continue
+			}
 		}
 		c.setMirror(t.s.ID, func(m *mirrorState) { m.state, m.err = MirrorSyncing, "" })
 		err := c.mirror(ctx, f, src, repo, t)
@@ -466,7 +478,11 @@ func (c *Core) check(ctx context.Context, s source, repo *repoRecord, device, ru
 		return t, err
 	}
 	t.dst = dst
-	if b, err := readSmall(ctx, dst, repoDir+"/probe/"+device); err == nil && string(b) == run {
+	b, err := readSmall(ctx, dst, repoDir+"/probe/"+device)
+	if err != nil && !absent(err) {
+		return t, err // can't tell whether it's the primary
+	}
+	if err == nil && string(b) == run {
 		return t, errors.New("this folder is the primary itself")
 	}
 	have, err := listLibrary(ctx, dst, true)
@@ -474,7 +490,7 @@ func (c *Core) check(ctx context.Context, s source, repo *repoRecord, device, ru
 		return t, fmt.Errorf("list %s: %w", s.Folder, err)
 	}
 	t.have = have
-	if have.probes[device] {
+	if _, ok := have.probes[device]; ok {
 		return t, errors.New("this folder holds the primary; pick one outside it")
 	}
 	if have.nested {
@@ -491,6 +507,8 @@ func (c *Core) check(ctx context.Context, s source, repo *repoRecord, device, ru
 		if err := json.Unmarshal(b, &mine); err != nil {
 			return t, fmt.Errorf("member.json: %w", err)
 		}
+	} else if !absent(err) {
+		return t, err
 	}
 	switch {
 	case theirs == nil && mine.LibraryID != "" && mine.LibraryID != repo.LibraryID:
@@ -506,13 +524,13 @@ func (c *Core) check(ctx context.Context, s source, repo *repoRecord, device, ru
 	if err := putBytes(ctx, dst, t.probe, []byte(run)); err != nil {
 		return t, fmt.Errorf("write a probe file: %w", err)
 	}
-	if mine.LibraryID != repo.LibraryID {
-		b, _ := json.Marshal(memberRecord{LibraryID: repo.LibraryID, Replica: s.ID})
-		if err := putBytes(ctx, dst, repoDir+"/member.json", b); err != nil {
-			return t, err
-		}
-	}
+	t.writeMember = mine.LibraryID != repo.LibraryID
 	return t, nil
+}
+
+// absent reports errors that mean a file or folder isn't there.
+func absent(err error) bool {
+	return errors.Is(err, fs.ErrorObjectNotFound) || errors.Is(err, fs.ErrorDirNotFound)
 }
 
 // memberRecord is a secondary's .medialayer/member.json: which library
@@ -587,49 +605,41 @@ func planSignature(lines []string) string {
 // are src.
 func (c *Core) mirror(ctx context.Context, f fs.Fs, src *listing, repo *repoRecord, t target) error {
 	dst, have, s := t.dst, t.have, t.s
-	// Paths the primary lists twice (Drive) are left alone on both sides
-	// until fixed there, as are paths a case-blind local disk can't hold
-	// apart.
+	// Paths are matched in Unicode NFC, as HFS+ disks keep names
+	// decomposed and Drive composed, and on local disks also by case, as
+	// a case-blind disk keeps a folder's old case when the primary renames
+	// it by case only.
+	key := func(p string) string { return norm.NFC.String(p) }
+	if s.Remote == "" {
+		key = func(p string) string { return strings.ToLower(norm.NFC.String(p)) }
+	}
+	// Paths the primary lists twice (Drive), or twice under one key, are
+	// left alone on both sides until fixed there.
 	skip := map[string]bool{}
+	srcKeys := map[string]string{}
+	for p := range src.files {
+		k := key(p)
+		if q, ok := srcKeys[k]; ok {
+			skip[k] = true
+			fs.Errorf(nil, "secondary %s: skipped %s and %s, which it can't keep apart", s.Folder, p, q)
+		}
+		srcKeys[k] = p
+	}
 	for p := range src.dupes {
-		skip[p] = true
+		skip[key(p)] = true
+		fs.Errorf(nil, "secondary %s: skipped %s, which the primary lists twice", s.Folder, p)
 	}
-	if s.Remote == "" {
-		folded := map[string]string{}
-		for p := range src.files {
-			k := strings.ToLower(p)
-			if q, ok := folded[k]; ok {
-				skip[p], skip[q] = true, true
-			}
-			folded[k] = p
-		}
+	haveKeys := map[string]fs.Object{}
+	for p, d := range have.files {
+		haveKeys[key(p)] = d
 	}
-	for p := range skip {
-		fs.Errorf(nil, "secondary %s: skipped %s, which the primary lists twice or only by case", s.Folder, p)
-	}
-
-	// A case-blind local disk keeps a folder's old case when the primary
-	// renames it by case only; match such paths as the same file.
-	lookup := func(p string) (fs.Object, bool) { d, ok := have.files[p]; return d, ok }
-	inSrc := func(p string) bool { _, ok := src.files[p]; return ok }
-	if s.Remote == "" {
-		haveFold := map[string]fs.Object{}
-		for p, d := range have.files {
-			haveFold[strings.ToLower(p)] = d
-		}
-		srcFold := map[string]bool{}
-		for p := range src.files {
-			srcFold[strings.ToLower(p)] = true
-		}
-		lookup = func(p string) (fs.Object, bool) { d, ok := haveFold[strings.ToLower(p)]; return d, ok }
-		inSrc = func(p string) bool { return srcFold[strings.ToLower(p)] }
-	}
+	lookup := func(p string) (fs.Object, bool) { d, ok := haveKeys[key(p)]; return d, ok }
 
 	var copies, replaces []string
 	var deletes []fs.Object
 	var lines []string
 	for p, o := range src.files {
-		if skip[p] {
+		if skip[key(p)] {
 			continue
 		}
 		d, ok := lookup(p)
@@ -642,13 +652,13 @@ func (c *Core) mirror(ctx context.Context, f fs.Fs, src *listing, repo *repoReco
 		}
 	}
 	for p, d := range have.files {
-		if !inSrc(p) && !skip[p] {
+		if _, ok := srcKeys[key(p)]; !ok {
 			deletes = append(deletes, d)
 			lines = append(lines, "D "+p)
 		}
 	}
 	for _, d := range have.extra {
-		if !skip[d.Remote()] {
+		if !skip[key(d.Remote())] {
 			deletes = append(deletes, d)
 			lines = append(lines, "D "+d.Remote()+" (duplicate)")
 		}
@@ -665,6 +675,12 @@ func (c *Core) mirror(ctx context.Context, f fs.Fs, src *listing, repo *repoReco
 		return nil
 	}
 
+	if t.writeMember {
+		b, _ := json.Marshal(memberRecord{LibraryID: repo.LibraryID, Replica: s.ID})
+		if err := putBytes(ctx, dst, repoDir+"/member.json", b); err != nil {
+			return err
+		}
+	}
 	c.setJob(func(j *jobStatus) { j.Done, j.Total, j.Current = 0, int64(len(copies)+changes), "" })
 	// One trash folder per sync, unique even within a second.
 	stamp := time.Now().UTC().Format(trashStamp) + "-" + strings.ToLower(index.NewID()[20:])

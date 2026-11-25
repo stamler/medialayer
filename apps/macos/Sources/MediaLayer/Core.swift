@@ -41,6 +41,7 @@ struct CoreStatus: Decodable, Equatable {
     var job = Job()
     var sources: [Source]? = []
     var accounts: [String]? = []
+    var notice: String?
     var error: String?
 
     var isBusy: Bool { ["opening", "listing", "indexing", "publishing", "mirroring"].contains(job.phase) }

@@ -48,6 +48,7 @@ type Core struct {
 	// syncs in this session don't download them again.
 	badCovers map[string]bool
 	mirrors   map[string]*mirrorState // by secondary id
+	notice    string                  // something the user should know, until the next sync
 	stream    *streamServer
 }
 

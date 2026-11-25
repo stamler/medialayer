@@ -515,7 +515,8 @@ struct StatusBar: View {
             case "error": Text("Update failed: \(j.error ?? "")").foregroundStyle(.red).help(j.error ?? "")
             case "done" where j.failed > 0:
                 Text("\(j.failed) files could not be read").help((j.failures ?? []).joined(separator: "\n"))
-            default: EmptyView()
+            default:
+                if let n = model.status.notice { Text(n).foregroundStyle(.orange).help(n) }
             }
         }
     }

@@ -401,3 +401,23 @@ func TestMirrorResumesCutShortFirstCopy(t *testing.T) {
 		t.Error("repo.json was not written")
 	}
 }
+
+func TestMirrorMatchesDecomposedNames(t *testing.T) {
+	ctx := context.Background()
+	c, lib, sec := newMirrorCore(t)
+	composed, decomposed := "Extras/Caf\u00e9.txt", "Extras/Cafe\u0301.txt"
+	write(t, filepath.Join(lib, composed), []byte("same"))
+	if err := c.sync(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// As an HFS+ disk keeps the name.
+	if err := os.Rename(filepath.Join(sec, composed), filepath.Join(sec, decomposed)); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.sync(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if s := mirrorOf(t, c, "sec1"); s.State != MirrorSynced || s.Copies+s.Deletes+s.Replaces != 0 {
+		t.Errorf("secondary = %+v, want nothing to do", s)
+	}
+}
