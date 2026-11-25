@@ -79,8 +79,9 @@ the primary. No command line.
    its cloud and highlights the primary. Gate: a secondary built from
    scratch matches the primary file for file, a mass change pauses and
    asks, and switching the primary works. The proof of concept does the
-   one-way sync, trash, pause and generation check; the sync lease, the
-   5% limit counted per day and switching the primary come next. How it
+   one-way sync, trash, pause, generation check and switching the primary
+   (Make Primary); the sync lease, the 5% limit counted per day, and
+   Proton and SMB sources come next. How it
    works now: [sync.md](sync.md).
 5. **macOS desktop features.** Menu bar control, cache cap with offline
    albums, write-mode toggle, the optional Tauon mount, a notarized build
