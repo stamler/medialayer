@@ -25,9 +25,10 @@ cp "$app/build/libmlcore.h" "$app/Sources/CMLCore/include/libmlcore.h"
 echo "Building the app..."
 # SwiftPM doesn't track libmlcore.a as an input, so it wouldn't relink
 # after a Go-only change; remove the old binary to force it.
-rm -f "$(cd "$app" && swift build -c "$config" --show-bin-path)/MediaLayer"
+binpath=$(cd "$app" && swift build -c "$config" --show-bin-path)
+bin="$binpath/MediaLayer"
+rm -f "$bin"
 (cd "$app" && swift build -c "$config" -Xlinker -L"$app/build")
-bin=$(cd "$app" && swift build -c "$config" --show-bin-path)/MediaLayer
 
 bundle="$app/MediaLayer.app"
 rm -rf "$bundle"

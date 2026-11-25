@@ -378,8 +378,8 @@ func (c *Core) folderArt(ctx context.Context, db *index.DB, pack *artPack, image
 	return nil
 }
 
-// badImageError is a folder image that can never be a cover: too large or
-// not decodable.
+// badImageError is a folder image that can't be a cover: too large, not
+// decodable, or (notCover) not shaped like one.
 type badImageError struct {
 	error
 	notCover bool // readable, but not shaped like a cover
