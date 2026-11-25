@@ -37,6 +37,17 @@ the primary. No command line.
   secondary outside MediaLayer is moved to trash and replaced from the
   primary. One device syncs at a time, holding a lease in the primary's
   `.medialayer`.
+- Every cloud's `.medialayer` holds the library's metadata and database
+  plus a primary record: library id, which cloud is primary, a generation
+  number raised on every change of primary (with time and device), and the
+  member clouds. The highest generation wins, so clock skew can't pick the
+  wrong primary. Connecting a secondary first shows where the primary is
+  and offers "connect the primary" (recommended) or "make this the
+  primary"; meanwhile the library plays read-only from the secondary. If
+  two offline devices promote different clouds to the same generation,
+  the later time then the higher device id wins everywhere, and the user is
+  warned. A replaced primary's late changes are kept in trash and flagged,
+  never synced over the new primary.
 
 ## Next
 
