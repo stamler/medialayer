@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 @main
@@ -19,6 +20,8 @@ struct MediaLayerApp: App {
                     .disabled(model.status.folder.isEmpty || model.status.isBusy)
                 Button("Choose Music Folder…") { model.choosingFolder = true }
                     .disabled(!model.status.connected || model.status.isBusy)
+                Button("Add Source…") { model.addingSource = true }
+                    .disabled(model.status.folder.isEmpty || model.status.isBusy)
             }
             CommandMenu("Controls") {
                 Button("Play/Pause") { model.player.toggle() }
@@ -82,8 +85,30 @@ struct ConnectView: View {
     }
 }
 
+/// Picks the primary music folder.
 struct FolderPicker: View {
     @EnvironmentObject var model: AppModel
+
+    var body: some View {
+        DriveFolderPicker(
+            title: "Pick your music folder",
+            message: "MediaLayer reads tags and covers from this folder and keeps its index in a hidden .medialayer folder inside it.",
+            onCancel: model.choosingFolder ? { model.choosingFolder = false } : nil
+        ) { folder in
+            try model.useFolder(folder)
+            model.choosingFolder = false
+        }
+    }
+}
+
+/// Browses the folders of a Google account and picks one.
+struct DriveFolderPicker: View {
+    var remote = "" // "" for the primary's account
+    let title: String
+    let message: String
+    var onCancel: (() -> Void)?
+    let onPick: (String) throws -> Void
+
     @State private var path: [String] = [] // folder names from the top of My Drive
     @State private var folders: [String] = []
     @State private var loading = false
@@ -93,9 +118,8 @@ struct FolderPicker: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Pick your music folder").font(.title)
-            Text("MediaLayer reads tags and covers from this folder and keeps its index in a hidden .medialayer folder inside it.")
-                .foregroundStyle(.secondary)
+            Text(title).font(.title)
+            Text(message).foregroundStyle(.secondary)
             HStack(spacing: 4) {
                 Button("My Drive") { path = [] }.buttonStyle(.link)
                 ForEach(path.indices, id: \.self) { i in
@@ -114,15 +138,10 @@ struct FolderPicker: View {
             .overlay { if loading { ProgressView() } }
             if let error { Text(error).foregroundStyle(.red).textSelection(.enabled) }
             HStack {
-                if model.choosingFolder {
-                    Button("Cancel") { model.choosingFolder = false }
-                }
+                if let onCancel { Button("Cancel", action: onCancel).keyboardShortcut(.cancelAction) }
                 Spacer()
                 Button("Use “\(path.last ?? "My Drive")”") {
-                    do {
-                        try model.useFolder(current)
-                        model.choosingFolder = false
-                    } catch { self.error = error.localizedDescription }
+                    do { try onPick(current) } catch { self.error = error.localizedDescription }
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(path.isEmpty)
@@ -135,7 +154,7 @@ struct FolderPicker: View {
             error = nil
             let dir = current
             do {
-                let list = try await Core.listFolders(in: dir)
+                let list = try await Core.listFolders(remote: remote, in: dir)
                 guard !Task.isCancelled else { return } // the user moved on
                 folders = list
             } catch {
@@ -168,6 +187,7 @@ struct LibraryView: View {
                 }
         }
         .safeAreaInset(edge: .bottom, spacing: 0) { StatusBar(tracks: visible) }
+        .sheet(isPresented: $model.addingSource) { AddSourceSheet() }
         .toolbar {
             ToolbarItemGroup(placement: .navigation) { TransportControls() }
             NowPlayingItem()
@@ -462,8 +482,9 @@ struct StatusBar: View {
     var body: some View {
         let ms = tracks.reduce(Int64(0)) { $0 + $1.durationMS }
         let bytes = tracks.reduce(Int64(0)) { $0 + $1.size }
-        HStack {
-            jobText.foregroundStyle(.secondary)
+        HStack(spacing: 10) {
+            SourcesBar()
+            jobText.foregroundStyle(.secondary).lineLimit(1)
             Spacer()
             Text("\(tracks.count) \(tracks.count == 1 ? "song" : "songs"), \(formatLong(ms)), \(ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file))")
             Spacer()
@@ -488,10 +509,13 @@ struct StatusBar: View {
             case "listing": Text("Listing \(model.status.folder)… \(j.done) files")
             case "indexing": Text("Indexing \(j.done) of \(j.total)" + (j.failed > 0 ? ", \(j.failed) failed" : ""))
             case "publishing": Text("Saving the library to Google Drive…")
+            case "mirroring":
+                let s = model.status.sources?.first { $0.state == "syncing" }
+                Text("Copying to \(s?.name ?? "secondaries")…" + (j.total > 0 ? " \(j.done) of \(j.total)" : ""))
             case "error": Text("Update failed: \(j.error ?? "")").foregroundStyle(.red).help(j.error ?? "")
             case "done" where j.failed > 0:
                 Text("\(j.failed) files could not be read").help((j.failures ?? []).joined(separator: "\n"))
-            default: Text(model.status.folder)
+            default: EmptyView()
             }
         }
     }
@@ -508,4 +532,253 @@ func formatLong(_ ms: Int64) -> String {
     if minutes < 60 { return "\(minutes) minutes" }
     let hours = Double(minutes) / 60
     return hours < 48 ? String(format: "%.1f hours", hours) : String(format: "%.1f days", hours / 24)
+}
+
+// MARK: - Sources
+
+/// The library's folders, in the status bar: an icon for each folder's
+/// cloud, the primary highlighted, and the state of each secondary.
+struct SourcesBar: View {
+    @EnvironmentObject var model: AppModel
+    @State private var approving: CoreStatus.Source?
+    @State private var error: String?
+
+    var body: some View {
+        HStack(spacing: 4) {
+            ForEach(model.status.sources ?? []) { source in
+                chip(source)
+            }
+            Button { model.addingSource = true } label: {
+                Image(systemName: "plus").font(.caption.weight(.semibold))
+            }
+            .buttonStyle(.borderless)
+            .foregroundStyle(.secondary)
+            .disabled(model.status.isBusy)
+            .help("Add a folder that keeps a copy of the library")
+        }
+        .confirmationDialog(approving.map { "Apply changes to “\($0.name)”?" } ?? "",
+                            isPresented: Binding(get: { approving != nil }, set: { if !$0 { approving = nil } }),
+                            presenting: approving) { source in
+            Button("Apply Changes", role: .destructive) {
+                do { try model.approveChanges(source.id) } catch { self.error = error.localizedDescription }
+            }
+        } message: { source in
+            Text(approvalMessage(source))
+        }
+        .alert("Couldn't change the source", isPresented: Binding(get: { error != nil }, set: { if !$0 { error = nil } })) {
+        } message: { Text(error ?? "") }
+    }
+
+    private func chip(_ source: CoreStatus.Source) -> some View {
+        HStack(spacing: 4) {
+            SourceIcon(type: source.type)
+            Text(source.name).fontWeight(source.primary ? .semibold : .regular)
+            if !source.primary { badge(source) }
+        }
+        .padding(.horizontal, 7)
+        .padding(.vertical, 2)
+        .foregroundStyle(source.primary ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary))
+        .background {
+            if source.primary { Capsule().fill(.tint.opacity(0.15)) }
+        }
+        .contentShape(Capsule())
+        .help(help(source))
+        .contextMenu {
+            if source.state == "paused" {
+                Button("Review Changes…") { approving = source }
+            }
+            if !source.primary {
+                Button("Stop Syncing to “\(source.name)”") {
+                    do { try model.removeSecondary(source.id) } catch { self.error = error.localizedDescription }
+                }
+                .disabled(model.status.isBusy)
+            }
+        }
+        .onTapGesture { if source.state == "paused" { approving = source } }
+    }
+
+    @ViewBuilder private func badge(_ source: CoreStatus.Source) -> some View {
+        switch source.state {
+        case "syncing": ProgressView().controlSize(.mini)
+        case "paused": Image(systemName: "pause.circle.fill").foregroundStyle(.orange)
+        case "error": Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.red)
+        case "synced": Image(systemName: "checkmark").font(.caption2).foregroundStyle(.tertiary)
+        default: EmptyView()
+        }
+    }
+
+    private func help(_ s: CoreStatus.Source) -> String {
+        let place = "\(SourceIcon.label(s.type)): \(s.folder)"
+        if s.primary { return "Primary, the library's source of truth. \(place)" }
+        switch s.state {
+        case "paused": return "Paused: \(approvalMessage(s)) Click to review. \(place)"
+        case "error": return "Couldn't sync: \(s.error ?? ""). \(place)"
+        case "syncing": return "Copying from the primary. \(place)"
+        case "synced": return "Copy of the primary, up to date. \(place)"
+        default: return "Copy of the primary. \(place)"
+        }
+    }
+
+    private func approvalMessage(_ s: CoreStatus.Source) -> String {
+        var parts: [String] = []
+        if s.deletes > 0 { parts.append("move \(s.deletes) files that are no longer on the primary to its trash") }
+        if s.replaces > 0 { parts.append("replace \(s.replaces) files that differ, keeping the old ones in its trash") }
+        if s.copies > 0 { parts.append("copy \(s.copies) new files") }
+        return "This sync would " + parts.joined(separator: ", ") + ". The trash keeps files for 30 days."
+    }
+}
+
+/// An icon for a source's cloud.
+struct SourceIcon: View {
+    let type: String
+    var size: CGFloat = 12
+
+    var body: some View {
+        if type == "drive" {
+            DriveGlyph().stroke(style: StrokeStyle(lineWidth: 1.3, lineJoin: .round))
+                .frame(width: size, height: size * 0.87)
+        } else {
+            Image(systemName: Self.symbol(type)).font(.system(size: size * 0.95))
+        }
+    }
+
+    static func symbol(_ type: String) -> String {
+        switch type {
+        case "local": "externaldrive"
+        case "iclouddrive": "icloud"
+        case "protondrive": "lock.icloud"
+        case "dropbox": "shippingbox"
+        case "smb": "server.rack"
+        default: "cloud"
+        }
+    }
+
+    static func label(_ type: String) -> String {
+        switch type {
+        case "drive": "Google Drive"
+        case "local": "Folder on this Mac"
+        case "iclouddrive": "iCloud Drive"
+        case "protondrive": "Proton Drive"
+        case "dropbox": "Dropbox"
+        case "smb": "Network share"
+        default: type
+        }
+    }
+}
+
+/// A plain triangle of three bands, standing for Google Drive.
+struct DriveGlyph: Shape {
+    func path(in r: CGRect) -> Path {
+        var p = Path()
+        let top = CGPoint(x: r.midX, y: r.minY)
+        let left = CGPoint(x: r.minX, y: r.maxY)
+        let right = CGPoint(x: r.maxX, y: r.maxY)
+        p.move(to: top)
+        p.addLine(to: right)
+        p.addLine(to: left)
+        p.closeSubpath()
+        // The inner triangle that splits it into three bands.
+        let a = CGPoint(x: r.minX + r.width * 0.25, y: r.midY)
+        let b = CGPoint(x: r.maxX - r.width * 0.25, y: r.midY)
+        let c = CGPoint(x: r.midX, y: r.maxY)
+        p.move(to: a)
+        p.addLine(to: b)
+        p.addLine(to: c)
+        p.closeSubpath()
+        return p
+    }
+}
+
+/// Adds a secondary: a folder on a Google account or on this Mac, which
+/// then gets a copy of the library and follows the primary.
+struct AddSourceSheet: View {
+    @EnvironmentObject var model: AppModel
+    @Environment(\.dismiss) private var dismiss
+    @State private var account: String? // the remote whose folders to browse
+    @State private var working = false
+    @State private var error: String?
+
+    var body: some View {
+        if let account {
+            DriveFolderPicker(
+                remote: account,
+                title: "Pick the folder for the copy",
+                message: "MediaLayer copies the library here and keeps it in step with the primary, one way. Files it removes or replaces go to the folder's .medialayer/trash for 30 days.",
+                onCancel: { self.account = nil }
+            ) { folder in
+                try model.addSecondary(remote: account, folder: folder)
+                dismiss()
+            }
+            .frame(width: 560, height: 480)
+        } else {
+            chooser.frame(width: 460)
+        }
+    }
+
+    private var chooser: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Add a source").font(.title2)
+            Text("A second source holds a full copy of your library. The primary stays the source of truth, and every sync makes the copy match it.")
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            ForEach(model.status.accounts ?? [], id: \.self) { remote in
+                option(icon: "drive",
+                       title: remote == "gdrive" ? "Google Drive, same account" : "Google Drive (\(remote))",
+                       detail: remote == "gdrive" ? "Another folder in the primary's Google account" : "A folder in that Google account") {
+                    account = remote
+                }
+            }
+            option(icon: "drive", title: "Google Drive, another account", detail: "Your browser opens to sign in") {
+                working = true
+                error = nil
+                Task {
+                    do { account = try await Core.addGoogleAccount() } catch { self.error = error.localizedDescription }
+                    working = false
+                }
+            }
+            .disabled(working)
+            option(icon: "local", title: "A folder on this Mac or a disk", detail: "Such as an external drive") {
+                pickLocal()
+            }
+            if working { Text("Waiting for Google…").foregroundStyle(.secondary) }
+            if let error { Text(error).foregroundStyle(.red).textSelection(.enabled) }
+            HStack {
+                Spacer()
+                Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
+            }
+        }
+        .padding(24)
+    }
+
+    private func option(icon: String, title: String, detail: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 12) {
+                SourceIcon(type: icon, size: 20).frame(width: 24)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                    Text(detail).font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer()
+                Image(systemName: "chevron.right").foregroundStyle(.tertiary)
+            }
+            .padding(10)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+    }
+
+    private func pickLocal() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.canCreateDirectories = true
+        panel.prompt = "Use Folder"
+        panel.message = "Pick an empty folder, or one that already holds a copy of this library."
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            try model.addSecondary(remote: "", folder: url.path)
+            dismiss()
+        } catch { self.error = error.localizedDescription }
+    }
 }

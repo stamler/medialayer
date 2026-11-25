@@ -104,6 +104,25 @@ final class AppModel: ObservableObject {
 
     func resync() { try? Core.startSync() }
 
+    // MARK: Sources
+
+    @Published var addingSource = false
+
+    func addSecondary(remote: String, folder: String) throws {
+        try Core.addSecondary(remote: remote, folder: folder)
+        refresh()
+    }
+
+    func removeSecondary(_ id: String) throws {
+        try Core.removeSecondary(id)
+        refresh()
+    }
+
+    func approveChanges(_ id: String) throws {
+        try Core.approveChanges(id)
+        refresh()
+    }
+
     // MARK: Column browser
 
     private func values(_ tracks: [Track], _ key: (Track) -> String) -> [String] {

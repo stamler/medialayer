@@ -72,16 +72,22 @@ the primary. No command line.
    user goes from opening the app to playing a track with no other steps, a
    track starts within about 2 seconds, and a 10,000-track table scrolls
    smoothly.
-4. **macOS desktop features.** Menu bar control, cache cap with offline
+4. **Secondary sources.** Add a second folder (another Google Drive
+   folder or account, a folder on the Mac or a disk, then Proton or SMB) as
+   a secondary and sync from the primary with the rules above, starting as
+   soon as it is added. The status bar shows each source with an icon for
+   its cloud and highlights the primary. Gate: a secondary built from
+   scratch matches the primary file for file, a mass change pauses and
+   asks, and switching the primary works. The proof of concept does the
+   one-way sync, trash, pause and generation check; the sync lease, the
+   5% limit counted per day and switching the primary come next.
+5. **macOS desktop features.** Menu bar control, cache cap with offline
    albums, write-mode toggle, the optional Tauon mount, a notarized build
    with Sparkle updates.
-5. **iOS from the same project.** The iOS player check (framework size, 30
+6. **iOS from the same project.** The iOS player check (framework size, 30
    minutes of locked-screen playback, a TestFlight upload), then the
    iPhone and iPad app, which can open a library a Mac built or set one up
    on its own.
-6. **Secondary clouds.** Add SMB or Proton as a secondary and sync from the
-   primary with the rules above. Gate: a secondary built from scratch
-   matches the primary file for file, and switching the primary works.
 7. **Tag editing with MusicBrainz (desktop, write mode).** Look up a
    release by its tags (or track lengths for a ripped CD), show current and
    proposed tags side by side with the Cover Art Archive cover, and write
