@@ -1,5 +1,7 @@
 # rclone spike
 
+See `docs/milestones.md` for what comes next.
+
 This spike decides whether MediaLayer is built on rclone in Go. It has four
 checks, each with a pass mark. Checks 1, 2 and 3 need a Mac.
 
