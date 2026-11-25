@@ -201,7 +201,7 @@ func parseRange(header string, size int64) (start, end int64, partial bool, err 
 		if last != "" {
 			end, err = strconv.ParseInt(last, 10, 64)
 			if err != nil || end < start {
-				return 0, 0, false, errors.New("bad range")
+				return whole() // RFC 9110: ignore an invalid range
 			}
 			end = min(end, size-1)
 		}

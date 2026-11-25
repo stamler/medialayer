@@ -46,7 +46,6 @@ type Status struct {
 // Status returns the current state.
 func (c *Core) Status() Status {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	s := Status{
 		Connected:  c.Connected(),
 		Folder:     c.settings.Folder,
@@ -59,9 +58,13 @@ func (c *Core) Status() Status {
 	if s.Job.Phase == "" {
 		s.Job.Phase = PhaseIdle
 	}
-	if c.db != nil {
-		s.DBPath = c.db.Path()
-		s.Tracks, _ = c.db.TrackCount()
+	db := c.db
+	c.mu.Unlock()
+	// Query outside the lock: the query can wait behind an indexer
+	// transaction, and the indexer's workers need the lock meanwhile.
+	if db != nil {
+		s.DBPath = db.Path()
+		s.Tracks, _ = db.TrackCount()
 	}
 	return s
 }
@@ -85,14 +88,16 @@ func (c *Core) StartSync() error {
 		return errors.New("no library folder picked")
 	}
 	done := make(chan struct{})
-	c.jobDone = done
+	ctx, cancel := context.WithCancel(context.Background())
+	c.jobDone, c.cancel = done, cancel
 	c.job = jobStatus{Phase: PhaseOpening, Started: time.Now()}
 	go func() {
 		defer close(done)
-		err := c.sync(context.Background())
+		err := c.sync(ctx)
 		c.mu.Lock()
 		defer c.mu.Unlock()
-		c.jobDone = nil
+		cancel()
+		c.jobDone, c.cancel = nil, nil
 		c.job.Current = ""
 		c.job.Finished = time.Now()
 		if err != nil {
@@ -111,14 +116,33 @@ func (c *Core) sync(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if err := c.restore(ctx, f); err != nil {
-		return fmt.Errorf("open the library's .medialayer: %w", err)
+	if c.currentDB() == nil {
+		// An earlier failure left no index open; start again from an empty one.
+		c.mu.Lock()
+		err := c.openDB()
+		c.mu.Unlock()
+		if err != nil {
+			return err
+		}
 	}
-	if err := c.index(ctx, f); err != nil {
-		return err
+	// A second pass happens only when another device published the
+	// library while this one indexed it from scratch: this device then
+	// takes that snapshot, keeping its file ids, and indexes on top.
+	for range 2 {
+		if err := c.restore(ctx, f); err != nil {
+			return fmt.Errorf("open the library's .medialayer: %w", err)
+		}
+		if err := c.index(ctx, f); err != nil {
+			return err
+		}
+		err := c.publish(ctx, f)
+		if errors.Is(err, errPublishedElsewhere) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("write the library's .medialayer: %w", err)
+		}
+		return nil
 	}
-	if err := c.publish(ctx, f); err != nil {
-		return fmt.Errorf("write the library's .medialayer: %w", err)
-	}
-	return nil
+	return errPublishedElsewhere
 }

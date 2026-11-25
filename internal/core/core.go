@@ -38,7 +38,8 @@ type Core struct {
 	db       *index.DB // nil until a folder is picked
 	dbEpoch  int64     // raised each time the database file is replaced
 	job      jobStatus
-	jobDone  chan struct{} // closed when the running job ends; nil if none
+	jobDone  chan struct{}      // closed when the running job ends; nil if none
+	cancel   context.CancelFunc // stops the running job
 	stream   *streamServer
 }
 
@@ -46,6 +47,9 @@ type Core struct {
 type settings struct {
 	Folder   string `json:"folder"`    // library folder on the remote, e.g. "Music"
 	DeviceID string `json:"device_id"` // random, made once per install
+	// DBFile is the local index's file name. A restore writes a new file
+	// rather than replacing this one under the app's open connection.
+	DBFile string `json:"db_file,omitempty"`
 }
 
 // New opens the core with its files in dataDir (on macOS,
@@ -75,6 +79,7 @@ func New(dataDir string) (*Core, error) {
 		return nil, err
 	}
 	c.stream = srv
+	removeStaleDBs(dataDir, filepath.Base(c.dbPath()))
 	if c.settings.Folder != "" {
 		if err := c.openDB(); err != nil {
 			return nil, err
@@ -83,7 +88,12 @@ func New(dataDir string) (*Core, error) {
 	return c, nil
 }
 
-func (c *Core) dbPath() string       { return filepath.Join(c.dataDir, "library.sqlite") }
+func (c *Core) dbPath() string {
+	if c.settings.DBFile == "" {
+		return filepath.Join(c.dataDir, "library.sqlite")
+	}
+	return filepath.Join(c.dataDir, c.settings.DBFile)
+}
 func (c *Core) artDir() string       { return filepath.Join(c.dataDir, "art") }
 func (c *Core) settingsPath() string { return filepath.Join(c.dataDir, "settings.json") }
 
@@ -141,11 +151,27 @@ func (c *Core) libraryFs(ctx context.Context) (fs.Fs, error) {
 	return f, nil
 }
 
-// Close stops the streaming endpoint and closes the index, after waiting
-// for a running job to stop.
+// removeStaleDBs deletes index files left by earlier restores. It runs at
+// start-up, when no app connection can still have them open.
+func removeStaleDBs(dataDir, current string) {
+	matches, _ := filepath.Glob(filepath.Join(dataDir, "library*.sqlite*"))
+	for _, m := range matches {
+		base := filepath.Base(m)
+		if base == current || base == current+"-wal" || base == current+"-shm" {
+			continue
+		}
+		_ = os.Remove(m)
+	}
+}
+
+// Close stops a running job, waits for it, stops the streaming endpoint
+// and closes the index.
 func (c *Core) Close() error {
 	c.mu.Lock()
 	done := c.jobDone
+	if c.cancel != nil {
+		c.cancel()
+	}
 	c.mu.Unlock()
 	if done != nil {
 		<-done

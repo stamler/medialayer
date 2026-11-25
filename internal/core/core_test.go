@@ -283,7 +283,7 @@ func TestParseRange(t *testing.T) {
 		{"bytes=-500", 0, 99, true, false},
 		{"bytes=0-1,5-6", 0, 99, false, false},
 		{"bytes=100-", 0, 0, false, true},
-		{"bytes=5-2", 0, 0, false, true},
+		{"bytes=5-2", 0, 99, false, false},
 		{"items=1-2", 0, 99, false, false},
 	}
 	for _, tt := range tests {
@@ -309,4 +309,55 @@ func fileIDs(t *testing.T, c *Core) map[string]string {
 		out[p] = k.ID
 	}
 	return out
+}
+
+// Two devices that index a new folder at the same time end up with the
+// same file ids: the second to publish takes the first one's snapshot.
+func TestTwoFirstDevicesShareFileIDs(t *testing.T) {
+	ctx := context.Background()
+	lib := writeLibrary(t, nil)
+	a, b := newTestCore(t, lib), newTestCore(t, lib)
+	if err := b.index(ctx, b.fsys); err != nil { // b indexes, but A publishes first
+		t.Fatal(err)
+	}
+	if err := a.sync(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.sync(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(fileIDs(t, a)) != fmt.Sprint(fileIDs(t, b)) {
+		t.Errorf("file ids differ: %v and %v", fileIDs(t, a), fileIDs(t, b))
+	}
+}
+
+// Snapshot names that are not six-digit numbers are left alone.
+func TestPruneIgnoresOddSnapshotNames(t *testing.T) {
+	ctx := context.Background()
+	lib := writeLibrary(t, nil)
+	snaps := filepath.Join(lib, ".medialayer/snapshots")
+	if err := os.MkdirAll(snaps, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(snaps, "1.sqlite"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c := newTestCore(t, lib)
+	for i := range 3 {
+		if i > 0 {
+			if err := c.currentDB().SetMeta("dirty", "1"); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := c.sync(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	names, _ := filepath.Glob(filepath.Join(snaps, "*.sqlite"))
+	for i := range names {
+		names[i] = filepath.Base(names[i])
+	}
+	if fmt.Sprint(names) != "[000002.sqlite 000003.sqlite 1.sqlite]" {
+		t.Errorf("snapshots = %v", names)
+	}
 }

@@ -95,10 +95,15 @@ func listRepoDir(ctx context.Context, f fs.Fs, dir string) (map[string]fs.Object
 	return out, nil
 }
 
-// snapshotNumber parses "000042.sqlite"; ok is false for other names.
+// errPublishedElsewhere means another device published the library
+// while this one was indexing it from scratch.
+var errPublishedElsewhere = errors.New("another device published this library first")
+
+// snapshotNumber parses "000042.sqlite" (six or more digits); ok is false
+// for other names.
 func snapshotNumber(name string) (int, bool) {
 	s, found := strings.CutSuffix(name, ".sqlite")
-	if !found {
+	if !found || len(s) < 6 || strings.Trim(s, "0123456789") != "" {
 		return 0, false
 	}
 	n, err := strconv.Atoi(s)
@@ -165,54 +170,71 @@ func (c *Core) restore(ctx context.Context, f fs.Fs) error {
 		return err
 	}
 	c.setJob(func(j *jobStatus) { j.Total = int64(1 + len(packs)) })
-	tmp := c.dbPath() + ".restore"
-	if err := download(ctx, snap, tmp); err != nil {
+	// The snapshot becomes a new database file: the app may have the
+	// current one open, and replacing a SQLite file under an open
+	// connection can corrupt what it reads.
+	name := "library-" + index.NewID() + ".sqlite"
+	path := filepath.Join(c.dataDir, name)
+	if err := download(ctx, snap, path); err != nil {
 		return err
 	}
-	defer func() { _ = os.Remove(tmp) }()
+	keep := false
+	defer func() {
+		if !keep {
+			for _, p := range []string{path, path + "-wal", path + "-shm"} {
+				_ = os.Remove(p)
+			}
+		}
+	}()
 	c.setJob(func(j *jobStatus) { j.Done++ })
+
+	// Check the snapshot opens and is this library before using it.
+	sdb, err := index.Open(path)
+	if err != nil {
+		return fmt.Errorf("snapshot %s: %w", snap.Remote(), err)
+	}
+	snapID, err := sdb.Meta("library_id")
+	if err == nil && snapID != repo.LibraryID {
+		err = fmt.Errorf("snapshot %s belongs to library %q, not %q", snap.Remote(), snapID, repo.LibraryID)
+	}
+	if err != nil {
+		_ = sdb.Close()
+		return err
+	}
+
 	for name, o := range packs {
 		if !strings.HasPrefix(name, "pack-") {
 			continue
 		}
-		if err := download(ctx, o, filepath.Join(c.artDir(), name)); err != nil {
+		local := filepath.Join(c.artDir(), name)
+		if st, err := os.Stat(local); err == nil && st.Size() == o.Size() {
+			continue // packs never change once published
+		}
+		if err := download(ctx, o, local); err != nil {
+			_ = sdb.Close()
 			return err
 		}
 		c.setJob(func(j *jobStatus) { j.Done++ })
 	}
 
-	// Check the snapshot opens and is this library before swapping it in.
-	sdb, err := index.Open(tmp)
-	if err != nil {
-		return fmt.Errorf("snapshot %s: %w", snap.Remote(), err)
-	}
-	snapID, err := sdb.Meta("library_id")
-	_ = sdb.Close()
-	if err != nil {
-		return err
-	}
-	if snapID != repo.LibraryID {
-		return fmt.Errorf("snapshot %s belongs to library %q, not %q", snap.Remote(), snapID, repo.LibraryID)
-	}
-	for _, p := range []string{tmp + "-wal", tmp + "-shm"} {
-		_ = os.Remove(p)
-	}
-
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if err := c.db.Close(); err != nil {
+	old := c.db
+	oldFile := c.settings.DBFile
+	c.db = sdb
+	c.dbEpoch++
+	c.settings.DBFile = name
+	if err := c.saveSettings(); err != nil {
+		c.db, c.settings.DBFile = old, oldFile
+		_ = sdb.Close()
 		return err
 	}
-	c.db = nil
-	for _, p := range []string{c.dbPath() + "-wal", c.dbPath() + "-shm"} {
-		if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return err
-		}
+	keep = true
+	// The old file is deleted at the next start, when nothing has it open.
+	if old != nil {
+		_ = old.Close()
 	}
-	if err := os.Rename(tmp, c.dbPath()); err != nil {
-		return err
-	}
-	return c.openDB()
+	return nil
 }
 
 // publish writes the index to the cloud when it changed: art packs the
@@ -240,7 +262,9 @@ func (c *Core) publish(ctx context.Context, f fs.Fs) error {
 		return fmt.Errorf("this folder holds library %s, but the local index is library %s", repo.LibraryID, libraryID)
 	}
 	if repo != nil && libraryID == "" {
-		libraryID = repo.LibraryID
+		// Indexed from scratch while another device published: take its
+		// snapshot instead, so both devices share file ids.
+		return errPublishedElsewhere
 	}
 	if repo == nil {
 		if libraryID == "" {
@@ -250,7 +274,7 @@ func (c *Core) publish(ctx context.Context, f fs.Fs) error {
 			Format:     repoFormat,
 			LibraryID:  libraryID,
 			Generation: 1,
-			Primary:    member{Replica: replica, Type: "drive", Folder: c.Status().Folder},
+			Primary:    member{Replica: replica, Type: "drive", Folder: c.folder()},
 			ChangedAt:  time.Now().UTC(),
 			ChangedBy:  c.settings.DeviceID,
 		}
@@ -319,18 +343,21 @@ func (c *Core) publish(ctx context.Context, f fs.Fs) error {
 	}
 
 	// Keep the newest few snapshots.
-	var old []int
-	for n := range snaps {
-		if v, ok := snapshotNumber(n); ok {
-			old = append(old, v)
+	type numbered struct {
+		n int
+		o fs.Object
+	}
+	var old []numbered
+	for name, o := range snaps {
+		if n, ok := snapshotNumber(name); ok {
+			old = append(old, numbered{n, o})
 		}
 	}
-	sort.Sort(sort.Reverse(sort.IntSlice(old)))
-	for i, n := range old {
+	sort.Slice(old, func(i, j int) bool { return old[i].n > old[j].n })
+	for i, s := range old {
 		if i+1 >= snapshotsKept { // the new snapshot counts as one
-			o := snaps[fmt.Sprintf("%06d.sqlite", n)]
-			if err := o.Remove(ctx); err != nil {
-				fs.Errorf(o, "remove old snapshot: %v", err)
+			if err := s.o.Remove(ctx); err != nil {
+				fs.Errorf(s.o, "remove old snapshot: %v", err)
 			}
 		}
 	}

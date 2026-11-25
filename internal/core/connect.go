@@ -131,6 +131,7 @@ func (c *Core) SetFolder(folder string) error {
 			return err
 		}
 		c.settings.Folder = folder
+		c.settings.DBFile = ""
 		c.fsys = nil
 		if err := c.saveSettings(); err != nil {
 			c.mu.Unlock()
@@ -143,6 +144,13 @@ func (c *Core) SetFolder(folder string) error {
 	}
 	c.mu.Unlock()
 	return c.StartSync()
+}
+
+// folder returns the library folder.
+func (c *Core) folder() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.settings.Folder
 }
 
 // resetLocal deletes the local index and art packs.

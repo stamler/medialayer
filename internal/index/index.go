@@ -14,6 +14,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"time"
 
@@ -111,7 +112,9 @@ type DB struct {
 func Open(path string) (*DB, error) {
 	// One connection: writes are serialised anyway, and it keeps
 	// transactions and pragmas on the same connection.
-	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)")
+	uri := url.URL{Scheme: "file", Path: path,
+		RawQuery: "_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)"}
+	db, err := sql.Open("sqlite", uri.String())
 	if err != nil {
 		return nil, err
 	}
