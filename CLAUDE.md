@@ -2,7 +2,8 @@
 
 - Every code change gets an independent review by a separate reviewer agent
   before it is pushed. Fix or answer each finding first.
-- Keep changes small and on a branch; open a pull request for review.
+- Push reviewed changes straight to `main`; don't open pull requests unless
+  asked. Keep each commit small and focused.
 - The spike code lives in `backend/medialayer` (an rclone overlay backend) and
   `cmd/mlspike` (an rclone binary with that backend built in). Run
   `go test ./...` and `go vet ./...` before pushing.
