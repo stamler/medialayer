@@ -155,8 +155,9 @@ primary, and "the index" is the device's SQLite database of the library.
    the core.
 3. The core refuses if a sync or another job runs, or if the target is not
    one of this device's secondaries. Otherwise it starts a background job.
-   While the job runs, the core refuses every other change: a sync, a new
-   or removed source, an approval, and a new library folder.
+   While the job runs, Update Library does nothing, and the core refuses
+   to add or remove a source, approve changes, or change the music
+   folder.
 
 ### Sync before the switch
 
@@ -173,11 +174,11 @@ primary, and "the index" is the device's SQLite database of the library.
       of the current index version, `repo.json`, and last `member.json`
       with state `synced`, that version, and the current generation.
    So the target now holds every file the primary holds, the current
-   index, and nothing more. Files added to the primary since the last
+   index, and nothing more (except the paths listed under Known gaps). Files added to the primary since the last
    sync are copied. Files removed or edited on the target are put back.
 5. The job checks the target's sync result from step 4. If the sync
-   failed, or paused at the 5% limit, the job stops with the reason.
-   Nothing has changed.
+   failed, or paused at the 5% limit, the job stops with the reason. The
+   primary stays the primary. The sync in step 4 has still run.
 
 ### Check the target
 
@@ -189,7 +190,8 @@ primary, and "the index" is the device's SQLite database of the library.
    - `generation` is the current generation.
 8. It reads the target's `repo.json` and checks that it exists and names
    no newer generation.
-9. If a check fails, the job stops with the reason. Nothing has changed.
+9. If a check fails, the job stops with the reason. The primary stays the
+   primary.
 
 ### Switch
 
@@ -212,8 +214,9 @@ primary, and "the index" is the device's SQLite database of the library.
     - the secondaries are the other secondaries and the old primary,
     - the old primary is marked "review first" (see step 15).
     It saves the settings. It clears the cached connection to the old
-    primary and the cache of open streams, so playback reads from the
-    target.
+    primary and the cache of looked-up files, so the next track plays
+    from the target. A track already playing finishes from the old
+    primary.
 14. It writes the new generation to the index. It records that the new
     primary holds the current index version (`meta.primary_version`),
     because step 4 copied that version to it.
@@ -224,17 +227,19 @@ primary, and "the index" is the device's SQLite database of the library.
     1. It indexes the target. The target holds the same files with the
        same modification times, so the index usually does not change.
     2. It syncs each secondary. For the old primary, this is its first
-       sync as a secondary. The sync writes its `member.json` with state
-       `copying` and compares the two folders. The old primary is marked
-       "review first", so the sync pauses before any removal or
-       replacement, even one. Such a change means that something changed
-       on the old primary during the switch. The chip then shows a pause
-       badge, and you choose whether to apply it.
-    3. If nothing needs removal or replacement, the sync copies any
-       missing files and the current snapshot, and removes the older
-       snapshot (a secondary keeps one). It writes `repo.json` and then
-       `member.json` with state `synced` and the new generation. It
-       clears the "review first" mark.
+       sync as a secondary. The sync compares the two folders. The old
+       primary is marked "review first", so if anything would be removed
+       or replaced, even one file, the sync pauses and writes its
+       `member.json` with state `paused`. Such a change means that
+       something changed on the old primary during the switch. The chip
+       then shows a pause badge, and you choose whether to apply it.
+    3. If nothing needs removal or replacement, the sync writes
+       `member.json` with state `copying`. It copies any missing files,
+       the art packs the old primary lacks, and the current snapshot, and
+       removes the older snapshot (a secondary keeps one). It writes
+       `repo.json` and then `member.json` with state `synced` and the new
+       generation. It empties trash older than 30 days and clears the
+       "review first" mark.
 16. The job ends. The target's chip is highlighted as the primary, and the
     old primary's chip shows synced.
 
@@ -253,7 +258,8 @@ Do not use Choose Music Folder to switch back. See Known gaps.
 
 | Fails at | Result |
 |---|---|
-| Steps 3 to 9 | Nothing changes. The status bar shows why. |
+| Step 3 | Nothing changes. The status bar shows why. |
+| Steps 4 to 9 | The primary stays the primary. The status bar shows why. The sync in step 4 has run. |
 | Step 11 (write to the target) | Nothing changes. The old primary is still the primary. |
 | Step 12 (write to the old primary) | The switch continues. A later sync writes the old primary's `repo.json`. |
 | Step 13 (saving settings) | The switch is in memory only. After a restart, the device uses the old primary again. If the old primary has the new `repo.json`, its sync stops with "the primary moved"; otherwise it continues as before, and the target is refused as a secondary because it names a newer generation. |
@@ -266,10 +272,14 @@ become synced, and you can't switch back until it has space.
 
 - A device that still uses the old primary reads its `repo.json` at the
   start of each sync. If that names another primary, the sync stops with
-  "the primary moved". The device doesn't follow a move yet.
+  "the primary moved". The device doesn't follow a move yet. If the old
+  primary couldn't take the new `repo.json` (a full cloud), such a device
+  doesn't notice the move and keeps using the old primary.
 - A device that picks the new primary as its library folder reads that
   folder's `member.json` on its first sync. It names the primary id from
-  `repo.json`, so the device takes on that id and continues.
+  `repo.json`, so the device takes on that id and continues. This works
+  only if the new primary is in the device's first Google account, since
+  Choose Music Folder browses only that account.
 - A device that picks a secondary as its library folder is refused. That
   folder's `member.json` names an id that is not the primary's.
 - A sync leaves a secondary alone when its `repo.json` names another
@@ -290,10 +300,13 @@ become synced, and you can't switch back until it has space.
 - Choose Music Folder only browses the first Google account, and it
   resets the local index and secondaries before the folder is checked. So
   after a promotion, switch back with Make Primary, not by picking the old
-  primary, which is refused as a secondary.
+  primary. That is refused as a secondary or, if the old primary couldn't
+  take the new `repo.json`, opened as a second primary at the old
+  generation.
 - Another device doesn't follow a promotion made elsewhere: its sync
   stops with "the primary moved" (when the old primary took the new
-  `repo.json`) until the library is picked again there.
+  `repo.json`) until the library is picked again there, which works only
+  if the new primary is in that device's first Google account.
 - Paths the primary lists twice (or twice by case or Unicode form) are in
   the index but not on the secondary. On exFAT or FAT disks modification
   times are kept to 2 seconds, and HFS+ disks keep names decomposed, so
