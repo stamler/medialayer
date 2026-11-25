@@ -24,8 +24,9 @@ struct MediaLayerApp: App {
                     .disabled(model.status.folder.isEmpty || model.status.isBusy)
             }
             CommandMenu("Controls") {
+                // Space is handled by AppModel's key monitor; a bare-Space
+                // menu shortcut could take spaces from text fields.
                 Button("Play/Pause") { model.player.toggle() }
-                    .keyboardShortcut(.space, modifiers: [])
                 Button("Next") { model.player.next() }
                     .keyboardShortcut(.rightArrow)
                 Button("Previous") { model.player.previous() }

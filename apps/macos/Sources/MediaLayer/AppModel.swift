@@ -55,11 +55,16 @@ final class AppModel: ObservableObject {
         // Space plays and pauses anywhere in the library window. A menu
         // shortcut with no modifier never sees it: the table and lists
         // take it first. Text fields, sheets and dialogs keep it.
+        // Shortly after another key, Space is part of type-to-select.
+        var lastKey = Date.distantPast
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            let typing = Date().timeIntervalSince(lastKey) < 1
+            if event.keyCode != 49 { lastKey = Date() }
             guard event.keyCode == 49, // space
+                  !event.isARepeat, !typing,
                   event.modifierFlags.intersection([.command, .option, .control, .shift]).isEmpty,
                   let window = event.window, !window.isSheet, window.attachedSheet == nil,
-                  !(window.firstResponder is NSText),
+                  !(window.firstResponder is NSText), !(window.firstResponder is NSButton),
                   let self else { return event }
             MainActor.assumeIsolated { self.player.toggle() }
             return nil
