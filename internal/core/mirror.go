@@ -171,6 +171,11 @@ func (c *Core) AddSecondary(remote, folder string) error {
 		if folder == "" {
 			return errors.New("pick a folder, not the top of the drive")
 		}
+		for _, part := range strings.Split(folder, "/") {
+			if part == "" || part == "." || part == ".." {
+				return fmt.Errorf("%q is not a folder path", folder)
+			}
+		}
 		if config.GetValue(remote, "type") == "" {
 			return fmt.Errorf("%s is not connected", remote)
 		}

@@ -119,6 +119,7 @@ struct DriveFolderPicker: View {
     @State private var error: String?
 
     private var current: String { path.joined(separator: "/") }
+    private var trimmedName: String { newName.trimmingCharacters(in: .whitespacesAndNewlines) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -146,11 +147,10 @@ struct DriveFolderPicker: View {
                     TextField("New folder in “\(path.last ?? "My Drive")”", text: $newName)
                         .textFieldStyle(.roundedBorder)
                     Button("Use New Folder") {
-                        let name = newName.trimmingCharacters(in: .whitespaces)
-                        do { try onPick(path.isEmpty ? name : current + "/" + name) }
+                        do { try onPick(path.isEmpty ? trimmedName : current + "/" + trimmedName) }
                         catch { self.error = error.localizedDescription }
                     }
-                    .disabled(newName.trimmingCharacters(in: .whitespaces).isEmpty || newName.contains("/"))
+                    .disabled(["", ".", ".."].contains(trimmedName) || trimmedName.contains("/"))
                 }
             }
             HStack {

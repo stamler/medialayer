@@ -273,6 +273,7 @@ func TestAddSecondaryRefusesOverlaps(t *testing.T) {
 		{"", sec + "/Inside"}, // inside one
 		{"nosuch", "Backup"},  // not connected
 		{remoteName, ""},      // top of the drive
+		{remoteName, "Music/.."},
 	} {
 		if err := c.AddSecondary(tc.remote, tc.folder); err == nil {
 			t.Errorf("AddSecondary(%q, %q) was allowed", tc.remote, tc.folder)
