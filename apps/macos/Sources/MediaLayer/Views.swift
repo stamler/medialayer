@@ -107,8 +107,12 @@ struct DriveFolderPicker: View {
     let title: String
     let message: String
     var onCancel: (() -> Void)?
+    /// Offer to make a new folder inside the current one; MediaLayer
+    /// creates it when it first writes there.
+    var allowNew = false
     let onPick: (String) throws -> Void
 
+    @State private var newName = ""
     @State private var path: [String] = [] // folder names from the top of My Drive
     @State private var folders: [String] = []
     @State private var loading = false
@@ -137,6 +141,18 @@ struct DriveFolderPicker: View {
             }
             .overlay { if loading { ProgressView() } }
             if let error { Text(error).foregroundStyle(.red).textSelection(.enabled) }
+            if allowNew {
+                HStack {
+                    TextField("New folder in “\(path.last ?? "My Drive")”", text: $newName)
+                        .textFieldStyle(.roundedBorder)
+                    Button("Use New Folder") {
+                        let name = newName.trimmingCharacters(in: .whitespaces)
+                        do { try onPick(path.isEmpty ? name : current + "/" + name) }
+                        catch { self.error = error.localizedDescription }
+                    }
+                    .disabled(newName.trimmingCharacters(in: .whitespaces).isEmpty || newName.contains("/"))
+                }
+            }
             HStack {
                 if let onCancel { Button("Cancel", action: onCancel).keyboardShortcut(.cancelAction) }
                 Spacer()
@@ -341,17 +357,24 @@ struct ColumnBrowser: View {
     var body: some View {
         HStack(spacing: 0) {
             BrowserColumn(title: "Genres", values: model.genres, selection: $model.genre)
-            Divider()
+            columnDivider
             BrowserColumn(title: "Composers", values: model.composers, selection: $model.composer)
-            Divider()
+            columnDivider
             BrowserColumn(title: "Artists", values: model.artists, selection: $model.artist)
-            Divider()
+            columnDivider
             BrowserColumn(title: "Albums", values: model.albums, selection: $model.album)
         }
+    }
+
+    /// Dividers start below the header row: one that met the toolbar's
+    /// bottom edge read as a stray tick under the now-playing display.
+    private var columnDivider: some View {
+        Divider().padding(.top, BrowserColumn.headerHeight)
     }
 }
 
 struct BrowserColumn: View {
+    static let headerHeight: CGFloat = 22
     let title: String
     let values: [String]
     @Binding var selection: String?
@@ -378,7 +401,7 @@ struct BrowserColumn: View {
     var body: some View {
         VStack(spacing: 0) {
             Text(title).font(.caption.bold()).foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity).padding(.vertical, 4)
+                .frame(maxWidth: .infinity).frame(height: Self.headerHeight)
             Divider()
             List(selection: listSelection) {
                 Text("All (\(values.count) \(values.count == 1 ? String(title.dropLast()) : title))").tag("")
@@ -707,7 +730,8 @@ struct AddSourceSheet: View {
                 remote: account,
                 title: "Pick the folder for the copy",
                 message: "MediaLayer copies the library here and keeps it in step with the primary, one way. Files it removes or replaces go to the folder's .medialayer/trash for 30 days.",
-                onCancel: { self.account = nil }
+                onCancel: { self.account = nil },
+                allowNew: true
             ) { folder in
                 try model.addSecondary(remote: account, folder: folder)
                 dismiss()
