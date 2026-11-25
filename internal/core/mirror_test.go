@@ -170,6 +170,9 @@ func TestMirrorPausesOnMassChange(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(sec, "Extras/00.txt")); err != nil {
 		t.Error("a paused sync removed files")
 	}
+	if b, _ := os.ReadFile(filepath.Join(sec, ".medialayer/member.json")); !strings.Contains(string(b), `"state":"paused"`) {
+		t.Errorf("member.json = %s, want paused", b)
+	}
 	// A sync without approval stays paused.
 	if err := c.sync(ctx); err != nil {
 		t.Fatal(err)
