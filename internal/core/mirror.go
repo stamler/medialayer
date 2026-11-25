@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/rclone/rclone/fs"
@@ -416,7 +417,13 @@ func (c *Core) mirrorAll(ctx context.Context, f fs.Fs) error {
 	c.setJob(func(j *jobStatus) { j.Phase, j.Done, j.Total, j.Current = PhaseMirroring, 0, 0, "" })
 	run := index.NewID()
 	if err := putBytes(ctx, f, repoDir+"/probe/"+device, []byte(run)); err != nil {
-		return fmt.Errorf("write a probe file: %w", err)
+		// A full primary can't take a new probe; the last one written
+		// still tells it apart, failing safe on an old copy of it.
+		b, rerr := readSmall(ctx, f, repoDir+"/probe/"+device)
+		if !isFull(err) || rerr != nil || len(b) == 0 {
+			return fmt.Errorf("write a probe file: %w", err)
+		}
+		run = string(b)
 	}
 
 	fail := func(s source, err error) {
@@ -541,6 +548,18 @@ func (c *Core) check(ctx context.Context, s source, repo *repoRecord, device, ru
 	return t, nil
 }
 
+// isFull reports errors that mean the cloud or disk has no room left.
+func isFull(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, syscall.ENOSPC) {
+		return true
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "storageQuotaExceeded") || (strings.Contains(msg, "quotaExceeded") && strings.Contains(msg, "storage"))
+}
+
 // absent reports errors that mean a file or folder isn't there.
 func absent(err error) bool {
 	return errors.Is(err, fs.ErrorObjectNotFound) || errors.Is(err, fs.ErrorDirNotFound)
@@ -591,7 +610,14 @@ func (c *Core) updateMembers(ctx context.Context, f fs.Fs, secs []source) (*repo
 		return repo, nil
 	}
 	repo.Members = want
-	return repo, c.writeRepo(ctx, f, repo)
+	if err := c.writeRepo(ctx, f, repo); err != nil {
+		if !isFull(err) {
+			return nil, err
+		}
+		// The secondaries still get the new list in their copy.
+		fs.Errorf(f, "can't update members in the full primary's repo.json: %v", err)
+	}
+	return repo, nil
 }
 
 // writeRepo uploads repo.json to f.

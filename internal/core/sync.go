@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/rclone/rclone/fs"
 )
 
 // Phases of the sync job, as Status reports them.
@@ -149,6 +151,15 @@ func (c *Core) sync(ctx context.Context) error {
 		err := c.publish(ctx, f)
 		if errors.Is(err, errPublishedElsewhere) {
 			continue
+		}
+		if isFull(err) {
+			// Sync only writes to the secondaries, so they still get the
+			// primary's last saved snapshot and every file.
+			fs.Errorf(f, "publish: %v", err)
+			c.mu.Lock()
+			c.notice = "The primary's cloud is full, so the library's latest changes couldn't be saved there. Copies still sync from it."
+			c.mu.Unlock()
+			err = nil
 		}
 		if err != nil {
 			return fmt.Errorf("write the library's .medialayer: %w", err)

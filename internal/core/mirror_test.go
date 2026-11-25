@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -420,5 +421,18 @@ func TestMirrorMatchesDecomposedNames(t *testing.T) {
 	}
 	if s := mirrorOf(t, c, "sec1"); s.State != MirrorSynced || s.Copies+s.Deletes+s.Replaces != 0 {
 		t.Errorf("secondary = %+v, want nothing to do", s)
+	}
+}
+
+func TestIsFull(t *testing.T) {
+	for err, want := range map[error]bool{
+		fmt.Errorf("googleapi: Error 403: The user's Drive storage quota has been exceeded., storageQuotaExceeded"): true,
+		fmt.Errorf("write: %w", syscall.ENOSPC):                                              true,
+		fmt.Errorf("googleapi: Error 403: User rate limit exceeded., userRateLimitExceeded"): false,
+		nil: false,
+	} {
+		if got := isFull(err); got != want {
+			t.Errorf("isFull(%v) = %v", err, got)
+		}
 	}
 }
