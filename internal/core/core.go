@@ -54,8 +54,12 @@ type Core struct {
 
 // settings are kept in settings.json in the data directory.
 type settings struct {
-	Folder   string `json:"folder"`    // library folder on the remote, e.g. "Music"
-	DeviceID string `json:"device_id"` // random, made once per install
+	Folder string `json:"folder"` // the primary's library folder, e.g. "Music"
+	// PrimaryRemote is the primary's rclone remote; "" means remoteName.
+	PrimaryRemote string `json:"primary_remote,omitempty"`
+	// PrimaryID is the primary's member id in repo.json; "" means replica.
+	PrimaryID string `json:"primary_id,omitempty"`
+	DeviceID  string `json:"device_id"` // random, made once per install
 	// DBFile is the local index's file name. A restore writes a new file
 	// rather than replacing this one under the app's open connection.
 	DBFile string `json:"db_file,omitempty"`
@@ -153,7 +157,18 @@ func (c *Core) countTracks(db *index.DB) {
 
 // Connected reports whether a Google Drive remote is configured.
 func (c *Core) Connected() bool {
-	return config.GetValue(remoteName, "type") != "" && config.GetValue(remoteName, "token") != ""
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.connectedLocked()
+}
+
+// connectedLocked is Connected for a caller holding c.mu.
+func (c *Core) connectedLocked() bool {
+	r := c.primaryRemote()
+	if r == localPrimary {
+		return true
+	}
+	return config.GetValue(r, "type") != "" && config.GetValue(r, "token") != ""
 }
 
 // libraryFs returns the rclone Fs for the library folder, opening it on
@@ -167,7 +182,7 @@ func (c *Core) libraryFs(ctx context.Context) (fs.Fs, error) {
 	if c.settings.Folder == "" {
 		return nil, errors.New("no library folder picked")
 	}
-	f, err := fs.NewFs(ctx, remoteName+":"+c.settings.Folder)
+	f, err := openSource(ctx, source{Remote: c.primaryRemote(), Folder: c.settings.Folder})
 	if err != nil {
 		return nil, fmt.Errorf("open %s: %w", c.settings.Folder, err)
 	}

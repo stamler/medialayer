@@ -109,8 +109,12 @@ func (c *Core) sourcesLocked() []SourceStatus {
 	if c.settings.Folder == "" {
 		return nil
 	}
+	pr := c.primaryRemote()
+	if pr == localPrimary {
+		pr = ""
+	}
 	out := []SourceStatus{{
-		ID: replica, Type: "drive", Remote: remoteName, Folder: c.settings.Folder, Primary: true,
+		ID: c.primaryID(), Type: source{Remote: pr}.sourceType(), Remote: pr, Folder: c.settings.Folder, Primary: true,
 	}}
 	for _, s := range c.settings.Secondaries {
 		st := SourceStatus{ID: s.ID, Type: s.sourceType(), Remote: s.Remote, Folder: s.Folder}
@@ -190,7 +194,7 @@ func (c *Core) AddSecondary(remote, folder string) error {
 		c.mu.Unlock()
 		return errors.New("the library is syncing; wait for it to finish")
 	}
-	if remote == remoteName && overlaps(folder, c.settings.Folder) {
+	if pr := c.primaryRemote(); (remote == pr || (remote == "" && pr == localPrimary)) && overlaps(folder, c.settings.Folder) {
 		c.mu.Unlock()
 		return errors.New("a secondary can't be the primary folder, or inside it, or hold it")
 	}
@@ -280,7 +284,7 @@ func (c *Core) dropSecondaries() error {
 
 // openSource opens a secondary's folder.
 func openSource(ctx context.Context, s source) (fs.Fs, error) {
-	if s.Remote == "" {
+	if s.Remote == "" || s.Remote == localPrimary {
 		return fs.NewFs(ctx, s.Folder)
 	}
 	return fs.NewFs(ctx, s.Remote+":"+s.Folder)
@@ -420,6 +424,9 @@ func (c *Core) mirrorAll(ctx context.Context, f fs.Fs) error {
 
 	fail := func(s source, err error) {
 		fs.Errorf(nil, "secondary %s: %v", s.Folder, err)
+		if isFull(err) {
+			err = fmt.Errorf("this cloud is full, so the copy here can't be kept up to date (%w)", err)
+		}
 		c.setMirror(s.ID, func(m *mirrorState) { m.state, m.err, m.approved = MirrorError, err.Error(), "" })
 	}
 	var targets []target
@@ -744,7 +751,8 @@ func (c *Core) mirror(ctx context.Context, f fs.Fs, src *listing, repo *repoReco
 	}
 
 	member := memberRecord{LibraryID: repo.LibraryID, Replica: s.ID, State: "copying", Generation: repo.Generation}
-	if len(copies)+changes > 0 || t.member.State != "synced" || t.member.Snapshot != snapName {
+	if len(copies)+changes > 0 || t.member.State != "synced" || t.member.Snapshot != snapName ||
+		t.member.Generation != repo.Generation {
 		if err := writeMember(member); err != nil {
 			return err
 		}

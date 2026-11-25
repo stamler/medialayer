@@ -140,6 +140,14 @@ final class AppModel: ObservableObject {
         refresh()
     }
 
+    /// Makes a secondary the primary, then syncs so the old primary
+    /// becomes a secondary in step with it.
+    func promote(_ id: String) throws {
+        try Core.promote(id)
+        refresh()
+        try? Core.startSync()
+    }
+
     func approveChanges(_ id: String) throws {
         try Core.approveChanges(id)
         refresh()

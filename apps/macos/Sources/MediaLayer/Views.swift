@@ -568,6 +568,7 @@ func formatLong(_ ms: Int64) -> String {
 struct SourcesBar: View {
     @EnvironmentObject var model: AppModel
     @State private var approving: CoreStatus.Source?
+    @State private var promoting: CoreStatus.Source?
     @State private var error: String?
 
     var body: some View {
@@ -592,6 +593,15 @@ struct SourcesBar: View {
         } message: { source in
             Text(approvalMessage(source))
         }
+        .confirmationDialog(promoting.map { "Make “\($0.name)” the primary?" } ?? "",
+                            isPresented: Binding(get: { promoting != nil }, set: { if !$0 { promoting = nil } }),
+                            presenting: promoting) { source in
+            Button("Make Primary") {
+                do { try model.promote(source.id) } catch { self.error = error.localizedDescription }
+            }
+        } message: { source in
+            Text("“\(source.name)” becomes the library's source of truth, and the current primary becomes a copy that follows it. Nothing is moved: the copy already holds every file. You can switch back the same way once the old primary shows as synced.")
+        }
         .alert("Couldn't change the source", isPresented: Binding(get: { error != nil }, set: { if !$0 { error = nil } })) {
         } message: { Text(error ?? "") }
     }
@@ -615,6 +625,8 @@ struct SourcesBar: View {
                 Button("Review Changes…") { approving = source }
             }
             if !source.primary {
+                Button("Make Primary…") { promoting = source }
+                    .disabled(source.state != "synced" || model.status.isBusy)
                 Button("Stop Syncing to “\(source.name)”") {
                     do { try model.removeSecondary(source.id) } catch { self.error = error.localizedDescription }
                 }

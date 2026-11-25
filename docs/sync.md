@@ -140,16 +140,25 @@ A `synced` secondary with an older `version` is a whole, consistent library
 as of that version (its files and index match each other at `synced_at`);
 it is only missing later changes.
 
-## Promoting a secondary (planned)
+## Promoting a secondary
 
-Not built yet. Promotion will: check the secondary as above; raise the
-generation by one and write a `repo.json` naming the secondary as primary
-(with the time and device) to the new primary first, then to every other
-member it can reach; and treat the old primary as a secondary from then
-on. Because the highest generation wins, a device that still names the old
-primary switches when it next reads any member. Changes found later on the
-old primary are kept in its trash and flagged, never synced over the new
-primary.
+Right-click a secondary's chip and choose Make Primary (offered only when
+the chip shows synced and no sync is running). The core then:
+
+1. Checks the secondary as above against this device: `member.json` says
+   `synced`, names this library, holds this device's index version, and was
+   written under the current generation; its `repo.json` names no newer one.
+2. Raises the generation by one and writes a `repo.json` naming the
+   secondary as primary (with the time and device) to the new primary
+   first, which must succeed, then to the old primary. If the old primary
+   can't take it (a full cloud), the higher generation on the new primary
+   still wins, and the next sync rewrites it.
+3. Makes the old primary a secondary and starts a sync, which marks it
+   `synced` under the new generation. No files move: the copy already
+   holds them.
+
+To switch back, wait for that sync to finish (the old primary's chip shows
+synced), then Make Primary on it the same way.
 
 ## Known gaps
 
@@ -162,7 +171,8 @@ primary.
 - The 5% limit is counted per sync, not per day.
 - Each device lists its own secondaries in the primary's `repo.json`, so
   two devices with different secondaries overwrite each other's list.
-- Promoting a secondary to primary is designed (above) but not built.
+- Other members' `repo.json` is rewritten only by their next sync, and
+  changes found on the old primary after promotion aren't flagged yet.
 - Paths the primary lists twice (or twice by case or Unicode form) are in
   the index but not on the secondary. On exFAT or FAT disks modification
   times are kept to 2 seconds, and HFS+ disks keep names decomposed, so

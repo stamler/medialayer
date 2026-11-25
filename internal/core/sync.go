@@ -56,7 +56,7 @@ type Status struct {
 func (c *Core) Status() Status {
 	c.mu.Lock()
 	s := Status{
-		Connected:  c.Connected(),
+		Connected:  c.connectedLocked(),
 		Folder:     c.settings.Folder,
 		DBEpoch:    c.dbEpoch,
 		ArtDir:     c.artDir(),

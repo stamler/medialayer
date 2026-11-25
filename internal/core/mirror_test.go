@@ -26,6 +26,7 @@ func newMirrorCore(t *testing.T) (c *Core, lib, sec string) {
 	sec = filepath.Join(t.TempDir(), "Backup")
 	c = newTestCore(t, lib)
 	c.mu.Lock()
+	c.settings.PrimaryRemote, c.settings.Folder = localPrimary, lib
 	c.settings.Secondaries = []source{{ID: "sec1", Folder: sec}}
 	c.mu.Unlock()
 	return c, lib, sec
@@ -489,5 +490,80 @@ func TestMirrorCarriesEachIndexVersion(t *testing.T) {
 	}
 	if n, _ := sdb.TrackCount(); n != 4 {
 		t.Errorf("snapshot has %d tracks, want 4", n)
+	}
+}
+
+func TestPromoteAndBack(t *testing.T) {
+	ctx := context.Background()
+	c, lib, sec := newMirrorCore(t)
+	if err := c.sync(ctx); err != nil {
+		t.Fatal(err)
+	}
+	readRepoFile := func(dir string) repoRecord {
+		t.Helper()
+		var r repoRecord
+		b, _ := os.ReadFile(filepath.Join(dir, ".medialayer/repo.json"))
+		if err := json.Unmarshal(b, &r); err != nil {
+			t.Fatal(err)
+		}
+		return r
+	}
+
+	if err := c.Promote("sec1"); err != nil {
+		t.Fatal(err)
+	}
+	for _, dir := range []string{sec, lib} {
+		if r := readRepoFile(dir); r.Generation != 2 || r.Primary.Replica != "sec1" || r.Primary.Folder != sec {
+			t.Errorf("%s repo.json = %+v", dir, r)
+		}
+	}
+	st := c.Status()
+	if len(st.Sources) != 2 || !st.Sources[0].Primary || st.Sources[0].Folder != sec || st.Sources[1].Folder != lib || st.Sources[1].ID != replica {
+		t.Fatalf("sources = %+v", st.Sources)
+	}
+	// Going back needs the old primary synced as a secondary first.
+	if err := c.Promote(replica); err == nil {
+		t.Error("promoted a folder with no member.json")
+	}
+	if err := c.sync(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if s := mirrorOf(t, c, replica); s.State != MirrorSynced || s.Copies+s.Replaces+s.Deletes != 0 {
+		t.Fatalf("old primary as a secondary = %+v", s)
+	}
+	if err := c.Promote(replica); err != nil {
+		t.Fatal(err)
+	}
+	for _, dir := range []string{sec, lib} {
+		if r := readRepoFile(dir); r.Generation != 3 || r.Primary.Replica != replica || r.Primary.Folder != lib {
+			t.Errorf("%s repo.json = %+v", dir, r)
+		}
+	}
+	if err := c.sync(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if s := mirrorOf(t, c, "sec1"); s.State != MirrorSynced {
+		t.Fatalf("secondary after going back = %+v", s)
+	}
+	var m memberRecord
+	b, _ := os.ReadFile(filepath.Join(sec, ".medialayer/member.json"))
+	if err := json.Unmarshal(b, &m); err != nil || m.Generation != 3 || m.State != "synced" {
+		t.Errorf("member.json = %s", b)
+	}
+}
+
+func TestPromoteRefusesUnfinishedCopy(t *testing.T) {
+	ctx := context.Background()
+	c, _, sec := newMirrorCore(t)
+	if err := c.sync(ctx); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(filepath.Join(sec, ".medialayer/member.json"))
+	write(t, filepath.Join(sec, ".medialayer/member.json"), bytes.Replace(b, []byte(`"synced"`), []byte(`"copying"`), 1))
+	if err := c.Promote("sec1"); err == nil || !strings.Contains(err.Error(), "didn't finish") {
+		t.Errorf("Promote = %v, want a refusal", err)
+	}
+	if r, _ := readRepo(ctx, c.fsys); r == nil || r.Generation != 1 {
+		t.Errorf("primary repo.json changed: %+v", r)
 	}
 }

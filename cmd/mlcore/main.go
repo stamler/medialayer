@@ -181,6 +181,17 @@ func MLApproveChanges(id *C.char) *C.char {
 	return errStr(c.ApproveChanges(C.GoString(id)))
 }
 
+// MLPromote makes a synced secondary the library's primary.
+//
+//export MLPromote
+func MLPromote(id *C.char) *C.char {
+	c, err := get()
+	if err != nil {
+		return errStr(err)
+	}
+	return errStr(c.Promote(C.GoString(id)))
+}
+
 // MLStartSync re-reads the library folder: restore, index new and changed
 // files, publish. It returns at once; MLStatus shows progress.
 //

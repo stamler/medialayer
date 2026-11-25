@@ -376,6 +376,13 @@ func (s *streamServer) object(ctx context.Context, id string) (fs.Object, string
 	return o, loc.Format, nil
 }
 
+// forgetAll drops the cached objects, as when the primary changes.
+func (s *streamServer) forgetAll() {
+	s.mu.Lock()
+	clear(s.objs)
+	s.mu.Unlock()
+}
+
 func (s *streamServer) forget(id string) {
 	s.mu.Lock()
 	delete(s.objs, id)

@@ -133,6 +133,10 @@ enum Core {
         try check(id.withCString { MLApproveChanges(UnsafeMutablePointer(mutating: $0)) })
     }
 
+    static func promote(_ id: String) throws {
+        try check(id.withCString { MLPromote(UnsafeMutablePointer(mutating: $0)) })
+    }
+
     static func startSync() throws {
         try check(MLStartSync())
     }
