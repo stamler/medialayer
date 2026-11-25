@@ -170,7 +170,7 @@ struct LibraryView: View {
         .safeAreaInset(edge: .bottom, spacing: 0) { StatusBar(tracks: visible) }
         .toolbar {
             ToolbarItemGroup(placement: .navigation) { TransportControls() }
-            ToolbarItem(placement: .principal) { NowPlaying().frame(minWidth: 360, idealWidth: 460) }
+            NowPlayingItem()
         }
     }
 }
@@ -186,34 +186,94 @@ struct TransportControls: View {
     }
 }
 
+/// The now-playing display in the toolbar: a cover framed by a squarer left
+/// end, then the title, artist, album and progress, inside a shape whose
+/// right end is a full capsule curve.
 struct NowPlaying: View {
     @EnvironmentObject var model: AppModel
     @EnvironmentObject var player: Player
     @EnvironmentObject var clock: PlaybackClock
 
+    static let height: CGFloat = 44
+    static let inset: CGFloat = 4 // around the cover, on all sides
+    static let coverRadius: CGFloat = 5
+    /// The left corners are concentric with the cover's.
+    static let leftRadius = coverRadius + inset
+
+    static var shape: UnevenRoundedRectangle {
+        UnevenRoundedRectangle(topLeadingRadius: leftRadius, bottomLeadingRadius: leftRadius,
+                               bottomTrailingRadius: height / 2, topTrailingRadius: height / 2,
+                               style: .continuous)
+    }
+
     var body: some View {
-        HStack(spacing: 8) {
-            ArtView(sha: player.current?.artSHA, size: 28, cornerRadius: 5)
-            VStack(spacing: 2) {
+        HStack(spacing: 10) {
+            ArtView(sha: player.current?.artSHA, size: Self.height - 2 * Self.inset,
+                    cornerRadius: Self.coverRadius)
+            VStack(spacing: 1) {
                 if let t = player.current {
-                    Text(t.displayTitle).font(.callout).lineLimit(1)
+                    Text(t.displayTitle).font(.system(size: 12, weight: .medium)).lineLimit(1)
                     Text([t.artist, t.album].filter { !$0.isEmpty }.joined(separator: " — "))
-                        .font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                    ProgressView(value: min(clock.position, player.duration), total: max(player.duration, 1))
-                        .progressViewStyle(.linear).controlSize(.mini)
+                        .font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
+                    ProgressBar(fraction: player.duration > 0 ? min(clock.position / player.duration, 1) : 0)
+                        .padding(.top, 3)
                 } else {
-                    Text("MediaLayer").font(.callout).foregroundStyle(.secondary)
+                    Text("MediaLayer").font(.system(size: 12)).foregroundStyle(.secondary)
                 }
             }
+            .frame(maxWidth: .infinity)
             if let e = player.error {
                 Image(systemName: "exclamationmark.triangle").foregroundStyle(.red).help(e)
             }
         }
-        // Clear of the toolbar capsule's rounded ends.
-        .padding(.leading, 14)
-        .padding(.trailing, 12)
-        .padding(.vertical, 3)
+        .padding(.leading, Self.inset)
+        .padding(.trailing, Self.height / 2) // clear of the right end's curve
+        .frame(height: Self.height)
+        .modifier(TransportBackground(shape: Self.shape))
     }
+}
+
+/// A thin progress line that fits the display better than ProgressView.
+struct ProgressBar: View {
+    let fraction: Double
+
+    var body: some View {
+        GeometryReader { g in
+            ZStack(alignment: .leading) {
+                Capsule().fill(.quaternary)
+                Capsule().fill(.secondary).frame(width: g.size.width * fraction)
+            }
+        }
+        .frame(height: 3)
+    }
+}
+
+/// Liquid Glass on macOS 26, a material before it.
+struct TransportBackground<S: Shape>: ViewModifier {
+    let shape: S
+
+    func body(content: Content) -> some View {
+        if #available(macOS 26.0, *) {
+            content.glassEffect(.regular, in: shape)
+        } else {
+            content.background(.regularMaterial, in: shape)
+                .overlay(shape.strokeBorder(.separator, lineWidth: 0.5))
+        }
+    }
+}
+
+/// The toolbar item for NowPlaying. On macOS 26 the toolbar would wrap it
+/// in its own capsule; hide that, since NowPlaying draws its own shape.
+struct NowPlayingItem: ToolbarContent {
+    var body: some ToolbarContent {
+        if #available(macOS 26.0, *) {
+            ToolbarItem(placement: .principal) { item }.sharedBackgroundVisibility(.hidden)
+        } else {
+            ToolbarItem(placement: .principal) { item }
+        }
+    }
+
+    private var item: some View { NowPlaying().frame(minWidth: 360, idealWidth: 460) }
 }
 
 struct ColumnBrowser: View {
