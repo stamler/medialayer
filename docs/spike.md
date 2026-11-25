@@ -92,6 +92,14 @@ mkdir -p ~/mnt/ml
   --rc --rc-no-auth -v -o readahead=0
 ```
 
+`prime` keeps each file's metadata rounded up to the next whole MiB
+(`store_to_block`, default 1 MiB). macOS reports a 1 MiB block size for NFS
+mounts, and Tauon reads FLAC tags through a Python buffered file, so its
+first read of every file pulls in the whole first MiB even though the tags
+end earlier. Storing that MiB keeps the scan off the cloud, at about 1 MiB
+per file (the metadata alone averaged about 180 KB in the test library).
+Running `prime` again tops up records stored with less.
+
 `prime` prints how many files it stored, how many range requests it made
 and how long it took. In Tauon, remove the first folder, add `~/mnt/ml`,
 and time the import again. Then, while the mount is running:

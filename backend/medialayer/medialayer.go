@@ -59,6 +59,17 @@ func init() {
 			Advanced: true,
 			Help:     "Most bytes kept per file. Larger metadata is kept up to this size.",
 		}, {
+			Name:     "store_to_block",
+			Default:  fs.SizeSuffix(1024 * 1024),
+			Advanced: true,
+			Help: `Keep each file's bytes up to the next multiple of this size past its metadata.
+
+Apps read files through a buffer the size of the block size the file
+system reports, and macOS reports 1 MiB for NFS mounts, so a tag scan
+through nfsmount reads the whole first MiB of every file even though the
+tags end well before. Keeping those bytes lets the scan stay local. 0
+keeps only the metadata.`,
+		}, {
 			Name:     "extensions",
 			Default:  fs.CommaSepList{"flac"},
 			Advanced: true,
@@ -72,6 +83,7 @@ type Options struct {
 	Remote     string          `config:"remote"`
 	HeaderDir  string          `config:"header_dir"`
 	MaxHeader  fs.SizeSuffix   `config:"max_header"`
+	StoreTo    fs.SizeSuffix   `config:"store_to_block"`
 	Extensions fs.CommaSepList `config:"extensions"`
 }
 
@@ -122,6 +134,9 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 	}
 	if opt.MaxHeader <= 0 {
 		return nil, errors.New("max_header must be positive")
+	}
+	if opt.StoreTo < 0 {
+		return nil, errors.New("store_to_block must not be negative")
 	}
 
 	remotePath := fspath.JoinRootPath(opt.Remote, root)

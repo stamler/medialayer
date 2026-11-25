@@ -236,3 +236,49 @@ func TestVFSBlockReadsPastHeaderContinueOneStream(t *testing.T) {
 		t.Fatalf("stats = %v, want nearly every block to continue the first stream", st)
 	}
 }
+
+// With store_to_block, prime keeps the metadata rounded up to the block
+// size, so an app that reads the whole first block through a buffer (as
+// Python does on a macOS NFS mount, which reports 1 MiB blocks) is answered
+// without touching the cloud. Records stored with less are primed again.
+func TestStoreToBlockKeepsWholeFirstBlock(t *testing.T) {
+	lib := newLibrary(t)
+	lib.prime() // metadata only
+	lib.storeTo = "1M"
+	lib.f = lib.newFs()
+	res := lib.prime()
+	if res.Primed != 1 || res.BytesStored != 1<<20 {
+		t.Fatalf("prime = %+v, want the short record primed again with 1 MiB", res)
+	}
+	if again := lib.prime(); again.AlreadyFresh != 1 {
+		t.Fatalf("third prime = %+v, want the padded record already fresh", again)
+	}
+
+	if err := config.SetCacheDir(t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	ctx, ci := fs.AddConfig(context.Background())
+	ci.BufferSize = 0
+	opt := vfscommon.Opt
+	opt.CacheMode = vfscommon.CacheModeOff
+	v := vfs.New(ctx, lib.f, &opt)
+	defer v.Shutdown()
+	const block = 32 * 1024
+	for pos := 0; pos < 1<<20; pos += block {
+		h, err := v.OpenFile("Artist/Album/01 Track.flac", os.O_RDONLY, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		buf := make([]byte, block)
+		if _, err := h.ReadAt(buf, int64(pos)); err != nil {
+			t.Fatal(err)
+		}
+		_ = h.Close()
+		if !bytes.Equal(buf, lib.file[pos:pos+block]) {
+			t.Fatalf("block at %d differs from the file", pos)
+		}
+	}
+	if st := lib.stats(); st["passed_through"] != 0 || st["read_past_header"] != 0 {
+		t.Fatalf("stats = %v, want the first MiB served without the cloud", st)
+	}
+}

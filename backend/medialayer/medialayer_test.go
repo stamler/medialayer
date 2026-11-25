@@ -25,6 +25,7 @@ type library struct {
 	dir        string
 	file       []byte // the FLAC test file
 	audioStart int
+	storeTo    string // store_to_block for newFs; most tests keep metadata only
 	f          *Fs
 }
 
@@ -44,7 +45,7 @@ func newLibrary(t *testing.T) *library {
 	if err := os.WriteFile(filepath.Join(dir, "Artist", "Album", "fake.flac"), []byte("not really flac"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	lib := &library{t: t, dir: dir, file: file, audioStart: audioStart}
+	lib := &library{t: t, dir: dir, file: file, audioStart: audioStart, storeTo: "0"}
 	lib.f = lib.newFs()
 	return lib
 }
@@ -58,8 +59,9 @@ func (lib *library) newFs() *Fs {
 	// fs.ConfigMap fills in the registered defaults, as rclone does for a
 	// configured remote.
 	m := fs.ConfigMap(ri.Prefix, ri.Options, "mltest", configmap.Simple{
-		"remote":     lib.dir,
-		"header_dir": filepath.Join(lib.dir, "..", filepath.Base(lib.dir)+"-headers"),
+		"remote":         lib.dir,
+		"store_to_block": lib.storeTo,
+		"header_dir":     filepath.Join(lib.dir, "..", filepath.Base(lib.dir)+"-headers"),
 	})
 	f, err := NewFs(context.Background(), "mltest", "", m)
 	if err != nil {

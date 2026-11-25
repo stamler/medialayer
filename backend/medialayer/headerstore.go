@@ -25,7 +25,7 @@ type headerRecord struct {
 	ModTime  time.Time // modification time of the file when primed
 	HashType hash.Type // hash.None if no hash was stored
 	Hash     string    // the remote's hash of the whole file
-	Complete bool      // Header holds every byte before the audio
+	Complete bool      // Header holds every byte before the audio (and maybe more)
 	Header   []byte    // bytes [0, len(Header)) of the file
 }
 

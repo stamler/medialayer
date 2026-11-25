@@ -113,7 +113,8 @@ func (f *Fs) prime(ctx context.Context, dir string) (*primeResult, error) {
 			for base := range work {
 				// Checked here rather than with freshRecord, so priming
 				// does not count towards the mount's stale_records_seen.
-				if rec := f.store.get(f.key(base.Remote())); rec != nil && f.matches(ctx, rec, base) {
+				if rec := f.store.get(f.key(base.Remote())); rec != nil && f.matches(ctx, rec, base) &&
+					(!rec.Complete || int64(len(rec.Header)) >= f.storeLen(int64(len(rec.Header)), base.Size())) {
 					fresh.Add(1)
 					continue
 				}
@@ -129,6 +130,20 @@ func (f *Fs) prime(ctx context.Context, dir string) (*primeResult, error) {
 					return buf, err
 				}
 				header, complete, err := flacHeader(fetch, base.Size(), int64(f.opt.MaxHeader))
+				if err == nil && complete {
+					if want := f.storeLen(int64(len(header)), base.Size()); want > int64(len(header)) {
+						more, ferr := fetch(int64(len(header)), want-int64(len(header)))
+						if ferr == nil && int64(len(more)) != want-int64(len(header)) {
+							ferr = io.ErrUnexpectedEOF
+						}
+						if ferr == nil {
+							header = append(header, more...)
+						} else {
+							// Keep the metadata; the next prime tops it up.
+							fs.Debugf(base, "medialayer: storing metadata only: %v", ferr)
+						}
+					}
+				}
 				if errors.Is(err, errNotFLAC) {
 					notMedia.Add(1)
 					fs.Debugf(base, "medialayer: not primed: %v", err)
@@ -192,4 +207,16 @@ func (f *Fs) prime(ctx context.Context, dir string) (*primeResult, error) {
 	res.BytesStored = stored.Load()
 	res.Seconds = time.Since(start).Seconds()
 	return &res, ctx.Err()
+}
+
+// storeLen is how many bytes of a file of this size to keep when its
+// metadata takes metaLen: the metadata rounded up to the next multiple of
+// store_to_block, within the file and max_header. An app reading through a
+// buffer of that block size then never needs a byte that is not stored.
+func (f *Fs) storeLen(metaLen, size int64) int64 {
+	n := metaLen
+	if b := int64(f.opt.StoreTo); b > 0 {
+		n = (metaLen + b - 1) / b * b
+	}
+	return max(metaLen, min(n, size, int64(f.opt.MaxHeader)))
 }
