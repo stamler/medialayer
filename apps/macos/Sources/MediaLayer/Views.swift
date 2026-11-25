@@ -350,8 +350,9 @@ struct StatusBar: View {
             }
         }
         .font(.caption)
-        .padding(.horizontal, 10)
-        .padding(.vertical, 5)
+        // Clear of the window's rounded bottom corners (large on macOS 26).
+        .padding(.horizontal, 22)
+        .padding(.vertical, 8)
         .background(.bar)
     }
 
