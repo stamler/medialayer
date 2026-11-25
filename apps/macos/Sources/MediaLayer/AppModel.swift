@@ -1,3 +1,4 @@
+import AppKit
 import AVFoundation
 import Foundation
 import SwiftUI
@@ -30,6 +31,7 @@ final class AppModel: ObservableObject {
     private var lastLoad = Date.distantPast
     private var loadedFinish: String?
     private var timer: Timer?
+    private var keyMonitor: Any?
 
     init() {
         let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -50,6 +52,18 @@ final class AppModel: ObservableObject {
         }
         RunLoop.main.add(timer, forMode: .common) // keep polling while menus are open
         self.timer = timer
+        // Space plays and pauses anywhere in the library window. A menu
+        // shortcut with no modifier never sees it: the table and lists
+        // take it first. Text fields, sheets and dialogs keep it.
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard event.keyCode == 49, // space
+                  event.modifierFlags.intersection([.command, .option, .control, .shift]).isEmpty,
+                  let window = event.window, !window.isSheet, window.attachedSheet == nil,
+                  !(window.firstResponder is NSText),
+                  let self else { return event }
+            MainActor.assumeIsolated { self.player.toggle() }
+            return nil
+        }
     }
 
     /// Polls the core and reloads the library when the index changed.
