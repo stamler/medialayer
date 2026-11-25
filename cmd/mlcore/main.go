@@ -7,7 +7,7 @@
 // strings; every returned string is owned by the caller, who frees it
 // with MLFree. A NULL return means success where a function returns an
 // error message. The core runs inside the app; Swift calls the blocking
-// functions (MLConnectGoogleDrive, MLListFolders) off the main thread.
+// functions (MLConnectGoogleDrive, MLAddGoogleAccount, MLListFolders) off the main thread.
 //
 // gomobile will replace this once full Xcode is part of the build.
 package main
@@ -99,15 +99,32 @@ func MLConnectGoogleDrive() *C.char {
 	return errStr(c.ConnectGoogleDrive(context.Background()))
 }
 
+// MLAddGoogleAccount signs in to another Google account, for a
+// secondary, in the browser. It blocks until the user finishes and
+// returns {"remote": "..."} or {"error": "..."}.
+//
+//export MLAddGoogleAccount
+func MLAddGoogleAccount() *C.char {
+	c, err := get()
+	if err == nil {
+		var remote string
+		if remote, err = c.AddGoogleAccount(context.Background()); err == nil {
+			return jsonStr(map[string]string{"remote": remote})
+		}
+	}
+	return jsonStr(map[string]string{"error": err.Error()})
+}
+
 // MLListFolders returns {"folders": [...]} or {"error": "..."} for the
-// folders inside dir ("" for the top of My Drive).
+// folders inside dir ("" for the top of My Drive) on a Google account
+// ("" for the primary's).
 //
 //export MLListFolders
-func MLListFolders(dir *C.char) *C.char {
+func MLListFolders(remote, dir *C.char) *C.char {
 	c, err := get()
 	if err == nil {
 		var folders []string
-		folders, err = c.ListFolders(context.Background(), C.GoString(dir))
+		folders, err = c.ListFolders(context.Background(), C.GoString(remote), C.GoString(dir))
 		if err == nil {
 			if folders == nil {
 				folders = []string{}
@@ -127,6 +144,41 @@ func MLSetFolder(folder *C.char) *C.char {
 		return errStr(err)
 	}
 	return errStr(c.SetFolder(C.GoString(folder)))
+}
+
+// MLAddSecondary adds a folder on a connected Google account (or, with
+// an empty remote, a local folder) as a secondary and starts syncing.
+//
+//export MLAddSecondary
+func MLAddSecondary(remote, folder *C.char) *C.char {
+	c, err := get()
+	if err != nil {
+		return errStr(err)
+	}
+	return errStr(c.AddSecondary(C.GoString(remote), C.GoString(folder)))
+}
+
+// MLRemoveSecondary stops syncing to a secondary; its files stay.
+//
+//export MLRemoveSecondary
+func MLRemoveSecondary(id *C.char) *C.char {
+	c, err := get()
+	if err != nil {
+		return errStr(err)
+	}
+	return errStr(c.RemoveSecondary(C.GoString(id)))
+}
+
+// MLApproveChanges lets a secondary that paused on a mass change go
+// ahead, and starts a sync.
+//
+//export MLApproveChanges
+func MLApproveChanges(id *C.char) *C.char {
+	c, err := get()
+	if err != nil {
+		return errStr(err)
+	}
+	return errStr(c.ApproveChanges(C.GoString(id)))
 }
 
 // MLStartSync re-reads the library folder: restore, index new and changed

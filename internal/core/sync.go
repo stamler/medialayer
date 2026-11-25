@@ -14,6 +14,7 @@ const (
 	PhaseListing    = "listing"    // listing the library folder
 	PhaseIndexing   = "indexing"   // reading headers of new and changed files
 	PhasePublishing = "publishing" // writing .medialayer to the cloud
+	PhaseMirroring  = "mirroring"  // copying changes to the secondaries
 	PhaseDone       = "done"
 	PhaseError      = "error"
 )
@@ -41,6 +42,11 @@ type Status struct {
 	StreamBase string    `json:"stream_base"` // append "<file id>.<format>"
 	Tracks     int64     `json:"tracks"`
 	Job        jobStatus `json:"job"`
+	// Sources are the library's folders, primary first.
+	Sources []SourceStatus `json:"sources"`
+	// Accounts are the connected Google accounts (rclone remotes), the
+	// primary's first.
+	Accounts []string `json:"accounts"`
 }
 
 // Status returns the current state.
@@ -55,6 +61,8 @@ func (c *Core) Status() Status {
 		Job:        c.job,
 	}
 	s.Job.Failures = append([]string(nil), c.job.Failures...)
+	s.Sources = c.sourcesLocked()
+	s.Accounts = driveAccounts()
 	if s.Job.Phase == "" {
 		s.Job.Phase = PhaseIdle
 	}
@@ -142,7 +150,7 @@ func (c *Core) sync(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("write the library's .medialayer: %w", err)
 		}
-		return nil
+		return c.mirrorAll(ctx, f)
 	}
 	return errPublishedElsewhere
 }

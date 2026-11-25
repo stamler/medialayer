@@ -47,6 +47,7 @@ type Core struct {
 	// badCovers are folder images that failed to read or decode, so later
 	// syncs in this session don't download them again.
 	badCovers map[string]bool
+	mirrors   map[string]*mirrorState // by secondary id
 	stream    *streamServer
 }
 
@@ -57,6 +58,9 @@ type settings struct {
 	// DBFile is the local index's file name. A restore writes a new file
 	// rather than replacing this one under the app's open connection.
 	DBFile string `json:"db_file,omitempty"`
+	// Secondaries hold copies of the library, synced one way from the
+	// primary (the Folder above).
+	Secondaries []source `json:"secondaries,omitempty"`
 }
 
 // New opens the core with its files in dataDir (on macOS,

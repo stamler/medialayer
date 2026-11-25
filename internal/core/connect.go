@@ -43,13 +43,56 @@ func (c *Core) googleClient() (googleClient, error) {
 // Google's consent page and blocks until the user finishes or ctx ends.
 // Full Drive access is needed to write the library's .medialayer folder.
 func (c *Core) ConnectGoogleDrive(ctx context.Context) error {
+	if err := c.connectDrive(ctx, remoteName); err != nil {
+		return err
+	}
+	c.mu.Lock()
+	c.fsys = nil // a new account may see a different folder
+	c.mu.Unlock()
+	return nil
+}
+
+// AddGoogleAccount signs in to another Google account, for a secondary,
+// and returns the new remote's name.
+func (c *Core) AddGoogleAccount(ctx context.Context) (string, error) {
+	name := ""
+	for i := 2; name == ""; i++ {
+		if n := fmt.Sprintf("%s%d", remoteName, i); config.GetValue(n, "type") == "" {
+			name = n
+		}
+	}
+	if err := c.connectDrive(ctx, name); err != nil {
+		config.DeleteRemote(name)
+		return "", err
+	}
+	return name, nil
+}
+
+// driveAccounts lists the connected Google Drive remotes, the primary's
+// first.
+func driveAccounts() []string {
+	out := []string{}
+	for _, name := range config.FileSections() {
+		if config.GetValue(name, "type") == "drive" && config.GetValue(name, "token") != "" {
+			if name == remoteName {
+				out = append([]string{name}, out...)
+			} else {
+				out = append(out, name)
+			}
+		}
+	}
+	return out
+}
+
+// connectDrive signs in to Google Drive as the rclone remote name.
+func (c *Core) connectDrive(ctx context.Context, name string) error {
 	g, err := c.googleClient()
 	if err != nil {
 		return err
 	}
 	params := rc.Params{"client_id": g.ID, "client_secret": g.Secret, "scope": "drive"}
 	opt := config.UpdateRemoteOpt{NonInteractive: true}
-	out, err := config.CreateRemote(ctx, remoteName, "drive", params, opt)
+	out, err := config.CreateRemote(ctx, name, "drive", params, opt)
 	// The backend's config questions (use a local browser? a shared
 	// drive?) are answered with their defaults: a browser on this machine,
 	// and My Drive.
@@ -64,7 +107,7 @@ func (c *Core) ConnectGoogleDrive(ctx context.Context) error {
 				answer = fmt.Sprint(out.Option.Default)
 			}
 		}
-		out, err = config.UpdateRemote(ctx, remoteName, nil, config.UpdateRemoteOpt{
+		out, err = config.UpdateRemote(ctx, name, nil, config.UpdateRemoteOpt{
 			NonInteractive: true, Continue: true, State: out.State, Result: answer,
 		})
 	}
@@ -74,22 +117,23 @@ func (c *Core) ConnectGoogleDrive(ctx context.Context) error {
 	if out != nil && out.Error != "" {
 		return errors.New(out.Error)
 	}
-	if !c.Connected() {
+	if config.GetValue(name, "token") == "" {
 		return errors.New("Google sign-in did not finish")
 	}
-	c.mu.Lock()
-	c.fsys = nil // a new account may see a different folder
-	c.mu.Unlock()
 	return nil
 }
 
-// ListFolders lists the folders inside dir ("" for the top of My Drive),
-// sorted by name, as paths relative to the top.
-func (c *Core) ListFolders(ctx context.Context, dir string) ([]string, error) {
-	if !c.Connected() {
+// ListFolders lists the folders inside dir ("" for the top of My Drive)
+// on a connected remote ("" for the primary's), sorted by name, as paths
+// relative to the top.
+func (c *Core) ListFolders(ctx context.Context, remote, dir string) ([]string, error) {
+	if remote == "" {
+		remote = remoteName
+	}
+	if config.GetValue(remote, "token") == "" {
 		return nil, errors.New("not connected to Google Drive")
 	}
-	f, err := fs.NewFs(ctx, remoteName+":")
+	f, err := fs.NewFs(ctx, remote+":")
 	if err != nil {
 		return nil, err
 	}
@@ -132,6 +176,8 @@ func (c *Core) SetFolder(folder string) error {
 		}
 		c.settings.Folder = folder
 		c.settings.DBFile = ""
+		c.settings.Secondaries = nil // they hold copies of the old library
+		c.mirrors = nil
 		c.fsys = nil
 		if err := c.saveSettings(); err != nil {
 			c.mu.Unlock()
