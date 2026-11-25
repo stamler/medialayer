@@ -162,7 +162,7 @@ func (c *Core) restore(ctx context.Context, f fs.Fs) error {
 	if err != nil {
 		return err
 	}
-	snap, _ := newestSnapshot(snaps)
+	snap, snapN := newestSnapshot(snaps)
 	if snap == nil {
 		return nil // a repository with no snapshot yet: index from scratch
 	}
@@ -217,6 +217,23 @@ func (c *Core) restore(ctx context.Context, f fs.Fs) error {
 		}
 		c.setJob(func(j *jobStatus) { j.Done++ })
 	}
+	// The restored index is that version, and the primary holds it; keep
+	// it as the local snapshot that secondaries receive.
+	err = sdb.SetMeta("version", strconv.Itoa(snapN))
+	if err == nil {
+		err = sdb.SetMeta("primary_version", strconv.Itoa(snapN))
+	}
+	if err == nil {
+		err = os.MkdirAll(filepath.Join(c.dataDir, "snapshots"), 0o700)
+	}
+	if err == nil {
+		_ = os.Remove(c.localSnapshot(snapN))
+		err = sdb.Snapshot(c.localSnapshot(snapN))
+	}
+	if err != nil {
+		_ = sdb.Close()
+		return err
+	}
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -239,8 +256,78 @@ func (c *Core) restore(ctx context.Context, f fs.Fs) error {
 	return nil
 }
 
-// publish writes the index to the cloud when it changed: art packs the
-// cloud lacks, a new snapshot, and repo.json if the folder has none yet.
+// The local index carries a version, raised each time it changes and
+// stored in its meta table as "version" (with the library's generation),
+// so any copy of it says which version it is. Each version is kept as a
+// local snapshot file, snapshots/NNNNNN.sqlite in the data directory,
+// which is what the primary and every secondary receive. "primary_version"
+// records the newest version the primary holds.
+
+// localSnapshot is the local snapshot file of a version.
+func (c *Core) localSnapshot(version int) string {
+	return filepath.Join(c.dataDir, "snapshots", snapshotName(version))
+}
+
+func snapshotName(version int) string { return fmt.Sprintf("%06d.sqlite", version) }
+
+// metaInt reads a numeric meta value; missing is 0.
+func metaInt(db *index.DB, key string) (int, error) {
+	v, err := db.Meta(key)
+	if err != nil || v == "" {
+		return 0, err
+	}
+	return strconv.Atoi(v)
+}
+
+// currentVersion returns the index's version and its local snapshot
+// file, making a new version when the index changed since the last one.
+// newest is the highest snapshot number known on the primary, so
+// versions keep rising across devices.
+func (c *Core) currentVersion(db *index.DB, newest int, generation int64) (int, string, error) {
+	dirty, err := db.Meta("dirty")
+	if err != nil {
+		return 0, "", err
+	}
+	version, err := metaInt(db, "version")
+	if err != nil {
+		return 0, "", err
+	}
+	local := c.localSnapshot(version)
+	if _, err := os.Stat(local); version > 0 && dirty != "1" && err == nil {
+		return version, local, nil
+	}
+	version = max(version, newest) + 1
+	for k, v := range map[string]string{
+		"version": strconv.Itoa(version), "generation": strconv.FormatInt(generation, 10), "dirty": "0",
+	} {
+		if err := db.SetMeta(k, v); err != nil {
+			return 0, "", err
+		}
+	}
+	local = c.localSnapshot(version)
+	if err := os.MkdirAll(filepath.Dir(local), 0o700); err != nil {
+		return 0, "", err
+	}
+	_ = os.Remove(local)
+	if err := db.Snapshot(local); err != nil {
+		_ = db.SetMeta("dirty", "1")
+		return 0, "", err
+	}
+	// Older versions are no longer needed: every copy gets the newest.
+	old, _ := filepath.Glob(filepath.Join(c.dataDir, "snapshots", "*.sqlite"))
+	for _, p := range old {
+		if p != local {
+			_ = os.Remove(p)
+		}
+	}
+	return version, local, nil
+}
+
+// publish brings the primary up to date with the local index: a new
+// version when the index changed, the art packs the primary lacks, that
+// version's snapshot, and repo.json if the folder has none yet. A version
+// the primary couldn't take (it was full, say) is offered again on every
+// sync until it does.
 func (c *Core) publish(ctx context.Context, f fs.Fs) error {
 	db := c.currentDB()
 	repo, err := readRepo(ctx, f)
@@ -251,7 +338,16 @@ func (c *Core) publish(ctx context.Context, f fs.Fs) error {
 	if err != nil {
 		return err
 	}
-	if repo != nil && dirty != "1" {
+	version, err := metaInt(db, "version")
+	if err != nil {
+		return err
+	}
+	onPrimary, err := metaInt(db, "primary_version")
+	if err != nil {
+		return err
+	}
+	_, statErr := os.Stat(c.localSnapshot(version))
+	if repo != nil && dirty != "1" && version > 0 && onPrimary >= version && statErr == nil {
 		return nil
 	}
 	c.setJob(func(j *jobStatus) { j.Phase, j.Done, j.Total, j.Current = PhasePublishing, 0, 0, "" })
@@ -263,11 +359,11 @@ func (c *Core) publish(ctx context.Context, f fs.Fs) error {
 	if repo != nil && libraryID != "" && libraryID != repo.LibraryID {
 		return fmt.Errorf("this folder holds library %s, but the local index is library %s", repo.LibraryID, libraryID)
 	}
+	snaps, err := listRepoDir(ctx, f, "snapshots")
+	if err != nil {
+		return err
+	}
 	if repo != nil && libraryID == "" {
-		snaps, err := listRepoDir(ctx, f, "snapshots")
-		if err != nil {
-			return err
-		}
 		if s, _ := newestSnapshot(snaps); s != nil {
 			// Indexed from scratch while another device published: take
 			// its snapshot instead, so both devices share file ids.
@@ -275,7 +371,8 @@ func (c *Core) publish(ctx context.Context, f fs.Fs) error {
 		}
 		libraryID = repo.LibraryID // a repository with no snapshot yet
 	}
-	if repo == nil {
+	newRepo := repo == nil
+	if newRepo {
 		if libraryID == "" {
 			libraryID = index.NewID()
 		} else if err := c.dropSecondaries(); err != nil {
@@ -293,68 +390,37 @@ func (c *Core) publish(ctx context.Context, f fs.Fs) error {
 			ChangedBy:  c.settings.DeviceID,
 		}
 		repo.Members = []member{repo.Primary}
-	} else {
-		repo = nil // already on the cloud; don't rewrite it
 	}
 	if err := db.SetMeta("library_id", libraryID); err != nil {
 		return err
 	}
+	_, newest := newestSnapshot(snaps)
+	version, local, err := c.currentVersion(db, newest, repo.Generation)
+	if err != nil {
+		return err
+	}
+	name := snapshotName(version)
 
 	// Art packs first, so a snapshot never refers to a pack the cloud lacks.
-	cloudPacks, err := listRepoDir(ctx, f, "art")
-	if err != nil {
+	if err := c.uploadPacks(ctx, f, db); err != nil {
 		return err
 	}
-	// Only packs the index refers to: a discarded index can leave others.
-	packs, err := db.ArtPacks()
-	if err != nil {
-		return err
-	}
-	for _, name := range packs {
-		if _, ok := cloudPacks[name]; ok {
-			continue
-		}
-		if err := upload(ctx, f, filepath.Join(c.artDir(), name), repoDir+"/art/"+name); err != nil {
+	if o, ok := snaps[name]; !ok || o.Size() != fileSize(local) {
+		if err := upload(ctx, f, local, repoDir+"/snapshots/"+name); err != nil {
 			return err
 		}
 	}
-
-	snaps, err := listRepoDir(ctx, f, "snapshots")
-	if err != nil {
-		return err
-	}
-	_, newest := newestSnapshot(snaps)
-	name := fmt.Sprintf("%06d.sqlite", newest+1)
-	// Clear the flag in the snapshot itself; it is set again locally if
-	// the upload fails.
-	if err := db.SetMeta("dirty", "0"); err != nil {
-		return err
-	}
-	local := filepath.Join(c.dataDir, name)
-	_ = os.Remove(local)
-	if err := db.Snapshot(local); err != nil {
-		_ = db.SetMeta("dirty", "1")
-		return err
-	}
-	defer func() { _ = os.Remove(local) }()
-	if err := upload(ctx, f, local, repoDir+"/snapshots/"+name); err != nil {
-		_ = db.SetMeta("dirty", "1")
-		return err
-	}
-
-	if repo != nil {
+	if newRepo {
 		b, err := json.MarshalIndent(repo, "", "  ")
 		if err != nil {
 			return err
 		}
-		tmp := filepath.Join(c.dataDir, "repo.json")
-		if err := os.WriteFile(tmp, b, 0o600); err != nil {
+		if err := putBytes(ctx, f, repoDir+"/repo.json", b); err != nil {
 			return err
 		}
-		defer func() { _ = os.Remove(tmp) }()
-		if err := upload(ctx, f, tmp, repoDir+"/repo.json"); err != nil {
-			return err
-		}
+	}
+	if err := db.SetMeta("primary_version", strconv.Itoa(version)); err != nil {
+		return err
 	}
 
 	// Keep the newest few snapshots.
@@ -363,8 +429,8 @@ func (c *Core) publish(ctx context.Context, f fs.Fs) error {
 		o fs.Object
 	}
 	var old []numbered
-	for name, o := range snaps {
-		if n, ok := snapshotNumber(name); ok {
+	for sname, o := range snaps {
+		if n, ok := snapshotNumber(sname); ok && sname != name {
 			old = append(old, numbered{n, o})
 		}
 	}
@@ -377,6 +443,38 @@ func (c *Core) publish(ctx context.Context, f fs.Fs) error {
 		}
 	}
 	return nil
+}
+
+// uploadPacks uploads the art packs the index refers to that f lacks.
+func (c *Core) uploadPacks(ctx context.Context, f fs.Fs, db *index.DB) error {
+	have, err := listRepoDir(ctx, f, "art")
+	if err != nil {
+		return err
+	}
+	// Only packs the index refers to: a discarded index can leave others.
+	packs, err := db.ArtPacks()
+	if err != nil {
+		return err
+	}
+	for _, name := range packs {
+		local := filepath.Join(c.artDir(), name)
+		if o, ok := have[name]; ok && o.Size() == fileSize(local) {
+			continue // packs never change once the run that wrote them ends
+		}
+		if err := upload(ctx, f, local, repoDir+"/art/"+name); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// fileSize is a local file's size, or -1.
+func fileSize(p string) int64 {
+	st, err := os.Stat(p)
+	if err != nil {
+		return -1
+	}
+	return st.Size()
 }
 
 // upload copies the local file src to remote on f.

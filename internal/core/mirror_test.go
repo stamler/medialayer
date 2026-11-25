@@ -11,6 +11,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/stamler/medialayer/internal/index"
 )
 
 // newMirrorCore is a test core with a primary library of 64 files (so one
@@ -315,7 +317,18 @@ func TestMirrorRefusesUnsafeFolders(t *testing.T) {
 			c.mu.Lock()
 			c.settings.Secondaries = []source{{ID: "sec1", Folder: folder}}
 			c.mu.Unlock()
-			before := snapshotTree(t, filepath.Dir(lib))
+			// The core's own data folder sits beside the library in tests.
+			data, _ := filepath.Rel(filepath.Dir(lib), c.dataDir)
+			tree := func() map[string]bool {
+				m := snapshotTree(t, filepath.Dir(lib))
+				for p := range m {
+					if strings.HasPrefix(p, filepath.ToSlash(data)+"/") {
+						delete(m, p)
+					}
+				}
+				return m
+			}
+			before := tree()
 			if err := c.sync(ctx); err != nil {
 				t.Fatal(err)
 			}
@@ -323,7 +336,7 @@ func TestMirrorRefusesUnsafeFolders(t *testing.T) {
 				t.Errorf("secondary = %+v, want an error", s)
 			}
 			// Nothing outside the primary's own .medialayer changed.
-			after := snapshotTree(t, filepath.Dir(lib))
+			after := tree()
 			for p := range after {
 				if !before[p] && !strings.Contains(p, ".medialayer/") {
 					t.Errorf("%s appeared", p)
@@ -442,5 +455,39 @@ func TestIsFull(t *testing.T) {
 		if got := isFull(err); got != want {
 			t.Errorf("isFull(%v) = %v", err, got)
 		}
+	}
+}
+
+func TestMirrorCarriesEachIndexVersion(t *testing.T) {
+	ctx := context.Background()
+	c, lib, sec := newMirrorCore(t)
+	if err := c.sync(ctx); err != nil {
+		t.Fatal(err)
+	}
+	write(t, filepath.Join(lib, "C/New/01.flac"), testFLAC([]string{"TITLE=New"}, nil, 1000))
+	if err := c.sync(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var m memberRecord
+	b, _ := os.ReadFile(filepath.Join(sec, ".medialayer/member.json"))
+	if err := json.Unmarshal(b, &m); err != nil || m.State != "synced" || m.Version != 2 || m.Snapshot != "000002.sqlite" || m.Generation != 1 {
+		t.Fatalf("member.json = %s (%v)", b, err)
+	}
+	snaps, _ := os.ReadDir(filepath.Join(sec, ".medialayer/snapshots"))
+	if len(snaps) != 1 || snaps[0].Name() != "000002.sqlite" {
+		t.Errorf("secondary snapshots = %v, want only 000002.sqlite", snaps)
+	}
+	// The secondary's snapshot is that version of the index, with the
+	// new track in it.
+	sdb, err := index.Open(filepath.Join(sec, ".medialayer/snapshots/000002.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = sdb.Close() }()
+	if v, _ := sdb.Meta("version"); v != "2" {
+		t.Errorf("snapshot version = %q", v)
+	}
+	if n, _ := sdb.TrackCount(); n != 4 {
+		t.Errorf("snapshot has %d tracks, want 4", n)
 	}
 }

@@ -444,13 +444,16 @@ func (c *Core) mirrorAll(ctx context.Context, f fs.Fs) error {
 	if err != nil {
 		return fmt.Errorf("list %s: %w", f.Root(), err)
 	}
-	snaps, err := listRepoDir(ctx, f, "snapshots")
+	// Secondaries get the local index's current version, which the
+	// primary may not hold yet (when it is full, say).
+	db := c.currentDB()
+	version, err := metaInt(db, "version")
 	if err != nil {
 		return err
 	}
-	snap, _ := newestSnapshot(snaps)
-	if snap == nil {
-		return errors.New("the primary has no snapshot yet")
+	snap := c.localSnapshot(version)
+	if version == 0 || fileSize(snap) < 0 {
+		return errors.New("the index has no saved version yet")
 	}
 	for _, t := range targets {
 		if err := ctx.Err(); err != nil {
@@ -475,7 +478,7 @@ func (c *Core) mirrorAll(ctx context.Context, f fs.Fs) error {
 			continue
 		}
 		c.setMirror(t.s.ID, func(m *mirrorState) { m.state, m.err = MirrorSyncing, "" })
-		err := c.mirror(ctx, f, src, repo, snap, t)
+		err := c.mirror(ctx, f, src, repo, version, t)
 		if err != nil && ctx.Err() != nil {
 			c.setMirror(t.s.ID, func(m *mirrorState) { m.state = "" })
 			return ctx.Err()
@@ -574,11 +577,14 @@ func absent(err error) bool {
 // leaves the record as it was, so "synced" means it matched Snapshot at
 // SyncedAt.
 type memberRecord struct {
-	LibraryID string    `json:"library_id"`
-	Replica   string    `json:"replica"`
-	State     string    `json:"state"`              // "copying", "paused" or "synced"
-	Snapshot  string    `json:"snapshot,omitempty"` // the primary's snapshot it matches, when synced
-	SyncedAt  time.Time `json:"synced_at,omitzero"`
+	LibraryID string `json:"library_id"`
+	Replica   string `json:"replica"`
+	State     string `json:"state"`              // "copying", "paused" or "synced"
+	Snapshot  string `json:"snapshot,omitempty"` // the index snapshot it holds and matches
+	Version   int    `json:"version,omitempty"`  // that snapshot's index version
+	// Generation is the primary's generation it was synced under.
+	Generation int64     `json:"generation,omitempty"`
+	SyncedAt   time.Time `json:"synced_at,omitzero"`
 }
 
 // readSmall reads a small file.
@@ -651,7 +657,7 @@ func planSignature(lines []string) string {
 
 // mirror makes one checked secondary match the primary f, whose files
 // are src.
-func (c *Core) mirror(ctx context.Context, f fs.Fs, src *listing, repo *repoRecord, snap fs.Object, t target) error {
+func (c *Core) mirror(ctx context.Context, f fs.Fs, src *listing, repo *repoRecord, version int, t target) error {
 	dst, have, s := t.dst, t.have, t.s
 	// Paths are matched in Unicode NFC, as HFS+ disks keep names
 	// decomposed and Drive composed, and on local disks also by case, as
@@ -722,7 +728,7 @@ func (c *Core) mirror(ctx context.Context, f fs.Fs, src *listing, repo *repoReco
 		}
 		return nil
 	}
-	snapName := path.Base(snap.Remote())
+	snapName := snapshotName(version)
 	if changes > 0 && float64(changes) > massChange*float64(max(len(src.files), 1)) && sig != approved {
 		c.setMirror(s.ID, func(m *mirrorState) {
 			m.state, m.pending = MirrorPaused, sig
@@ -731,12 +737,13 @@ func (c *Core) mirror(ctx context.Context, f fs.Fs, src *listing, repo *repoReco
 		if t.member.State != "paused" {
 			m := t.member
 			m.LibraryID, m.Replica, m.State = repo.LibraryID, s.ID, "paused"
+			m.Generation = repo.Generation
 			return writeMember(m) // the snapshot and time it last matched stay
 		}
 		return nil
 	}
 
-	member := memberRecord{LibraryID: repo.LibraryID, Replica: s.ID, State: "copying"}
+	member := memberRecord{LibraryID: repo.LibraryID, Replica: s.ID, State: "copying", Generation: repo.Generation}
 	if len(copies)+changes > 0 || t.member.State != "synced" || t.member.Snapshot != snapName {
 		if err := writeMember(member); err != nil {
 			return err
@@ -782,11 +789,11 @@ func (c *Core) mirror(ctx context.Context, f fs.Fs, src *listing, repo *repoReco
 		}
 		step(p)
 	}
-	if err := c.mirrorRepo(ctx, f, dst, repo, snap, t.theirs); err != nil {
+	if err := c.mirrorRepo(ctx, dst, repo, version, t.theirs); err != nil {
 		return fmt.Errorf("copy .medialayer: %w", err)
 	}
 	if t.member.State != "synced" || t.member.Snapshot != snapName {
-		member.State, member.Snapshot, member.SyncedAt = "synced", snapName, time.Now().UTC()
+		member.State, member.Snapshot, member.Version, member.SyncedAt = "synced", snapName, version, time.Now().UTC()
 		if err := writeMember(member); err != nil {
 			return err
 		}
@@ -801,37 +808,29 @@ func (c *Core) mirror(ctx context.Context, f fs.Fs, src *listing, repo *repoReco
 	return nil
 }
 
-// mirrorRepo copies the primary's art packs, newest snapshot snap and
-// repo.json to dst, repo.json last, so a secondary with a repo.json can
-// always open the library. theirs is dst's repo.json before.
-func (c *Core) mirrorRepo(ctx context.Context, f, dst fs.Fs, repo *repoRecord, snap fs.Object, theirs *repoRecord) error {
-	for _, dir := range []string{"art", "snapshots"} {
-		ours, err := listRepoDir(ctx, f, dir)
-		if err != nil {
+// mirrorRepo copies the library's own files to dst: the art packs the
+// index refers to, the index's current version, and repo.json last, so a
+// secondary with a repo.json can always open the library. They come from
+// this device, not the primary, so a secondary has the newest index even
+// when the primary couldn't take it. theirs is dst's repo.json before.
+func (c *Core) mirrorRepo(ctx context.Context, dst fs.Fs, repo *repoRecord, version int, theirs *repoRecord) error {
+	if err := c.uploadPacks(ctx, dst, c.currentDB()); err != nil {
+		return err
+	}
+	name, local := snapshotName(version), c.localSnapshot(version)
+	have, err := listRepoDir(ctx, dst, "snapshots")
+	if err != nil {
+		return err
+	}
+	if h, ok := have[name]; !ok || h.Size() != fileSize(local) {
+		if err := upload(ctx, dst, local, repoDir+"/snapshots/"+name); err != nil {
 			return err
 		}
-		have, err := listRepoDir(ctx, dst, dir)
-		if err != nil {
-			return err
-		}
-		if dir == "snapshots" {
-			ours = map[string]fs.Object{path.Base(snap.Remote()): snap}
-		}
-		for name, o := range ours {
-			if h, ok := have[name]; ok && h.Size() == o.Size() {
-				continue // packs and snapshots never change once written
-			}
-			if _, err := operations.Copy(ctx, dst, have[name], o.Remote(), o); err != nil {
-				return err
-			}
-		}
-		if dir == "snapshots" {
-			for name, h := range have {
-				if _, ok := ours[name]; !ok {
-					if err := h.Remove(ctx); err != nil {
-						fs.Errorf(h, "remove old snapshot: %v", err)
-					}
-				}
+	}
+	for n, h := range have {
+		if n != name {
+			if err := h.Remove(ctx); err != nil {
+				fs.Errorf(h, "remove old snapshot: %v", err)
 			}
 		}
 	}

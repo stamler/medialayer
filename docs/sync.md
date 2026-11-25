@@ -13,6 +13,21 @@ and publishes it, then syncs each secondary in turn. Only one sync runs at
 a time on a device. A secondary that fails or pauses doesn't stop the
 others; its chip in the status bar shows its state.
 
+## Every copy is a whole library
+
+The goal is that if the primary is lost or corrupted, any secondary can be
+promoted in its place. So each secondary holds a complete, self-consistent
+library: every file, plus the index that describes exactly those files and
+the art packs it refers to.
+
+The index has a **version**, raised each time it changes and stored inside
+it (`meta.version`, with the generation it was made under). Each version is
+kept on the device as a snapshot file, and that same file is written to
+the primary and to every secondary as `.medialayer/snapshots/NNNNNN.sqlite`
+(NNNNNN is the version). Secondaries get it from the device, not from the
+primary, so they have the newest index even when the primary couldn't take
+it. A secondary keeps only the newest snapshot; the primary keeps two.
+
 ## Checks before anything is written
 
 A secondary is synced only if it is safe to write:
@@ -67,10 +82,10 @@ count.
    30 days.
 3. Copies and the replacements' new versions, one file at a time.
 4. The library's own files: the art packs the secondary lacks, then the
-   primary's newest snapshot (older ones are removed), then `repo.json`
+   index's current version (older snapshots are removed), then `repo.json`
    last.
-5. `member.json` is rewritten with state `synced`, the snapshot it now
-   matches and the time.
+5. `member.json` is rewritten with state `synced`, the index version and
+   snapshot it now holds and matches, the generation, and the time.
 
 A sync that pauses sets `paused`, keeping the snapshot and time it last
 matched. A sync that fails before changing anything leaves `member.json`
@@ -99,9 +114,36 @@ copies on its own servers.
 
 Sync writes to the primary only to publish the library's own files (the
 snapshot and art packs, a few MB when the library changed). If the
-primary's cloud is full, publishing is skipped with a notice in the status
-bar and retried next sync; secondaries still get every file and the last
-snapshot the primary holds.
+primary's cloud is full, that upload fails: the status bar says so, the
+device keeps offering that version to the primary on every sync
+(`meta.primary_version` records the newest the primary holds), and the
+secondaries still get every file and the current index version.
+
+## Is a secondary safe to promote?
+
+Read its `.medialayer/member.json`. It is a complete, current copy when:
+
+- `state` is `synced` (not `copying` or `paused`),
+- `library_id` is the library's, and `generation` is the current one
+  (the highest in any member's `repo.json`),
+- `version` is the newest index version known: the highest of the
+  primary's newest snapshot, the device's own index, and the other
+  members' `member.json`.
+
+A `synced` secondary with an older `version` is a whole, consistent library
+as of that version (its files and index match each other at `synced_at`);
+it is only missing later changes.
+
+## Promoting a secondary (planned)
+
+Not built yet. Promotion will: check the secondary as above; raise the
+generation by one and write a `repo.json` naming the secondary as primary
+(with the time and device) to the new primary first, then to every other
+member it can reach; and treat the old primary as a secondary from then
+on. Because the highest generation wins, a device that still names the old
+primary switches when it next reads any member. Changes found later on the
+old primary are kept in its trash and flagged, never synced over the new
+primary.
 
 ## Known gaps
 
@@ -114,5 +156,7 @@ snapshot the primary holds.
 - The 5% limit is counted per sync, not per day.
 - Each device lists its own secondaries in the primary's `repo.json`, so
   two devices with different secondaries overwrite each other's list.
-- Switching which source is the primary is not built yet.
+- Promoting a secondary to primary is designed (above) but not built.
+- A device restoring the library reads the index from the primary only, so
+  while the primary is full it gets the primary's older version.
 - The pause review shows counts, not the files.

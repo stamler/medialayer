@@ -211,6 +211,9 @@ func resetLocal(dataDir, artDir string) error {
 			return err
 		}
 	}
+	if err := os.RemoveAll(filepath.Join(dataDir, "snapshots")); err != nil {
+		return err
+	}
 	if err := os.RemoveAll(artDir); err != nil {
 		return err
 	}
