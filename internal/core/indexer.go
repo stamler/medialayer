@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"unicode"
 
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/hash"
@@ -54,10 +55,19 @@ func mediaFormat(p string) string {
 func (c *Core) index(ctx context.Context, f fs.Fs) error {
 	c.setJob(func(j *jobStatus) { j.Phase, j.Done, j.Total = PhaseListing, 0, 0 })
 	var objs []fs.Object
+	images := map[string][]fs.Object{} // by folder
 	err := walk.ListR(ctx, f, "", true, -1, walk.ListObjects, func(entries fs.DirEntries) error {
 		for _, e := range entries {
 			o, ok := e.(fs.Object)
-			if !ok || strings.HasPrefix(o.Remote(), repoDir+"/") || mediaFormat(o.Remote()) == "" {
+			if !ok || strings.HasPrefix(o.Remote(), repoDir+"/") {
+				continue
+			}
+			if isImage(o.Remote()) {
+				dir := path.Dir(o.Remote())
+				images[dir] = append(images[dir], o)
+				continue
+			}
+			if mediaFormat(o.Remote()) == "" {
 				continue
 			}
 			objs = append(objs, o)
@@ -105,16 +115,28 @@ func (c *Core) index(ctx context.Context, f fs.Fs) error {
 		}
 		c.countTracks(db)
 	}
-	if len(todo) == 0 {
-		return nil
+	pack := &artPack{dir: c.artDir(), db: db}
+	defer pack.close()
+	if len(todo) > 0 {
+		if err := c.indexFiles(ctx, db, pack, todo); err != nil {
+			return err
+		}
 	}
+	if err := c.folderArt(ctx, db, pack, images); err != nil {
+		return err
+	}
+	if err := pack.close(); err != nil {
+		return fmt.Errorf("art pack: %w", err)
+	}
+	return ctx.Err()
+}
+
+// indexFiles reads and indexes the given files, several at a time.
+func (c *Core) indexFiles(ctx context.Context, db *index.DB, pack *artPack, todo []fs.Object) error {
 	if err := db.SetMeta("dirty", "1"); err != nil {
 		return err
 	}
-
 	c.setJob(func(j *jobStatus) { j.Phase, j.Done, j.Total = PhaseIndexing, 0, int64(len(todo)) })
-	pack := &artPack{dir: c.artDir(), db: db}
-	defer pack.close()
 
 	work := make(chan fs.Object)
 	var wg sync.WaitGroup
@@ -149,10 +171,132 @@ func (c *Core) index(ctx context.Context, f fs.Fs) error {
 	}
 	close(work)
 	wg.Wait()
-	if err := pack.close(); err != nil {
-		return fmt.Errorf("art pack: %w", err)
-	}
 	return ctx.Err()
+}
+
+// maxFolderImage bounds a folder cover's size; larger files are scans or
+// posters, not covers.
+const maxFolderImage = 20 << 20
+
+func isImage(p string) bool {
+	switch strings.ToLower(path.Ext(p)) {
+	case ".jpg", ".jpeg", ".png":
+		return true
+	}
+	return false
+}
+
+// pickCover chooses a folder's front cover from its images, or nil. Names
+// like cover, folder or front win; then names that mention them; then a
+// lone image, or a scene-release "00-....jpg". Backs, discs, inlays and
+// other scans are never picked.
+func pickCover(imgs []fs.Object) fs.Object {
+	var best fs.Object
+	bestScore := 99
+	candidates := 0
+	for _, o := range imgs {
+		if o.Size() <= 0 || o.Size() > maxFolderImage {
+			continue
+		}
+		name := strings.ToLower(strings.TrimSuffix(path.Base(o.Remote()), path.Ext(o.Remote())))
+		words := map[string]bool{}
+		for _, w := range strings.FieldsFunc(name, func(r rune) bool {
+			return !unicode.IsLetter(r) && !unicode.IsDigit(r)
+		}) {
+			words[w] = true
+		}
+		if words["back"] || words["inlay"] || words["inside"] || words["tray"] {
+			continue
+		}
+		var score int
+		switch {
+		case name == "cover" || name == "folder" || name == "front" || name == "albumart" || name == "album":
+			score = 0
+		case words["front"] || words["cover"] || words["folder"]:
+			score = 1
+		case strings.HasPrefix(name, "00"): // scene releases: 00-artist-album-....jpg
+			score = 2
+		case words["cd"] || words["disc"] || words["booklet"] || words["matrix"] || words["scan"]:
+			continue
+		default:
+			score = 4
+		}
+		candidates++
+		if score < bestScore || (score == bestScore && o.Remote() < best.Remote()) {
+			best, bestScore = o, score
+		}
+	}
+	if bestScore == 4 && candidates > 1 {
+		return nil // several unnamed images: no way to tell which is the cover
+	}
+	return best
+}
+
+// folderArt gives tracks with no art of their own the front cover from
+// their folder, stored once in the art pack. It runs on every sync, so a
+// cover added to a folder later is picked up; each folder's image is read
+// at most once per run.
+func (c *Core) folderArt(ctx context.Context, db *index.DB, pack *artPack, images map[string][]fs.Object) error {
+	bare, err := db.FilesWithoutArt()
+	if err != nil || len(bare) == 0 {
+		return err
+	}
+	byDir := map[string][]string{} // folder -> file ids
+	for p, id := range bare {
+		dir := path.Dir(p)
+		if len(images[dir]) > 0 {
+			byDir[dir] = append(byDir[dir], id)
+		}
+	}
+	if len(byDir) == 0 {
+		return nil
+	}
+	c.setJob(func(j *jobStatus) { j.Phase, j.Done, j.Total, j.Current = PhaseIndexing, 0, int64(len(byDir)), "" })
+	for dir, ids := range byDir {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		o := pickCover(images[dir])
+		if o == nil {
+			c.setJob(func(j *jobStatus) { j.Done++ })
+			continue
+		}
+		c.setJob(func(j *jobStatus) { j.Current = o.Remote() })
+		err := func() error {
+			rc, err := o.Open(ctx)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = rc.Close() }()
+			data, err := io.ReadAll(io.LimitReader(rc, maxFolderImage+1))
+			if err != nil {
+				return err
+			}
+			mime := "image/jpeg"
+			if strings.EqualFold(path.Ext(o.Remote()), ".png") {
+				mime = "image/png"
+			}
+			sum := sha256.Sum256(data)
+			if err := pack.store(sum[:], media.Picture{Type: 3, MIME: mime, Data: data}); err != nil {
+				return err
+			}
+			if err := db.SetMeta("dirty", "1"); err != nil {
+				return err
+			}
+			return db.AddFileArt(ids, sum[:], 3)
+		}()
+		c.setJob(func(j *jobStatus) {
+			j.Done++
+			if err != nil {
+				j.Failed++
+				if len(j.Failures) < maxFailures {
+					j.Failures = append(j.Failures, fmt.Sprintf("%s: %v", o.Remote(), err))
+				}
+				fs.Errorf(o, "folder cover: %v", err)
+			}
+		})
+	}
+	return nil
 }
 
 // currentDB returns the open index.

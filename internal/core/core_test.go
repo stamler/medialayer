@@ -3,6 +3,7 @@ package core
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -432,5 +433,99 @@ func TestPruneIgnoresOddSnapshotNames(t *testing.T) {
 	}
 	if fmt.Sprint(names) != "[000002.sqlite 000003.sqlite 1.sqlite]" {
 		t.Errorf("snapshots = %v", names)
+	}
+}
+
+func TestFolderCoverForTracksWithoutEmbeddedArt(t *testing.T) {
+	ctx := context.Background()
+	embedded := bytes.Repeat([]byte("embedded"), 100)
+	lib := writeLibrary(t, embedded) // A/Album has embedded art, B/Other none
+	cover := bytes.Repeat([]byte("front"), 500)
+	for name, data := range map[string][]byte{
+		"B/Other/00-b-other-cd-flac-2006.jpg": cover,
+		"B/Other/back.jpg":                    []byte("back of the case"),
+		"A/Album/folder.jpg":                  []byte("not needed: embedded art wins"),
+	} {
+		if err := os.WriteFile(filepath.Join(lib, name), data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	c := newTestCore(t, lib)
+	if err := c.sync(ctx); err != nil {
+		t.Fatal(err)
+	}
+	db := c.currentDB()
+	var n int
+	if err := dbQueryRow(db, `SELECT count(*) FROM file f WHERE NOT EXISTS (SELECT 1 FROM file_art a WHERE a.file_id = f.id)`, &n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Errorf("%d files have no art", n)
+	}
+	var sha []byte
+	if err := dbQueryRow(db, `SELECT a.art_sha256 FROM file_art a JOIN file f ON f.id = a.file_id WHERE f.path = 'B/Other/01.flac'`, &sha); err != nil {
+		t.Fatal(err)
+	}
+	if want := sha256.Sum256(cover); !bytes.Equal(sha, want[:]) {
+		t.Error("B/Other got the wrong image")
+	}
+	var arts int
+	if err := dbQueryRow(db, `SELECT count(*) FROM art`, &arts); err != nil {
+		t.Fatal(err)
+	}
+	if arts != 2 {
+		t.Errorf("art rows = %d, want 2 (embedded and folder cover)", arts)
+	}
+
+	// Nothing changed: no new snapshot, no new reads.
+	if err := c.sync(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(lib, ".medialayer/snapshots/000002.sqlite")); err == nil {
+		t.Error("an unchanged library made a new snapshot")
+	}
+}
+
+func TestPickCover(t *testing.T) {
+	dir := t.TempDir()
+	f, err := fs.NewFs(context.Background(), dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pick := func(names ...string) string {
+		var objs []fs.Object
+		for _, n := range names {
+			if err := os.WriteFile(filepath.Join(dir, n), []byte("x"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			o, err := f.NewObject(context.Background(), n)
+			if err != nil {
+				t.Fatal(err)
+			}
+			objs = append(objs, o)
+		}
+		for _, n := range names {
+			_ = os.Remove(filepath.Join(dir, n))
+		}
+		if o := pickCover(objs); o != nil {
+			return o.Remote()
+		}
+		return ""
+	}
+	tests := []struct {
+		names []string
+		want  string
+	}{
+		{[]string{"back.jpg", "Cover.JPG", "cd.jpg"}, "Cover.JPG"},
+		{[]string{"Album - Front.png", "Album - Back.png"}, "Album - Front.png"},
+		{[]string{"00-sam_roberts-chemical_city-cd-flac-2006.jpg"}, "00-sam_roberts-chemical_city-cd-flac-2006.jpg"},
+		{[]string{"scan.jpg", "only.jpg"}, "only.jpg"},
+		{[]string{"a.jpg", "b.jpg"}, ""},
+		{[]string{"back.jpg", "inlay.jpg"}, ""},
+	}
+	for _, tt := range tests {
+		if got := pick(tt.names...); got != tt.want {
+			t.Errorf("pickCover(%v) = %q, want %q", tt.names, got, tt.want)
+		}
 	}
 }

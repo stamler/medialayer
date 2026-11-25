@@ -312,6 +312,42 @@ func (d *DB) SetMissing(ids []string, missing bool) error {
 	return tx.Commit()
 }
 
+// FilesWithoutArt returns the ids of present files with no image linked,
+// by path.
+func (d *DB) FilesWithoutArt() (map[string]string, error) {
+	rows, err := d.db.Query(`SELECT path, id FROM file f WHERE missing = 0
+		AND NOT EXISTS (SELECT 1 FROM file_art a WHERE a.file_id = f.id)`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]string{}
+	for rows.Next() {
+		var p, id string
+		if err := rows.Scan(&p, &id); err != nil {
+			return nil, err
+		}
+		out[p] = id
+	}
+	return out, rows.Err()
+}
+
+// AddFileArt links an image to files.
+func (d *DB) AddFileArt(fileIDs []string, sha []byte, role int) error {
+	tx, err := d.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	for _, id := range fileIDs {
+		if _, err := tx.Exec(`INSERT INTO file_art (file_id, art_sha256, role) VALUES (?, ?, ?)
+			ON CONFLICT DO NOTHING`, id, sha, role); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 // ArtPacks lists the art packs the index refers to.
 func (d *DB) ArtPacks() ([]string, error) {
 	rows, err := d.db.Query(`SELECT DISTINCT pack FROM art ORDER BY pack`)
