@@ -485,6 +485,9 @@ struct StatusBar: View {
         HStack(spacing: 10) {
             SourcesBar()
             jobText.foregroundStyle(.secondary).lineLimit(1)
+            if let n = model.status.notice, !model.status.isBusy {
+                Image(systemName: "exclamationmark.circle").foregroundStyle(.orange).help(n)
+            }
             Spacer()
             Text("\(tracks.count) \(tracks.count == 1 ? "song" : "songs"), \(formatLong(ms)), \(ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file))")
             Spacer()
@@ -515,8 +518,7 @@ struct StatusBar: View {
             case "error": Text("Update failed: \(j.error ?? "")").foregroundStyle(.red).help(j.error ?? "")
             case "done" where j.failed > 0:
                 Text("\(j.failed) files could not be read").help((j.failures ?? []).joined(separator: "\n"))
-            default:
-                if let n = model.status.notice { Text(n).foregroundStyle(.orange).help(n) }
+            default: EmptyView()
             }
         }
     }

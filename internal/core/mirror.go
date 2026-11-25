@@ -291,7 +291,7 @@ type listing struct {
 	// library inside it, or a folder that holds the primary. probes are
 	// the probe files seen in those.
 	nested bool
-	probes map[string]string // file name -> path
+	probes map[string][]string // file name -> paths
 }
 
 // systemName reports names that the operating system keeps in folders,
@@ -309,7 +309,7 @@ func systemName(base string) bool {
 // missingOK, as for a secondary not yet written to, and an error
 // otherwise.
 func listLibrary(ctx context.Context, f fs.Fs, missingOK bool) (*listing, error) {
-	l := &listing{files: map[string]fs.Object{}, dupes: map[string]bool{}, probes: map[string]string{}}
+	l := &listing{files: map[string]fs.Object{}, dupes: map[string]bool{}, probes: map[string][]string{}}
 	// Check first, as walk logs a missing folder as an error.
 	if _, err := f.List(ctx, ""); errors.Is(err, fs.ErrorDirNotFound) {
 		if missingOK {
@@ -333,7 +333,8 @@ func listLibrary(ctx context.Context, f fs.Fs, missingOK bool) (*listing, error)
 				if part == repoDir {
 					l.nested = true
 					if i+2 < len(parts) && parts[i+1] == "probe" {
-						l.probes[parts[len(parts)-1]] = r
+						name := parts[len(parts)-1]
+						l.probes[name] = append(l.probes[name], r)
 					}
 					continue next
 				}
@@ -443,16 +444,23 @@ func (c *Core) mirrorAll(ctx context.Context, f fs.Fs) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if p, ok := src.probes[path.Base(t.probe)]; ok {
+		// Every copy of its probe, as an old one may sit elsewhere in the
+		// primary too.
+		var inside error
+		for _, p := range src.probes[path.Base(t.probe)] {
 			b, err := readSmall(ctx, f, p)
 			if err != nil && !absent(err) {
-				fail(t.s, err)
-				continue
+				inside = err
+				break
 			}
-			if string(b) == run {
-				fail(t.s, errors.New("this folder is inside the primary; pick one outside it"))
-				continue
+			if err == nil && string(b) == run {
+				inside = errors.New("this folder is inside the primary; pick one outside it")
+				break
 			}
+		}
+		if inside != nil {
+			fail(t.s, inside)
+			continue
 		}
 		c.setMirror(t.s.ID, func(m *mirrorState) { m.state, m.err = MirrorSyncing, "" })
 		err := c.mirror(ctx, f, src, repo, t)
