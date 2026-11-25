@@ -126,7 +126,7 @@ func (c *Core) SetFolder(folder string) error {
 			_ = c.db.Close()
 			c.db = nil
 		}
-		if err := resetLocal(c.dbPath(), c.artDir()); err != nil {
+		if err := resetLocal(c.dataDir, c.artDir()); err != nil {
 			c.mu.Unlock()
 			return err
 		}
@@ -153,9 +153,14 @@ func (c *Core) folder() string {
 	return c.settings.Folder
 }
 
-// resetLocal deletes the local index and art packs.
-func resetLocal(dbPath, artDir string) error {
-	for _, p := range []string{dbPath, dbPath + "-wal", dbPath + "-shm"} {
+// resetLocal deletes every local index file (including ones left by
+// restores) and the art packs.
+func resetLocal(dataDir, artDir string) error {
+	files, err := filepath.Glob(filepath.Join(dataDir, "library*.sqlite*"))
+	if err != nil {
+		return err
+	}
+	for _, p := range files {
 		if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}

@@ -320,6 +320,14 @@ func TestTwoFirstDevicesShareFileIDs(t *testing.T) {
 	if err := b.index(ctx, b.fsys); err != nil { // b indexes, but A publishes first
 		t.Fatal(err)
 	}
+	cover := bytes.Repeat([]byte("art"), 100)
+	if err := os.WriteFile(filepath.Join(lib, "A/Album/01.flac"),
+		testFLAC([]string{"TITLE=One"}, cover, 100_000), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.index(ctx, b.fsys); err != nil { // b's own, soon discarded, art pack
+		t.Fatal(err)
+	}
 	if err := a.sync(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -329,6 +337,30 @@ func TestTwoFirstDevicesShareFileIDs(t *testing.T) {
 	if fmt.Sprint(fileIDs(t, a)) != fmt.Sprint(fileIDs(t, b)) {
 		t.Errorf("file ids differ: %v and %v", fileIDs(t, a), fileIDs(t, b))
 	}
+	// Only A's pack, which the shared index refers to, is on the cloud.
+	if packs, _ := filepath.Glob(filepath.Join(lib, ".medialayer/art/*")); len(packs) != 1 {
+		t.Errorf("cloud art packs = %v, want 1", packs)
+	}
+
+	// Picking another folder starts from an empty index, even after a
+	// restore left the first database file behind.
+	other := t.TempDir()
+	b.mu.Lock()
+	b.fsys = nil
+	b.mu.Unlock()
+	if err := os.WriteFile(filepath.Join(b.dataDir, "settings.json"), []byte(`{}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	b.mu.Lock()
+	err := resetLocal(b.dataDir, b.artDir())
+	b.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if left, _ := filepath.Glob(filepath.Join(b.dataDir, "library*.sqlite*")); len(left) != 0 {
+		t.Errorf("resetLocal left %v", left)
+	}
+	_ = other
 }
 
 // Snapshot names that are not six-digit numbers are left alone.

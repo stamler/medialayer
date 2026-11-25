@@ -312,6 +312,24 @@ func (d *DB) SetMissing(ids []string, missing bool) error {
 	return tx.Commit()
 }
 
+// ArtPacks lists the art packs the index refers to.
+func (d *DB) ArtPacks() ([]string, error) {
+	rows, err := d.db.Query(`SELECT DISTINCT pack FROM art ORDER BY pack`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var p string
+		if err := rows.Scan(&p); err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
 // FileLocation is what streaming needs to find a file in the cloud.
 type FileLocation struct {
 	Path    string

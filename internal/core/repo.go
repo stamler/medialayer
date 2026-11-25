@@ -262,9 +262,16 @@ func (c *Core) publish(ctx context.Context, f fs.Fs) error {
 		return fmt.Errorf("this folder holds library %s, but the local index is library %s", repo.LibraryID, libraryID)
 	}
 	if repo != nil && libraryID == "" {
-		// Indexed from scratch while another device published: take its
-		// snapshot instead, so both devices share file ids.
-		return errPublishedElsewhere
+		snaps, err := listRepoDir(ctx, f, "snapshots")
+		if err != nil {
+			return err
+		}
+		if s, _ := newestSnapshot(snaps); s != nil {
+			// Indexed from scratch while another device published: take
+			// its snapshot instead, so both devices share file ids.
+			return errPublishedElsewhere
+		}
+		libraryID = repo.LibraryID // a repository with no snapshot yet
 	}
 	if repo == nil {
 		if libraryID == "" {
@@ -291,15 +298,16 @@ func (c *Core) publish(ctx context.Context, f fs.Fs) error {
 	if err != nil {
 		return err
 	}
-	localPacks, err := filepath.Glob(filepath.Join(c.artDir(), "pack-*.bin"))
+	// Only packs the index refers to: a discarded index can leave others.
+	packs, err := db.ArtPacks()
 	if err != nil {
 		return err
 	}
-	for _, p := range localPacks {
-		if _, ok := cloudPacks[filepath.Base(p)]; ok {
+	for _, name := range packs {
+		if _, ok := cloudPacks[name]; ok {
 			continue
 		}
-		if err := upload(ctx, f, p, repoDir+"/art/"+filepath.Base(p)); err != nil {
+		if err := upload(ctx, f, filepath.Join(c.artDir(), name), repoDir+"/art/"+name); err != nil {
 			return err
 		}
 	}

@@ -18,6 +18,7 @@ app="$root/apps/macos"
 echo "Building the Go core..."
 mkdir -p "$app/build"
 (cd "$root" && CGO_ENABLED=1 GOOS=darwin GOARCH=arm64 MACOSX_DEPLOYMENT_TARGET=14.0 \
+  CGO_CFLAGS="-mmacosx-version-min=14.0" CGO_LDFLAGS="-mmacosx-version-min=14.0" \
   go build -buildmode=c-archive -o "$app/build/libmlcore.a" ./cmd/mlcore)
 cp "$app/build/libmlcore.h" "$app/Sources/CMLCore/include/libmlcore.h"
 
