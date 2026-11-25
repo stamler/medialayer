@@ -17,8 +17,11 @@ others; its chip in the status bar shows its state.
 
 The goal is that if the primary is lost or corrupted, any secondary can be
 promoted in its place. So each secondary holds a complete, self-consistent
-library: every file, plus the index that describes exactly those files and
-the art packs it refers to.
+library: every file, plus the index and the art packs it refers to. The
+index is the one made at the start of the sync, so it matches the files as
+of that sync; anything changed on the primary during the sync, and the
+cases under Known gaps, are reconciled by indexing (by size and
+modification time) when a secondary is opened or promoted.
 
 The index has a **version**, raised each time it changes and stored inside
 it (`meta.version`, with the generation it was made under). Each version is
@@ -27,6 +30,9 @@ the primary and to every secondary as `.medialayer/snapshots/NNNNNN.sqlite`
 (NNNNNN is the version). Secondaries get it from the device, not from the
 primary, so they have the newest index even when the primary couldn't take
 it. A secondary keeps only the newest snapshot; the primary keeps two.
+Snapshots are compared by size and MD5, never by name alone, and a version
+waiting for the primary that another device's index took meanwhile is
+renumbered, so one version number always names one index.
 
 ## Checks before anything is written
 
@@ -157,6 +163,11 @@ primary.
 - Each device lists its own secondaries in the primary's `repo.json`, so
   two devices with different secondaries overwrite each other's list.
 - Promoting a secondary to primary is designed (above) but not built.
+- Paths the primary lists twice (or twice by case or Unicode form) are in
+  the index but not on the secondary. On exFAT or FAT disks modification
+  times are kept to 2 seconds, and HFS+ disks keep names decomposed, so
+  promoting such a local secondary means re-indexing it, with new file ids
+  for those paths.
 - A device restoring the library reads the index from the primary only, so
   while the primary is full it gets the primary's older version.
 - The pause review shows counts, not the files.

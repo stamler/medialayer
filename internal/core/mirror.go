@@ -822,7 +822,7 @@ func (c *Core) mirrorRepo(ctx context.Context, dst fs.Fs, repo *repoRecord, vers
 	if err != nil {
 		return err
 	}
-	if h, ok := have[name]; !ok || h.Size() != fileSize(local) {
+	if h, ok := have[name]; !ok || !sameFile(ctx, h, local) {
 		if err := upload(ctx, dst, local, repoDir+"/snapshots/"+name); err != nil {
 			return err
 		}

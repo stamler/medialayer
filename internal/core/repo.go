@@ -2,6 +2,8 @@ package core
 
 import (
 	"context"
+	"crypto/md5"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,6 +17,7 @@ import (
 	"time"
 
 	"github.com/rclone/rclone/fs"
+	"github.com/rclone/rclone/fs/hash"
 	"github.com/rclone/rclone/fs/operations"
 
 	"github.com/stamler/medialayer/internal/index"
@@ -391,13 +394,40 @@ func (c *Core) publish(ctx context.Context, f fs.Fs) error {
 		}
 		repo.Members = []member{repo.Primary}
 	}
+	prevID, err := db.Meta("library_id")
+	if err != nil {
+		return err
+	}
 	if err := db.SetMeta("library_id", libraryID); err != nil {
 		return err
+	}
+	published := false
+	if newRepo {
+		// Until repo.json is on the primary, the library doesn't exist
+		// there; a later sync must start it again, not take this id for
+		// a primary that lost its .medialayer.
+		defer func() {
+			if !published {
+				_ = db.SetMeta("library_id", prevID)
+				_ = db.SetMeta("dirty", "1")
+			}
+		}()
 	}
 	_, newest := newestSnapshot(snaps)
 	version, local, err := c.currentVersion(db, newest, repo.Generation)
 	if err != nil {
 		return err
+	}
+	// A version waiting for the primary may have been taken meanwhile by
+	// another device's different index: then this one becomes a newer
+	// version, so a version number always names one index.
+	if o, ok := snaps[snapshotName(version)]; version <= newest && !(ok && sameFile(ctx, o, local)) {
+		if err := db.SetMeta("dirty", "1"); err != nil {
+			return err
+		}
+		if version, local, err = c.currentVersion(db, newest, repo.Generation); err != nil {
+			return err
+		}
 	}
 	name := snapshotName(version)
 
@@ -405,7 +435,7 @@ func (c *Core) publish(ctx context.Context, f fs.Fs) error {
 	if err := c.uploadPacks(ctx, f, db); err != nil {
 		return err
 	}
-	if o, ok := snaps[name]; !ok || o.Size() != fileSize(local) {
+	if o, ok := snaps[name]; !ok || !sameFile(ctx, o, local) {
 		if err := upload(ctx, f, local, repoDir+"/snapshots/"+name); err != nil {
 			return err
 		}
@@ -419,6 +449,7 @@ func (c *Core) publish(ctx context.Context, f fs.Fs) error {
 			return err
 		}
 	}
+	published = true
 	if err := db.SetMeta("primary_version", strconv.Itoa(version)); err != nil {
 		return err
 	}
@@ -458,7 +489,8 @@ func (c *Core) uploadPacks(ctx context.Context, f fs.Fs, db *index.DB) error {
 	}
 	for _, name := range packs {
 		local := filepath.Join(c.artDir(), name)
-		if o, ok := have[name]; ok && o.Size() == fileSize(local) {
+		o, ok := have[name]
+		if ok && (fileSize(local) < 0 || o.Size() == fileSize(local)) {
 			continue // packs never change once the run that wrote them ends
 		}
 		if err := upload(ctx, f, local, repoDir+"/art/"+name); err != nil {
@@ -466,6 +498,29 @@ func (c *Core) uploadPacks(ctx context.Context, f fs.Fs, db *index.DB) error {
 		}
 	}
 	return nil
+}
+
+// sameFile reports whether remote object o has the same contents as the
+// local file, by size and MD5. Without an MD5 from the remote it says no,
+// so the file is written again.
+func sameFile(ctx context.Context, o fs.Object, local string) bool {
+	if o.Size() != fileSize(local) {
+		return false
+	}
+	theirs, err := o.Hash(ctx, hash.MD5)
+	if err != nil || theirs == "" {
+		return false
+	}
+	in, err := os.Open(local)
+	if err != nil {
+		return false
+	}
+	defer func() { _ = in.Close() }()
+	h := md5.New()
+	if _, err := io.Copy(h, in); err != nil {
+		return false
+	}
+	return hex.EncodeToString(h.Sum(nil)) == theirs
 }
 
 // fileSize is a local file's size, or -1.
