@@ -44,7 +44,7 @@ type Core struct {
 	// tracks is the index's track count, kept here so Status never waits
 	// on the database while the indexer writes.
 	tracks atomic.Int64
-	stream   *streamServer
+	stream *streamServer
 }
 
 // settings are kept in settings.json in the data directory.
@@ -163,6 +163,11 @@ func (c *Core) libraryFs(ctx context.Context) (fs.Fs, error) {
 	c.fsys = f
 	return f, nil
 }
+
+// Prepare gets ready to stream a file, such as the selected track or the
+// next one in the queue, by looking up its cloud object in the
+// background.
+func (c *Core) Prepare(fileID string) { c.stream.prepare(fileID) }
 
 // removeStaleDBs deletes index files left by earlier restores. It runs at
 // start-up, when no app connection can still have them open.

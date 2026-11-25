@@ -207,6 +207,7 @@ final class Player: ObservableObject {
         clock.startLatency = nil
         clock.position = 0
         started = Date()
+        if queue.indices.contains(i + 1) { Core.prepare(queue[i + 1].id) }
         let url = base.appendingPathComponent("\(track.id).\(track.format)")
         let item = AVPlayerItem(url: url)
         itemObservation = item.observe(\.status) { [weak self] item, _ in

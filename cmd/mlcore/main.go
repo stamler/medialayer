@@ -141,6 +141,16 @@ func MLStartSync() *C.char {
 	return errStr(c.StartSync())
 }
 
+// MLPrepare gets ready to stream a file (the selected or next track)
+// by looking up its cloud object in the background.
+//
+//export MLPrepare
+func MLPrepare(fileID *C.char) {
+	if c, err := get(); err == nil {
+		c.Prepare(C.GoString(fileID))
+	}
+}
+
 // MLFree frees a string returned by any ML function.
 //
 //export MLFree

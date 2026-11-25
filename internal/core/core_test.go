@@ -240,6 +240,23 @@ func TestStreamServesRanges(t *testing.T) {
 	if resp.StatusCode != 206 || !bytes.Equal(body, want[:2]) {
 		t.Errorf("bytes=0-1: status %d, %q", resp.StatusCode, body)
 	}
+	// The probe parked a stream; the follow-up from 0 continues it.
+	if n := len(c.stream.heads); n != 1 {
+		t.Errorf("%d parked streams after the probe, want 1", n)
+	}
+	resp, body = get("bytes=0-")
+	if resp.StatusCode != 206 || !bytes.Equal(body, want) {
+		t.Errorf("bytes=0- after the probe: status %d, %d bytes", resp.StatusCode, len(body))
+	}
+	if n := len(c.stream.heads); n != 0 {
+		t.Errorf("%d parked streams after the follow-up, want 0", n)
+	}
+	// A follow-up that starts inside the probed bytes.
+	get("bytes=0-99")
+	resp, body = get("bytes=50-200")
+	if resp.StatusCode != 206 || !bytes.Equal(body, want[50:201]) {
+		t.Errorf("bytes=50-200 after a probe: status %d, %d bytes", resp.StatusCode, len(body))
+	}
 	resp, body = get("bytes=1000-")
 	if resp.StatusCode != 206 || !bytes.Equal(body, want[1000:]) ||
 		resp.Header.Get("Content-Range") != fmt.Sprintf("bytes 1000-%d/%d", len(want)-1, len(want)) {

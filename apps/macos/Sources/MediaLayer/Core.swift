@@ -81,4 +81,9 @@ enum Core {
     static func startSync() throws {
         try check(MLStartSync())
     }
+
+    /// Looks up a track's cloud file in the background, ahead of playing it.
+    static func prepare(_ fileID: String) {
+        fileID.withCString { MLPrepare(UnsafeMutablePointer(mutating: $0)) }
+    }
 }

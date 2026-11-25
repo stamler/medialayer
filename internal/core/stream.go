@@ -32,8 +32,9 @@ type streamServer struct {
 	token string
 	host  string // "127.0.0.1:<port>"
 
-	mu   sync.Mutex
-	objs map[string]fs.Object // by file id: avoids a lookup per request
+	mu    sync.Mutex
+	objs  map[string]fs.Object   // by file id: avoids a lookup per request
+	heads map[string]*headStream // parked streams by file id
 }
 
 // maxCachedObjects bounds streamServer.objs.
@@ -55,6 +56,7 @@ func startStreamServer(c *Core) (*streamServer, error) {
 		token: hex.EncodeToString(tok),
 		host:  ln.Addr().String(),
 		objs:  map[string]fs.Object{},
+		heads: map[string]*headStream{},
 	}
 	s.srv = &http.Server{Handler: s, ReadHeaderTimeout: 10 * time.Second}
 	go func() { _ = s.srv.Serve(ln) }()
@@ -69,6 +71,25 @@ func (s *streamServer) close() {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	_ = s.srv.Shutdown(ctx)
+	s.mu.Lock()
+	for id, p := range s.heads {
+		p.timer.Stop()
+		p.close()
+		delete(s.heads, id)
+	}
+	s.mu.Unlock()
+}
+
+// prepare looks up a file's cloud object in the background, so that
+// playing it doesn't wait for the lookup.
+func (s *streamServer) prepare(id string) {
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if _, _, err := s.object(ctx, id); err != nil {
+			fs.Debugf(nil, "prepare %s: %v", id, err)
+		}
+	}()
 }
 
 // contentTypes maps index formats to MIME types.
@@ -118,6 +139,31 @@ func (s *streamServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The player first probes the start of the file (AVPlayer asks for
+	// bytes 0-1) and then asks for all of it from 0. A small request at the
+	// start opens a stream to the end instead and parks it, so the second
+	// request replays the probed bytes and carries on with the same cloud
+	// request: one round trip instead of two before the first audio.
+	if p := s.takeHead(id, o, start); p != nil {
+		defer p.close()
+		w.WriteHeader(status)
+		s.copyFromHead(w, o, p, start, end)
+		return
+	}
+	if start == 0 && end < headProbeMax && end < size-1 {
+		p, err := openHead(o, end+1)
+		if err != nil {
+			s.forget(id) // the file may have changed or moved
+			fs.Errorf(o, "stream: %v", err)
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		w.WriteHeader(status)
+		_, _ = w.Write(p.head)
+		s.parkHead(id, p)
+		return
+	}
+
 	rc, err := o.Open(r.Context(), &fs.RangeOption{Start: start, End: end})
 	if err != nil {
 		s.forget(id) // the file may have changed or moved
@@ -129,6 +175,107 @@ func (s *streamServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(status)
 	if _, err := io.CopyN(w, rc, end-start+1); err != nil && !errors.Is(err, context.Canceled) {
 		fs.Debugf(o, "stream ended early: %v", err) // usually the player seeking or stopping
+	}
+}
+
+const (
+	// headProbeMax is the largest request at the start of a file that
+	// opens a parked stream.
+	headProbeMax = 64 << 10
+	// headTTL is how long a parked stream waits for the follow-up request.
+	headTTL = 5 * time.Second
+	// maxHeads bounds the parked streams.
+	maxHeads = 4
+)
+
+// headStream is an open cloud stream from byte 0 to the end of a file, of
+// which the first len(head) bytes were already read.
+type headStream struct {
+	head    []byte
+	rc      io.ReadCloser
+	cancel  context.CancelFunc
+	version string // size and modification time it was opened on
+	timer   *time.Timer
+}
+
+func (p *headStream) close() {
+	p.cancel()
+	_ = p.rc.Close()
+}
+
+func objectVersion(o fs.Object) string {
+	return fmt.Sprintf("%d/%d", o.Size(), o.ModTime(context.Background()).UnixNano())
+}
+
+// openHead opens o from the start to the end and reads the first n bytes.
+// The stream outlives the HTTP request that opened it, so it has its own
+// context.
+func openHead(o fs.Object, n int64) (*headStream, error) {
+	ctx, cancel := context.WithCancel(context.Background())
+	rc, err := o.Open(ctx, &fs.RangeOption{Start: 0, End: o.Size() - 1})
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+	p := &headStream{head: make([]byte, n), rc: rc, cancel: cancel, version: objectVersion(o)}
+	if _, err := io.ReadFull(rc, p.head); err != nil {
+		p.close()
+		return nil, err
+	}
+	return p, nil
+}
+
+func (s *streamServer) parkHead(id string, p *headStream) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if old := s.heads[id]; old != nil {
+		old.timer.Stop()
+		old.close()
+	}
+	if len(s.heads) >= maxHeads {
+		for k, h := range s.heads { // any one; they live for seconds
+			h.timer.Stop()
+			h.close()
+			delete(s.heads, k)
+			break
+		}
+	}
+	s.heads[id] = p
+	p.timer = time.AfterFunc(headTTL, func() {
+		s.mu.Lock()
+		if s.heads[id] == p {
+			delete(s.heads, id)
+			p.close()
+		}
+		s.mu.Unlock()
+	})
+}
+
+// takeHead removes and returns the parked stream for id if it can serve
+// a request starting at start.
+func (s *streamServer) takeHead(id string, o fs.Object, start int64) *headStream {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p := s.heads[id]
+	if p == nil || start > int64(len(p.head)) || p.version != objectVersion(o) {
+		return nil
+	}
+	delete(s.heads, id)
+	p.timer.Stop()
+	return p
+}
+
+// copyFromHead serves [start, end] from a parked stream: the bytes it
+// already read, then the stream itself.
+func (s *streamServer) copyFromHead(w io.Writer, o fs.Object, p *headStream, start, end int64) {
+	headEnd := min(int64(len(p.head)), end+1)
+	if _, err := w.Write(p.head[start:headEnd]); err != nil {
+		return
+	}
+	if rest := end + 1 - headEnd; rest > 0 {
+		if _, err := io.CopyN(w, p.rc, rest); err != nil && !errors.Is(err, context.Canceled) {
+			fs.Debugf(o, "stream ended early: %v", err)
+		}
 	}
 }
 

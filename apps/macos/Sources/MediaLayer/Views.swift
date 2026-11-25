@@ -161,6 +161,11 @@ struct LibraryView: View {
                 .frame(minHeight: 120, idealHeight: 190, maxHeight: 400)
             SongsTable(tracks: visible, selection: $selection)
                 .frame(minHeight: 200)
+                .onChange(of: selection) { _, ids in
+                    // Look up the selected track's cloud file now, so pressing
+                    // play doesn't wait for it.
+                    if ids.count == 1, let id = ids.first { Core.prepare(id) }
+                }
         }
         .safeAreaInset(edge: .bottom, spacing: 0) { StatusBar(tracks: visible) }
         .toolbar {
@@ -188,7 +193,7 @@ struct NowPlaying: View {
 
     var body: some View {
         HStack(spacing: 8) {
-            ArtView(sha: player.current?.artSHA, size: 32)
+            ArtView(sha: player.current?.artSHA, size: 28, cornerRadius: 5)
             VStack(spacing: 2) {
                 if let t = player.current {
                     Text(t.displayTitle).font(.callout).lineLimit(1)
@@ -204,7 +209,10 @@ struct NowPlaying: View {
                 Image(systemName: "exclamationmark.triangle").foregroundStyle(.red).help(e)
             }
         }
-        .padding(.horizontal, 8)
+        // Clear of the toolbar capsule's rounded ends.
+        .padding(.leading, 14)
+        .padding(.trailing, 12)
+        .padding(.vertical, 3)
     }
 }
 
@@ -231,7 +239,14 @@ struct BrowserColumn: View {
 
     // List selection can't hold nil, so "All" is the empty string.
     private var listSelection: Binding<String?> {
-        Binding(get: { selection ?? "" }, set: { selection = ($0 ?? "").isEmpty ? nil : $0 })
+        Binding(get: { selection ?? "" }, set: { value in
+            let new = (value ?? "").isEmpty ? nil : value
+            guard new != selection else { return }
+            // The list can report a selection change while the table is
+            // updating (when indexing changes the values). Changing the model
+            // inside that callback is reentrant for AppKit, so do it after.
+            DispatchQueue.main.async { selection = new }
+        })
     }
 
     var body: some View {
@@ -240,7 +255,7 @@ struct BrowserColumn: View {
                 .frame(maxWidth: .infinity).padding(.vertical, 4)
             Divider()
             List(selection: listSelection) {
-                Text("All (\(values.count) \(title))").tag("")
+                Text("All (\(values.count) \(values.count == 1 ? String(title.dropLast()) : title))").tag("")
                 ForEach(values, id: \.self) { Text($0).lineLimit(1).tag($0) }
             }
             .listStyle(.plain)
@@ -306,6 +321,7 @@ struct ArtView: View {
     @EnvironmentObject var model: AppModel
     let sha: String?
     let size: CGFloat
+    var cornerRadius: CGFloat = 2
     @State private var image: NSImage?
 
     var body: some View {
@@ -318,7 +334,7 @@ struct ArtView: View {
             }
         }
         .frame(width: size, height: size)
-        .clipShape(RoundedRectangle(cornerRadius: 2))
+        .clipShape(RoundedRectangle(cornerRadius: cornerRadius))
         .task(id: sha) {
             guard let sha else { image = nil; return }
             let px = Int(size * 2) // Retina
