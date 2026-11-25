@@ -204,6 +204,9 @@ func (s *streamServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rc, err := o.Open(r.Context(), &fs.RangeOption{Start: start, End: end})
+	if err != nil && r.Context().Err() != nil {
+		return // the player cancelled the request
+	}
 	if err != nil {
 		s.forget(id) // the file may have changed or moved
 		fs.Errorf(o, "stream: %v", err)

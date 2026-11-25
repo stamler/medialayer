@@ -240,7 +240,8 @@ struct Scrubber: View {
     let duration: Double // seconds
     let position: Double
     let seek: (Double) -> Void
-    @State private var dragFraction: Double?
+    // Resets by itself if the drag is cancelled (the window loses focus).
+    @GestureState private var dragFraction: Double?
 
     private var fraction: Double {
         dragFraction ?? (duration > 0 ? min(max(position / duration, 0), 1) : 0)
@@ -248,7 +249,7 @@ struct Scrubber: View {
 
     var body: some View {
         HStack(spacing: 6) {
-            Text(clock(fraction * duration)).frame(width: 34, alignment: .trailing)
+            Text(clock(fraction * duration)).frame(width: long ? 44 : 34, alignment: .trailing)
             GeometryReader { g in
                 ZStack(alignment: .leading) {
                     Capsule().fill(.quaternary).frame(height: 3)
@@ -261,21 +262,27 @@ struct Scrubber: View {
                 .frame(maxHeight: .infinity)
                 .contentShape(Rectangle())
                 .gesture(DragGesture(minimumDistance: 0)
-                    .onChanged { v in
+                    .updating($dragFraction) { v, state, _ in
                         guard duration > 0, g.size.width > 0 else { return }
-                        dragFraction = min(max(v.location.x / g.size.width, 0), 1)
+                        state = min(max(v.location.x / g.size.width, 0), 1)
                     }
-                    .onEnded { _ in
-                        if let f = dragFraction { seek(f * duration) }
-                        dragFraction = nil
+                    .onEnded { v in
+                        guard duration > 0, g.size.width > 0 else { return }
+                        let f = min(max(v.location.x / g.size.width, 0), 1)
+                        // Not the very end: the tagged length can run past the
+                        // audio, and seeking there would skip the track.
+                        seek(min(f * duration, max(duration - 0.5, 0)))
                     })
             }
             .frame(height: 10)
-            Text("-" + clock(max(duration - fraction * duration, 0))).frame(width: 38, alignment: .leading)
+            Text("-" + clock(max(duration - fraction * duration, 0)))
+                .frame(width: long ? 48 : 38, alignment: .leading)
         }
         .font(.system(size: 9).monospacedDigit())
         .foregroundStyle(.secondary)
     }
+
+    private var long: Bool { duration >= 3600 } // h:mm:ss needs more room
 
     private func clock(_ seconds: Double) -> String { formatDuration(Int64(seconds * 1000)) }
 }
@@ -433,7 +440,7 @@ struct ArtView: View {
             }
         }
         .frame(width: size, height: size)
-        .clipShape(RoundedRectangle(cornerRadius: cornerRadius))
+        .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
         .task(id: sha) {
             guard let sha else { image = nil; return }
             let px = Int(size * 2) // Retina

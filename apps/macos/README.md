@@ -48,6 +48,6 @@ on Drive.
 ## Not yet
 
 Cover images stored as separate files in album folders (only embedded
-art is read), search, playlists, the sidebar, Now Playing and media
-keys, header packs, the change feed, more than one cloud, and testing
+art is read), search, playlists, the sidebar, the system Now Playing controls
+(Control Centre) and media keys, header packs, the change feed, more than one cloud, and testing
 with 10,000 tracks.
