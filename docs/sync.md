@@ -142,37 +142,138 @@ it is only missing later changes.
 
 ## Promoting a secondary
 
-Right-click a secondary's chip and choose Make Primary (offered only when
-the chip shows synced and no sync is running). It runs in the background
-like a sync, and nothing else can start meanwhile:
+Promotion makes a secondary the library's primary. The old primary becomes
+a secondary. The core (`internal/core/promote.go`) runs these steps in
+order. In the text, "the target" is the secondary that becomes the
+primary, and "the index" is the device's SQLite database of the library.
 
-1. A full sync first, so the secondary matches the primary as it is now:
-   files added to the primary since the last sync are copied, and anything
-   removed or edited on the secondary is put back. If that sync doesn't
-   leave the secondary synced (it fails, or pauses at 5%), nothing changes.
-2. The check above, against this device: `member.json` says `synced`,
-   names this library, holds this device's index version, and was written
-   under the current generation; its `repo.json` names no newer one.
-3. The generation is raised by one and a `repo.json` naming the secondary
-   as primary (with the time and device) is written to the new primary
-   first, which must succeed, then to the old primary. If the old primary
-   can't take it (a full cloud), the higher generation on the new primary
-   still wins, and a later sync rewrites it.
-4. The old primary becomes a secondary and a second sync runs. That first
-   sync of the old primary pauses before removing or replacing anything,
-   however little, since such a change would come from an edit made on it
-   during the switch. No files move otherwise: the copy already holds
-   them.
+### Start
 
-To switch back, Make Primary on the old primary's chip once it shows
-synced.
+1. You right-click the target's chip and choose Make Primary. The menu
+   item is available only when the chip shows synced and no sync runs.
+2. The app asks you to confirm. When you confirm, it calls `Promote` in
+   the core.
+3. The core refuses if a sync or another job runs, or if the target is not
+   one of this device's secondaries. Otherwise it starts a background job.
+   While the job runs, the core refuses every other change: a sync, a new
+   or removed source, an approval, and a new library folder.
 
-A sync refuses to run when the primary's `repo.json` names a different
-primary than this device's, and a secondary whose `repo.json` names
-another primary under the same generation is left alone. Picking a folder
-as the library checks its `member.json`: a promoted primary's names the
-primary id it was given, which the device takes on; a secondary's names
-another, and is refused.
+### Sync before the switch
+
+4. The job runs a full sync, the same sync that Update Library runs:
+   1. It reads the primary's `repo.json`. If that names a different
+      primary than this device's, the sync stops (see "Other devices").
+   2. It indexes the primary. It lists every file and reads the headers of
+      new and changed files. If the index changed, it saves a new index
+      version as a local snapshot.
+   3. It publishes that snapshot and any new art packs to the primary. If
+      the primary's cloud is full, it shows a notice and continues.
+   4. It syncs each secondary, the target included, as "Applying
+      changes" describes: copies, the trash, the art packs, the snapshot
+      of the current index version, `repo.json`, and last `member.json`
+      with state `synced`, that version, and the current generation.
+   So the target now holds every file the primary holds, the current
+   index, and nothing more. Files added to the primary since the last
+   sync are copied. Files removed or edited on the target are put back.
+5. The job checks the target's sync result from step 4. If the sync
+   failed, or paused at the 5% limit, the job stops with the reason.
+   Nothing has changed.
+
+### Check the target
+
+6. The job reads the primary's `repo.json` again.
+7. It reads the target's `member.json` and checks:
+   - `library_id` is this library's,
+   - `state` is `synced`,
+   - `version` is this device's index version,
+   - `generation` is the current generation.
+8. It reads the target's `repo.json` and checks that it exists and names
+   no newer generation.
+9. If a check fails, the job stops with the reason. Nothing has changed.
+
+### Switch
+
+10. The job makes a new `repo.json` record from the primary's:
+    - `generation` is one higher,
+    - `primary` is the target,
+    - `members` are the target, then the other secondaries, then the old
+      primary,
+    - `changed_at` and `changed_by` are the time and this device.
+11. It writes the new `repo.json` to the target. If this write fails, the
+    job stops. Nothing else has changed, and the old primary is still the
+    primary.
+12. It writes the new `repo.json` to the old primary. If this write fails
+    (for example, the cloud is full), the job logs the error and
+    continues. The target's `repo.json` has the higher generation, and
+    the higher generation wins. The next sync that can write to the old
+    primary gives it the new `repo.json`.
+13. It changes this device's settings:
+    - the primary is the target,
+    - the secondaries are the other secondaries and the old primary,
+    - the old primary is marked "review first" (see step 15).
+    It saves the settings. It clears the cached connection to the old
+    primary and the cache of open streams, so playback reads from the
+    target.
+14. It writes the new generation to the index. It records that the new
+    primary holds the current index version (`meta.primary_version`),
+    because step 4 copied that version to it.
+
+### Sync after the switch
+
+15. The job runs a second full sync, now from the target:
+    1. It indexes the target. The target holds the same files with the
+       same modification times, so the index usually does not change.
+    2. It syncs each secondary. For the old primary, this is its first
+       sync as a secondary. The sync writes its `member.json` with state
+       `copying` and compares the two folders. The old primary is marked
+       "review first", so the sync pauses before any removal or
+       replacement, even one. Such a change means that something changed
+       on the old primary during the switch. The chip then shows a pause
+       badge, and you choose whether to apply it.
+    3. If nothing needs removal or replacement, the sync copies any
+       missing files and the current snapshot, and removes the older
+       snapshot (a secondary keeps one). It writes `repo.json` and then
+       `member.json` with state `synced` and the new generation. It
+       clears the "review first" mark.
+16. The job ends. The target's chip is highlighted as the primary, and the
+    old primary's chip shows synced.
+
+No library file moves or is copied in the switch itself. The target
+already holds every file from step 4.
+
+### Switch back
+
+17. When the old primary's chip shows synced, right-click it and choose
+    Make Primary. The same steps run again, and the generation goes up by
+    one more.
+
+Do not use Choose Music Folder to switch back. See Known gaps.
+
+### When something fails
+
+| Fails at | Result |
+|---|---|
+| Steps 3 to 9 | Nothing changes. The status bar shows why. |
+| Step 11 (write to the target) | Nothing changes. The old primary is still the primary. |
+| Step 12 (write to the old primary) | The switch continues. A later sync writes the old primary's `repo.json`. |
+| Step 13 (saving settings) | The switch is in memory only. After a restart, the device uses the old primary again. If the old primary has the new `repo.json`, its sync stops with "the primary moved"; otherwise it continues as before, and the target is refused as a secondary because it names a newer generation. |
+| Step 15 (sync after the switch) | The switch is done. The old primary's chip shows the error or the pause. The next sync tries again. |
+
+A full old primary cannot take its `member.json` in step 15, so it can't
+become synced, and you can't switch back until it has space.
+
+### Other devices
+
+- A device that still uses the old primary reads its `repo.json` at the
+  start of each sync. If that names another primary, the sync stops with
+  "the primary moved". The device doesn't follow a move yet.
+- A device that picks the new primary as its library folder reads that
+  folder's `member.json` on its first sync. It names the primary id from
+  `repo.json`, so the device takes on that id and continues.
+- A device that picks a secondary as its library folder is refused. That
+  folder's `member.json` names an id that is not the primary's.
+- A sync leaves a secondary alone when its `repo.json` names another
+  primary under the same generation, or when it is the primary.
 
 ## Known gaps
 

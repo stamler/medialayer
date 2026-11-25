@@ -45,9 +45,16 @@ on Drive.
 - A restart opens the library from the local index at once.
 - Playback starts in 1.0 to 2.1 s (status bar, "started in").
 
+## Sources
+
+Add Source (Library menu, or the + by the chips) adds a second copy of
+the library: another Drive folder, a folder in another Google account, or
+a local folder. Right-click a chip to review a paused sync, stop syncing
+to it, or make it the primary. See [docs/sync.md](../../docs/sync.md).
+
 ## Not yet
 
-Cover images stored as separate files in album folders (only embedded
-art is read), search, playlists, the sidebar, the system Now Playing controls
-(Control Centre) and media keys, header packs, the change feed, more than one cloud, and testing
-with 10,000 tracks.
+Search, playlists, the sidebar, the system Now Playing controls
+(Control Centre) and media keys, header packs, the change feed, Proton,
+iCloud and SMB sources, the sync lease, following a primary moved on
+another device, and testing with 10,000 tracks.
