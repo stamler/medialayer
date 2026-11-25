@@ -238,7 +238,9 @@ final class Player: ObservableObject {
         if position > 3 { seek(to: 0) } else { playIndex(max(index - 1, 0)) }
     }
 
+    /// Seeks; AVPlayer then asks the core's stream for a new byte range.
     func seek(to seconds: Double) {
+        clock.position = seconds // show it now, not when the seek lands
         avPlayer.seek(to: CMTime(seconds: seconds, preferredTimescale: 600))
     }
 

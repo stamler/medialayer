@@ -194,7 +194,7 @@ struct NowPlaying: View {
     @EnvironmentObject var player: Player
     @EnvironmentObject var clock: PlaybackClock
 
-    static let height: CGFloat = 44
+    static let height: CGFloat = 48
     static let inset: CGFloat = 4 // around the cover, on all sides
     static let coverRadius: CGFloat = 5
     /// The left corners are concentric with the cover's.
@@ -215,8 +215,8 @@ struct NowPlaying: View {
                     Text(t.displayTitle).font(.system(size: 12, weight: .medium)).lineLimit(1)
                     Text([t.artist, t.album].filter { !$0.isEmpty }.joined(separator: " — "))
                         .font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
-                    ProgressBar(fraction: player.duration > 0 ? min(clock.position / player.duration, 1) : 0)
-                        .padding(.top, 3)
+                    Scrubber(duration: player.duration, position: clock.position) { player.seek(to: $0) }
+                        .padding(.top, 2)
                 } else {
                     Text("MediaLayer").font(.system(size: 12)).foregroundStyle(.secondary)
                 }
@@ -233,19 +233,51 @@ struct NowPlaying: View {
     }
 }
 
-/// A thin progress line that fits the display better than ProgressView.
-struct ProgressBar: View {
-    let fraction: Double
+/// The playback position as a thin line between elapsed and remaining
+/// time. Click or drag anywhere on it to seek; the seek happens when the
+/// mouse is released, so dragging doesn't start a cloud request per step.
+struct Scrubber: View {
+    let duration: Double // seconds
+    let position: Double
+    let seek: (Double) -> Void
+    @State private var dragFraction: Double?
+
+    private var fraction: Double {
+        dragFraction ?? (duration > 0 ? min(max(position / duration, 0), 1) : 0)
+    }
 
     var body: some View {
-        GeometryReader { g in
-            ZStack(alignment: .leading) {
-                Capsule().fill(.quaternary)
-                Capsule().fill(.secondary).frame(width: g.size.width * fraction)
+        HStack(spacing: 6) {
+            Text(clock(fraction * duration)).frame(width: 34, alignment: .trailing)
+            GeometryReader { g in
+                ZStack(alignment: .leading) {
+                    Capsule().fill(.quaternary).frame(height: 3)
+                    Capsule().fill(.secondary).frame(width: g.size.width * fraction, height: 3)
+                    Circle().fill(.primary)
+                        .frame(width: 7, height: 7)
+                        .offset(x: g.size.width * fraction - 3.5)
+                        .opacity(dragFraction == nil ? 0 : 1)
+                }
+                .frame(maxHeight: .infinity)
+                .contentShape(Rectangle())
+                .gesture(DragGesture(minimumDistance: 0)
+                    .onChanged { v in
+                        guard duration > 0, g.size.width > 0 else { return }
+                        dragFraction = min(max(v.location.x / g.size.width, 0), 1)
+                    }
+                    .onEnded { _ in
+                        if let f = dragFraction { seek(f * duration) }
+                        dragFraction = nil
+                    })
             }
+            .frame(height: 10)
+            Text("-" + clock(max(duration - fraction * duration, 0))).frame(width: 38, alignment: .leading)
         }
-        .frame(height: 3)
+        .font(.system(size: 9).monospacedDigit())
+        .foregroundStyle(.secondary)
     }
+
+    private func clock(_ seconds: Double) -> String { formatDuration(Int64(seconds * 1000)) }
 }
 
 /// Liquid Glass on macOS 26, a material before it.
