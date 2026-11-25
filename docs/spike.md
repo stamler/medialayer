@@ -5,10 +5,31 @@ checks, each with a pass mark. Checks 1, 2 and 3 need a Mac.
 
 | Check | Pass mark | Status |
 | --- | --- | --- |
-| 1. Overlay plus mount with Tauon | Tauon's scan with stored headers is at least 10 times faster than plain `rclone nfsmount`, and playback starts normally | Code ready, needs a Mac run |
+| 1. Overlay plus mount with Tauon | Tauon's scan with stored headers is at least 10 times faster than plain `rclone nfsmount`, and playback starts normally | Passed: hours with plain `nfsmount`, about 3.5 minutes with the overlay storing each file's first MiB (397 FLAC plus 10 MP3 on Google Drive) |
 | 2. Proton partial reads | Each small read fetches about one 4 MB block, not the whole file | Needs a Mac run |
-| 3. Go on iOS | rclone plus the overlay fits an iOS File Provider extension's memory limit | Follow-up pull request |
+| 3. Go on iOS | Replaced by an iOS player check: gomobile xcframework size, browsing the SQLite index, 30 minutes of locked-screen playback from Drive, a TestFlight upload | Not started |
 | 4. rclone API churn | Building against nearby rclone releases needs only small changes | Passed: builds and tests pass unchanged on v1.72.0, v1.74.4, v1.75.2 and v1.76.0 |
+
+## Decision
+
+The built-in player comes first. The core uses rclone's backends as a Go
+library, with a SQLite index for browsing and one ranged request per track
+for playback. The mount is an optional compatibility layer for apps like
+Tauon. Go stays the core language on every platform, iOS included, with a
+small interface to Swift. The reasons, the full results and the iOS
+assessment are in the architecture proposal:
+https://claude.ai/artifact/4F35w22KCPz88bmpWkrhjK
+
+What the Tauon run found:
+
+- Plain `rclone nfsmount` makes one Drive request for every 32 KB block, so
+  an import takes hours.
+- With stored headers the cloud is not read during a scan. The floor is
+  rclone's NFS server reopening the file for every 32 KB block, about 0.3
+  seconds per file even on a local folder.
+- Tauon reads about 1 MiB per file, because of Python's buffering and the
+  1 MiB NFS block size macOS reports, so `prime` stores the first MiB.
+- rclone's shared Google client ID is heavily throttled. Use your own.
 
 ## What is here
 
@@ -57,7 +78,6 @@ Build (Go downloads the toolchain it needs):
 
 ```sh
 git clone https://github.com/stamler/medialayer && cd medialayer
-git checkout spike/rclone-overlay
 go build -o mlspike ./cmd/mlspike
 ```
 
