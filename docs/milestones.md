@@ -50,10 +50,17 @@ the primary. No command line.
    writes the SQLite index, header packs and art packs to `.medialayer` on
    the primary. Gate: the 407-file test library indexes without reading
    audio, and a second device opens it in seconds.
-3. **macOS player, first version.** The setup flow plus artists, albums,
-   tracks and artwork from the index; playback with Now Playing and media
-   keys; playlists. Gate: a new user goes from opening the app to playing a
-   track with no other steps, and a track starts within about 2 seconds.
+3. **macOS player, first version.** The setup flow, then a design modelled
+   on the iTunes 11/12 Songs view, in light and dark mode: a toolbar with
+   transport controls, a now-playing display and search; a column browser
+   (Genres, Composers, Artists, Albums) above a sortable, customisable track
+   table with an album art column and a Clouds column; a status bar with
+   count, time and size; a collapsible sidebar for the library and
+   playlists. Playback with Now Playing and media keys. The track table may
+   need AppKit's `NSTableView` for the art column and for speed. Gate: a new
+   user goes from opening the app to playing a track with no other steps, a
+   track starts within about 2 seconds, and a 10,000-track table scrolls
+   smoothly.
 4. **macOS desktop features.** Menu bar control, cache cap with offline
    albums, write-mode toggle, the optional Tauon mount, a notarized build
    with Sparkle updates.
@@ -64,3 +71,12 @@ the primary. No command line.
 6. **Secondary clouds.** Add SMB or Proton as a secondary and sync from the
    primary with the rules above. Gate: a secondary built from scratch
    matches the primary file for file, and switching the primary works.
+7. **Tag editing with MusicBrainz (desktop, write mode).** Look up a
+   release by its tags (or track lengths for a ripped CD), show current and
+   proposed tags side by side with the Cover Art Archive cover, and write
+   only after the user approves. MediaLayer downloads the file, rewrites the
+   FLAC metadata blocks, uploads it to the primary, updates the index and
+   packs, and sync carries it to every secondary. MusicBrainz IDs use
+   Picard's tag names; lookups keep to one request per second. Gate:
+   retagging the test album leaves `audio_sha256` unchanged and every
+   secondary matches the primary.
