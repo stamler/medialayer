@@ -47,9 +47,10 @@ type repoRecord struct {
 }
 
 type member struct {
-	Replica string `json:"replica"` // e.g. "gdrive"
-	Type    string `json:"type"`    // rclone backend, e.g. "drive"
-	Folder  string `json:"folder"`  // library folder on that cloud
+	Replica string `json:"replica"`          // e.g. "gdrive"
+	Type    string `json:"type"`             // rclone backend, e.g. "drive"
+	Remote  string `json:"remote,omitempty"` // the device's rclone remote (which account), "" for local
+	Folder  string `json:"folder"`           // library folder on that cloud
 }
 
 // readRepo reads repo.json, or returns nil if the folder has none.

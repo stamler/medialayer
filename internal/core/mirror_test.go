@@ -172,7 +172,16 @@ func TestMirrorPausesOnMassChange(t *testing.T) {
 		t.Fatalf("secondary = %+v, want still paused", s)
 	}
 	c.mu.Lock()
-	c.mirrors["sec1"].approved = 60 // what ApproveChanges sets, without starting a job
+	c.mirrors["sec1"].approved = "not this plan"
+	c.mu.Unlock()
+	if err := c.sync(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if s := mirrorOf(t, c, "sec1"); s.State != MirrorPaused {
+		t.Fatalf("an approval of another plan went ahead: %+v", s)
+	}
+	c.mu.Lock()
+	c.mirrors["sec1"].approved = c.mirrors["sec1"].pending // what ApproveChanges sets, without starting a job
 	c.mu.Unlock()
 	if err := c.sync(ctx); err != nil {
 		t.Fatal(err)
@@ -276,5 +285,100 @@ func TestAddSecondaryRefusesOverlaps(t *testing.T) {
 	}
 	if overlaps("Music", "Music Backup") {
 		t.Error(`"Music" and "Music Backup" overlap`)
+	}
+}
+
+func TestMirrorRefusesUnsafeFolders(t *testing.T) {
+	ctx := context.Background()
+	for name, setup := range map[string]func(lib, sec string) string{
+		"not empty, not a library": func(lib, sec string) string {
+			write(t, filepath.Join(sec, "taxes/2025.pdf"), []byte("keep me"))
+			return sec
+		},
+		"the primary itself": func(lib, sec string) string { return lib },
+		"inside the primary": func(lib, sec string) string { return filepath.Join(lib, "Backup") },
+		"holds the primary":  func(lib, sec string) string { return filepath.Dir(lib) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			c, lib, sec := newMirrorCore(t)
+			folder := setup(lib, sec)
+			c.mu.Lock()
+			c.settings.Secondaries = []source{{ID: "sec1", Folder: folder}}
+			c.mu.Unlock()
+			before := snapshotTree(t, filepath.Dir(lib))
+			if err := c.sync(ctx); err != nil {
+				t.Fatal(err)
+			}
+			if s := mirrorOf(t, c, "sec1"); s.State != MirrorError || s.Error == "" {
+				t.Errorf("secondary = %+v, want an error", s)
+			}
+			// Nothing outside the primary's own .medialayer changed.
+			after := snapshotTree(t, filepath.Dir(lib))
+			for p := range after {
+				if !before[p] && !strings.Contains(p, ".medialayer/") {
+					t.Errorf("%s appeared", p)
+				}
+			}
+			for p := range before {
+				if !after[p] && !strings.Contains(p, ".medialayer/") {
+					t.Errorf("%s disappeared", p)
+				}
+			}
+			if _, err := os.Stat(filepath.Join(sec, "taxes/2025.pdf")); name == "not empty, not a library" && err != nil {
+				t.Error("the folder's own file was moved")
+			}
+			for p := range after {
+				if strings.Contains(p, "/probe/") {
+					t.Errorf("probe file %s was left behind", p)
+				}
+			}
+		})
+	}
+}
+
+// snapshotTree lists every file under dir.
+func snapshotTree(t *testing.T, dir string) map[string]bool {
+	t.Helper()
+	out := map[string]bool{}
+	_ = filepath.Walk(dir, func(p string, info os.FileInfo, err error) error {
+		if err == nil && !info.IsDir() {
+			rel, _ := filepath.Rel(dir, p)
+			out[filepath.ToSlash(rel)] = true
+		}
+		return nil
+	})
+	return out
+}
+
+func TestMirrorIgnoresSystemFiles(t *testing.T) {
+	ctx := context.Background()
+	c, _, sec := newMirrorCore(t)
+	if err := c.sync(ctx); err != nil {
+		t.Fatal(err)
+	}
+	write(t, filepath.Join(sec, ".DS_Store"), []byte("finder"))
+	write(t, filepath.Join(sec, "A/._01.flac"), []byte("appledouble"))
+	if err := c.sync(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if s := mirrorOf(t, c, "sec1"); s.State != MirrorSynced || s.Deletes != 0 {
+		t.Errorf("secondary = %+v, want no deletes", s)
+	}
+	if _, err := os.Stat(filepath.Join(sec, ".DS_Store")); err != nil {
+		t.Error(".DS_Store was moved")
+	}
+}
+
+func TestCheckLocalFolder(t *testing.T) {
+	home, _ := os.UserHomeDir()
+	for _, bad := range []string{"/", "/Volumes/Music", home, filepath.Join(home, "Library/CloudStorage/GoogleDrive-x/My Drive")} {
+		if checkLocalFolder(bad) == nil {
+			t.Errorf("%s was allowed", bad)
+		}
+	}
+	for _, ok := range []string{"/Volumes/Music/Backup", filepath.Join(home, "Music/Backup")} {
+		if err := checkLocalFolder(ok); err != nil {
+			t.Errorf("%s: %v", ok, err)
+		}
 	}
 }
