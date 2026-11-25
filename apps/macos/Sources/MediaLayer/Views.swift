@@ -237,15 +237,22 @@ struct BrowserColumn: View {
     let values: [String]
     @Binding var selection: String?
 
+    // A change waiting to be applied (see listSelection).
+    @State private var pending: String??
+
     // List selection can't hold nil, so "All" is the empty string.
     private var listSelection: Binding<String?> {
-        Binding(get: { selection ?? "" }, set: { value in
+        Binding(get: { (pending ?? selection) ?? "" }, set: { value in
             let new = (value ?? "").isEmpty ? nil : value
-            guard new != selection else { return }
+            guard new != (pending ?? selection) else { return }
             // The list can report a selection change while the table is
             // updating (when indexing changes the values). Changing the model
             // inside that callback is reentrant for AppKit, so do it after.
-            DispatchQueue.main.async { selection = new }
+            pending = .some(new)
+            DispatchQueue.main.async {
+                if let p = pending { selection = p }
+                pending = nil
+            }
         })
     }
 

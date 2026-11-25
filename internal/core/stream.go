@@ -32,9 +32,14 @@ type streamServer struct {
 	token string
 	host  string // "127.0.0.1:<port>"
 
-	mu    sync.Mutex
-	objs  map[string]fs.Object   // by file id: avoids a lookup per request
-	heads map[string]*headStream // parked streams by file id
+	mu     sync.Mutex
+	objs   map[string]fs.Object   // by file id: avoids a lookup per request
+	heads  map[string]*headStream // parked streams by file id
+	closed bool
+
+	// prepares bounds background lookups; preparing holds the ids in flight.
+	prepares  chan struct{}
+	preparing map[string]bool
 }
 
 // maxCachedObjects bounds streamServer.objs.
@@ -51,12 +56,14 @@ func startStreamServer(c *Core) (*streamServer, error) {
 		return nil, err
 	}
 	s := &streamServer{
-		c:     c,
-		ln:    ln,
-		token: hex.EncodeToString(tok),
-		host:  ln.Addr().String(),
-		objs:  map[string]fs.Object{},
-		heads: map[string]*headStream{},
+		c:         c,
+		ln:        ln,
+		token:     hex.EncodeToString(tok),
+		host:      ln.Addr().String(),
+		objs:      map[string]fs.Object{},
+		heads:     map[string]*headStream{},
+		prepares:  make(chan struct{}, 2),
+		preparing: map[string]bool{},
 	}
 	s.srv = &http.Server{Handler: s, ReadHeaderTimeout: 10 * time.Second}
 	go func() { _ = s.srv.Serve(ln) }()
@@ -72,6 +79,7 @@ func (s *streamServer) close() {
 	defer cancel()
 	_ = s.srv.Shutdown(ctx)
 	s.mu.Lock()
+	s.closed = true
 	for id, p := range s.heads {
 		p.timer.Stop()
 		p.close()
@@ -82,8 +90,29 @@ func (s *streamServer) close() {
 
 // prepare looks up a file's cloud object in the background, so that
 // playing it doesn't wait for the lookup.
+// At most two run at once; when both are busy (the user is scrolling
+// through the list) the request is dropped.
 func (s *streamServer) prepare(id string) {
+	s.mu.Lock()
+	if s.closed || s.objs[id] != nil || s.preparing[id] {
+		s.mu.Unlock()
+		return
+	}
+	select {
+	case s.prepares <- struct{}{}:
+	default:
+		s.mu.Unlock()
+		return
+	}
+	s.preparing[id] = true
+	s.mu.Unlock()
 	go func() {
+		defer func() {
+			s.mu.Lock()
+			delete(s.preparing, id)
+			s.mu.Unlock()
+			<-s.prepares
+		}()
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		if _, _, err := s.object(ctx, id); err != nil {
@@ -144,14 +173,21 @@ func (s *streamServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// start opens a stream to the end instead and parks it, so the second
 	// request replays the probed bytes and carries on with the same cloud
 	// request: one round trip instead of two before the first audio.
+	if head := s.peekHead(id, o, start, end); head != nil {
+		w.WriteHeader(status) // a repeated probe: leave the stream parked
+		_, _ = w.Write(head)
+		return
+	}
 	if p := s.takeHead(id, o, start); p != nil {
 		defer p.close()
+		stop := context.AfterFunc(r.Context(), p.cancel) // the player gave up
+		defer stop()
 		w.WriteHeader(status)
 		s.copyFromHead(w, o, p, start, end)
 		return
 	}
 	if start == 0 && end < headProbeMax && end < size-1 {
-		p, err := openHead(o, end+1)
+		p, err := openHead(r.Context(), o, end+1)
 		if err != nil {
 			s.forget(id) // the file may have changed or moved
 			fs.Errorf(o, "stream: %v", err)
@@ -209,9 +245,11 @@ func objectVersion(o fs.Object) string {
 
 // openHead opens o from the start to the end and reads the first n bytes.
 // The stream outlives the HTTP request that opened it, so it has its own
-// context.
-func openHead(o fs.Object, n int64) (*headStream, error) {
+// context, tied to the request's only until the first bytes arrive.
+func openHead(reqCtx context.Context, o fs.Object, n int64) (*headStream, error) {
 	ctx, cancel := context.WithCancel(context.Background())
+	stop := context.AfterFunc(reqCtx, cancel)
+	defer stop()
 	rc, err := o.Open(ctx, &fs.RangeOption{Start: 0, End: o.Size() - 1})
 	if err != nil {
 		cancel()
@@ -222,12 +260,32 @@ func openHead(o fs.Object, n int64) (*headStream, error) {
 		p.close()
 		return nil, err
 	}
+	if !stop() { // the request ended while the bytes arrived
+		p.close()
+		return nil, context.Canceled
+	}
 	return p, nil
+}
+
+// peekHead returns the parked bytes for [start, end] when they are all
+// already read, leaving the stream parked for the request that follows.
+func (s *streamServer) peekHead(id string, o fs.Object, start, end int64) []byte {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p := s.heads[id]
+	if p == nil || end >= int64(len(p.head)) || p.version != objectVersion(o) {
+		return nil
+	}
+	return append([]byte(nil), p.head[start:end+1]...)
 }
 
 func (s *streamServer) parkHead(id string, p *headStream) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.closed {
+		p.close()
+		return
+	}
 	if old := s.heads[id]; old != nil {
 		old.timer.Stop()
 		old.close()

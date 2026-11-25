@@ -251,6 +251,16 @@ func TestStreamServesRanges(t *testing.T) {
 	if n := len(c.stream.heads); n != 0 {
 		t.Errorf("%d parked streams after the follow-up, want 0", n)
 	}
+	// A repeated probe is answered from memory and keeps the stream parked.
+	get("bytes=0-1")
+	resp, body = get("bytes=0-1")
+	if resp.StatusCode != 206 || !bytes.Equal(body, want[:2]) || len(c.stream.heads) != 1 {
+		t.Errorf("repeated probe: status %d, %q, %d parked", resp.StatusCode, body, len(c.stream.heads))
+	}
+	resp, body = get("bytes=0-")
+	if !bytes.Equal(body, want) || len(c.stream.heads) != 0 {
+		t.Errorf("follow-up after two probes: %d bytes, %d parked", len(body), len(c.stream.heads))
+	}
 	// A follow-up that starts inside the probed bytes.
 	get("bytes=0-99")
 	resp, body = get("bytes=50-200")
