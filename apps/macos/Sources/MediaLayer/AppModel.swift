@@ -59,7 +59,10 @@ final class AppModel: ObservableObject {
         var lastKey = Date.distantPast
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             let typing = Date().timeIntervalSince(lastKey) < 1
-            if event.keyCode != 49 { lastKey = Date() }
+            if event.keyCode != 49, event.modifierFlags.intersection([.command, .control]).isEmpty,
+               event.characters?.contains(where: { $0.isLetter || $0.isNumber }) == true {
+                lastKey = Date() // a letter or digit: type-to-select
+            }
             guard event.keyCode == 49, // space
                   !event.isARepeat, !typing,
                   event.modifierFlags.intersection([.command, .option, .control, .shift]).isEmpty,
