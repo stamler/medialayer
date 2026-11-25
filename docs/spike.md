@@ -88,7 +88,7 @@ Prime the headers, then mount the overlay:
 mkdir -p ~/mnt/ml
 ./mlspike nfsmount ml: ~/mnt/ml \
   --vfs-cache-mode off --buffer-size 0 --read-only --dir-cache-time 1h \
-  --rc -v
+  --rc --rc-no-auth -v
 ```
 
 `prime` prints how many files it stored, how many range requests it made
