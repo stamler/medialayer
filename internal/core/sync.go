@@ -164,7 +164,11 @@ func (c *Core) sync(ctx context.Context) error {
 				return fmt.Errorf("read the library's member.json: %w", err)
 			}
 			if err == nil && json.Unmarshal(b, &m) == nil && m.LibraryID == repo.LibraryID && m.Replica != repo.Primary.Replica {
-				return errors.New("this folder is a copy (a secondary) of a library whose primary is elsewhere; pick the primary")
+				where := repo.Primary.Folder
+				if repo.Primary.Remote != "" {
+					where = repo.Primary.Remote + ":" + where
+				}
+				return fmt.Errorf("this folder is a copy (a secondary) of a library whose primary is %s; pick that folder", where)
 			}
 			c.mu.Lock()
 			if m.LibraryID == repo.LibraryID && m.Replica != "" {

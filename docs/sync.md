@@ -186,6 +186,10 @@ another, and is refused.
 - Each device lists its own secondaries in the primary's `repo.json`, so
   two devices with different secondaries overwrite each other's list.
 - Other members' `repo.json` is rewritten only by their next sync.
+- Choose Music Folder only browses the first Google account, and it
+  resets the local index and secondaries before the folder is checked. So
+  after a promotion, switch back with Make Primary, not by picking the old
+  primary, which is refused as a secondary.
 - Another device doesn't follow a promotion made elsewhere: its sync
   stops with "the primary moved" (when the old primary took the new
   `repo.json`) until the library is picked again there.
