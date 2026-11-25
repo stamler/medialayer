@@ -230,6 +230,7 @@ func (c *Core) restore(ctx context.Context, f fs.Fs) error {
 		return err
 	}
 	keep = true
+	c.countTracks(sdb)
 	// The old file is deleted at the next start, when nothing has it open.
 	if old != nil {
 		_ = old.Close()

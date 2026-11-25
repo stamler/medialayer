@@ -38,6 +38,7 @@ final class LibraryDB {
         guard sqlite3_open_v2(path, &db, SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX, nil) == SQLITE_OK else {
             let message = db.map { String(cString: sqlite3_errmsg($0)) } ?? "cannot open"
             sqlite3_close(db)
+            db = nil // deinit must not close it again
             throw CoreError(message: "open \(path): \(message)")
         }
         sqlite3_busy_timeout(db, 2000)
@@ -67,7 +68,8 @@ final class LibraryDB {
         }
         func leadingInt(_ s: String) -> Int { Int(s.prefix { $0.isNumber }) ?? 0 }
         var out: [Track] = []
-        while sqlite3_step(stmt) == SQLITE_ROW {
+        var rc = sqlite3_step(stmt)
+        while rc == SQLITE_ROW {
             let art = text(16)
             out.append(Track(
                 id: text(0), path: text(1), format: text(2),
@@ -78,7 +80,9 @@ final class LibraryDB {
                 trackNumber: leadingInt(text(13)), discNumber: leadingInt(text(14)),
                 year: String(text(15).prefix(4)), artSHA: art.isEmpty ? nil : art
             ))
+            rc = sqlite3_step(stmt)
         }
+        guard rc == SQLITE_DONE else { throw CoreError(message: String(cString: sqlite3_errmsg(db))) }
         return out
     }
 
@@ -99,7 +103,12 @@ final class LibraryDB {
 /// Loads covers from the art packs and keeps small thumbnails in memory.
 final class ArtCache {
     private let cache = NSCache<NSString, NSImage>()
-    private let queue = DispatchQueue(label: "art", qos: .userInitiated, attributes: .concurrent)
+    private let queue: OperationQueue = {
+        let q = OperationQueue()
+        q.maxConcurrentOperationCount = 4
+        q.qualityOfService = .userInitiated
+        return q
+    }()
     var db: LibraryDB?
     var artDir = ""
 
@@ -113,7 +122,7 @@ final class ArtCache {
         if let image = cache.object(forKey: key) { return done(image) }
         guard let db, !artDir.isEmpty else { return done(nil) }
         let dir = artDir
-        queue.async { [cache] in
+        queue.addOperation { [cache] in
             var image: NSImage?
             if let loc = db.artLocation(sha: sha),
                let fh = FileHandle(forReadingAtPath: (dir as NSString).appendingPathComponent(loc.pack)) {

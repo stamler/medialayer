@@ -103,6 +103,7 @@ func (c *Core) index(ctx context.Context, f fs.Fs) error {
 		if err := db.SetMissing(gone, true); err != nil {
 			return err
 		}
+		c.countTracks(db)
 	}
 	if len(todo) == 0 {
 		return nil
@@ -124,6 +125,9 @@ func (c *Core) index(ctx context.Context, f fs.Fs) error {
 			for o := range work {
 				c.setJob(func(j *jobStatus) { j.Current = o.Remote() })
 				err := indexFile(ctx, db, pack, o)
+				if err == nil {
+					c.countTracks(db)
+				}
 				c.setJob(func(j *jobStatus) {
 					j.Done++
 					if err != nil {

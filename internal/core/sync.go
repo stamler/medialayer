@@ -58,14 +58,11 @@ func (c *Core) Status() Status {
 	if s.Job.Phase == "" {
 		s.Job.Phase = PhaseIdle
 	}
-	db := c.db
-	c.mu.Unlock()
-	// Query outside the lock: the query can wait behind an indexer
-	// transaction, and the indexer's workers need the lock meanwhile.
-	if db != nil {
-		s.DBPath = db.Path()
-		s.Tracks, _ = db.TrackCount()
+	if c.db != nil {
+		s.DBPath = c.db.Path()
+		s.Tracks = c.tracks.Load()
 	}
+	c.mu.Unlock()
 	return s
 }
 
@@ -94,6 +91,9 @@ func (c *Core) StartSync() error {
 	go func() {
 		defer close(done)
 		err := c.sync(ctx)
+		if db := c.currentDB(); db != nil {
+			c.countTracks(db)
+		}
 		c.mu.Lock()
 		defer c.mu.Unlock()
 		cancel()

@@ -312,55 +312,69 @@ func fileIDs(t *testing.T, c *Core) map[string]string {
 }
 
 // Two devices that index a new folder at the same time end up with the
-// same file ids: the second to publish takes the first one's snapshot.
+// same file ids: the second to publish takes the first one's snapshot,
+// and uploads only art its index refers to.
 func TestTwoFirstDevicesShareFileIDs(t *testing.T) {
 	ctx := context.Background()
 	lib := writeLibrary(t, nil)
 	a, b := newTestCore(t, lib), newTestCore(t, lib)
-	if err := b.index(ctx, b.fsys); err != nil { // b indexes, but A publishes first
+	// B indexes a version of 01.flac with a cover, making an art pack ...
+	orig, err := os.ReadFile(filepath.Join(lib, "A/Album/01.flac"))
+	if err != nil {
 		t.Fatal(err)
 	}
-	cover := bytes.Repeat([]byte("art"), 100)
-	if err := os.WriteFile(filepath.Join(lib, "A/Album/01.flac"),
-		testFLAC([]string{"TITLE=One"}, cover, 100_000), 0o644); err != nil {
+	withCover := testFLAC([]string{"TITLE=One"}, bytes.Repeat([]byte("art"), 100), 100_000)
+	if err := os.WriteFile(filepath.Join(lib, "A/Album/01.flac"), withCover, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := b.index(ctx, b.fsys); err != nil { // b's own, soon discarded, art pack
+	if err := b.index(ctx, b.fsys); err != nil {
+		t.Fatal(err)
+	}
+	// ... but the file changes back and A publishes first.
+	if err := os.WriteFile(filepath.Join(lib, "A/Album/01.flac"), orig, 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := a.sync(ctx); err != nil {
 		t.Fatal(err)
 	}
+	// A change after A's publish makes B publish too.
+	if err := os.WriteFile(filepath.Join(lib, "B/Other/01.flac"),
+		testFLAC([]string{"TITLE=Three (live)"}, nil, 50_000), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	if err := b.sync(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.sync(ctx); err != nil {
 		t.Fatal(err)
 	}
 	if fmt.Sprint(fileIDs(t, a)) != fmt.Sprint(fileIDs(t, b)) {
 		t.Errorf("file ids differ: %v and %v", fileIDs(t, a), fileIDs(t, b))
 	}
-	// Only A's pack, which the shared index refers to, is on the cloud.
-	if packs, _ := filepath.Glob(filepath.Join(lib, ".medialayer/art/*")); len(packs) != 1 {
-		t.Errorf("cloud art packs = %v, want 1", packs)
+	if _, err := os.Stat(filepath.Join(lib, ".medialayer/snapshots/000002.sqlite")); err != nil {
+		t.Errorf("B did not publish: %v", err)
 	}
+	// B's art pack belonged to the index it discarded: it stays local.
+	if packs, _ := filepath.Glob(filepath.Join(lib, ".medialayer/art/*")); len(packs) != 0 {
+		t.Errorf("cloud art packs = %v, want none", packs)
+	}
+}
 
-	// Picking another folder starts from an empty index, even after a
-	// restore left the first database file behind.
-	other := t.TempDir()
-	b.mu.Lock()
-	b.fsys = nil
-	b.mu.Unlock()
-	if err := os.WriteFile(filepath.Join(b.dataDir, "settings.json"), []byte(`{}`), 0o600); err != nil {
+func TestResetLocalRemovesEveryIndexFile(t *testing.T) {
+	dir := t.TempDir()
+	art := filepath.Join(dir, "art")
+	for _, name := range []string{"library.sqlite", "library.sqlite-wal", "library-X.sqlite", "settings.json"} {
+		if err := os.WriteFile(filepath.Join(dir, name), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := resetLocal(dir, art); err != nil {
 		t.Fatal(err)
 	}
-	b.mu.Lock()
-	err := resetLocal(b.dataDir, b.artDir())
-	b.mu.Unlock()
-	if err != nil {
-		t.Fatal(err)
+	left, _ := filepath.Glob(filepath.Join(dir, "*"))
+	if len(left) != 2 { // settings.json and the empty art folder
+		t.Errorf("left %v", left)
 	}
-	if left, _ := filepath.Glob(filepath.Join(b.dataDir, "library*.sqlite*")); len(left) != 0 {
-		t.Errorf("resetLocal left %v", left)
-	}
-	_ = other
 }
 
 // Snapshot names that are not six-digit numbers are left alone.

@@ -9,6 +9,7 @@ struct MediaLayerApp: App {
             ContentView()
                 .environmentObject(model)
                 .environmentObject(model.player)
+                .environmentObject(model.player.clock)
                 .frame(minWidth: 900, minHeight: 560)
         }
         .commands {
@@ -132,7 +133,13 @@ struct FolderPicker: View {
         .task(id: current) {
             loading = true
             error = nil
-            do { folders = try await Core.listFolders(in: current) } catch {
+            let dir = current
+            do {
+                let list = try await Core.listFolders(in: dir)
+                guard !Task.isCancelled else { return } // the user moved on
+                folders = list
+            } catch {
+                guard !Task.isCancelled else { return }
                 folders = []
                 self.error = error.localizedDescription
             }
@@ -145,7 +152,6 @@ struct FolderPicker: View {
 
 struct LibraryView: View {
     @EnvironmentObject var model: AppModel
-    @EnvironmentObject var player: Player
     @State private var selection = Set<Track.ID>()
 
     var body: some View {
@@ -178,6 +184,7 @@ struct TransportControls: View {
 struct NowPlaying: View {
     @EnvironmentObject var model: AppModel
     @EnvironmentObject var player: Player
+    @EnvironmentObject var clock: PlaybackClock
 
     var body: some View {
         HStack(spacing: 8) {
@@ -187,7 +194,7 @@ struct NowPlaying: View {
                     Text(t.displayTitle).font(.callout).lineLimit(1)
                     Text([t.artist, t.album].filter { !$0.isEmpty }.joined(separator: " — "))
                         .font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                    ProgressView(value: min(player.position, player.duration), total: max(player.duration, 1))
+                    ProgressView(value: min(clock.position, player.duration), total: max(player.duration, 1))
                         .progressViewStyle(.linear).controlSize(.mini)
                 } else {
                     Text("MediaLayer").font(.callout).foregroundStyle(.secondary)
@@ -260,7 +267,7 @@ struct SongsTable: View {
                 }
             }
             .width(24)
-            TableColumn("Name", value: \.title) { t in Text(t.displayTitle) }
+            TableColumn("Name", value: \.displayTitle)
                 .width(min: 120, ideal: 240)
             TableColumn("Time", value: \.durationMS) { t in
                 Text(formatDuration(t.durationMS)).monospacedDigit()
@@ -317,14 +324,17 @@ struct ArtView: View {
             let px = Int(size * 2) // Retina
             if let hit = model.art.cached(sha, size: px) { image = hit; return }
             image = nil
-            model.art.load(sha, size: px) { image = $0 }
+            let loaded = await withCheckedContinuation { done in
+                model.art.load(sha, size: px) { done.resume(returning: $0) }
+            }
+            if !Task.isCancelled { image = loaded } // not a cover since replaced
         }
     }
 }
 
 struct StatusBar: View {
     @EnvironmentObject var model: AppModel
-    @EnvironmentObject var player: Player
+    @EnvironmentObject var clock: PlaybackClock
     let tracks: [Track]
 
     var body: some View {
@@ -335,7 +345,7 @@ struct StatusBar: View {
             Spacer()
             Text("\(tracks.count) songs, \(formatLong(ms)), \(ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file))")
             Spacer()
-            if let l = player.startLatency {
+            if let l = clock.startLatency {
                 Text(String(format: "started in %.1f s", l)).foregroundStyle(.secondary)
             }
         }
@@ -347,15 +357,19 @@ struct StatusBar: View {
 
     @ViewBuilder private var jobText: some View {
         let j = model.status.job
-        switch j.phase {
-        case "opening": Text("Opening library from Google Drive…")
-        case "listing": Text("Listing \(model.status.folder)… \(j.done) files")
-        case "indexing": Text("Indexing \(j.done) of \(j.total)" + (j.failed > 0 ? ", \(j.failed) failed" : ""))
-        case "publishing": Text("Saving the library to Google Drive…")
-        case "error": Text("Update failed: \(j.error ?? "")").foregroundStyle(.red).help(j.error ?? "")
-        case "done" where j.failed > 0:
-            Text("\(j.failed) files could not be read").help((j.failures ?? []).joined(separator: "\n"))
-        default: Text(model.status.folder)
+        if let e = model.libraryError ?? model.status.error {
+            Text("Can't read the library: \(e)").foregroundStyle(.red).help(e)
+        } else {
+            switch j.phase {
+            case "opening": Text("Opening library from Google Drive…")
+            case "listing": Text("Listing \(model.status.folder)… \(j.done) files")
+            case "indexing": Text("Indexing \(j.done) of \(j.total)" + (j.failed > 0 ? ", \(j.failed) failed" : ""))
+            case "publishing": Text("Saving the library to Google Drive…")
+            case "error": Text("Update failed: \(j.error ?? "")").foregroundStyle(.red).help(j.error ?? "")
+            case "done" where j.failed > 0:
+                Text("\(j.failed) files could not be read").help((j.failures ?? []).joined(separator: "\n"))
+            default: Text(model.status.folder)
+            }
         }
     }
 }

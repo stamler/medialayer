@@ -8,6 +8,8 @@ import SwiftUI
 final class AppModel: ObservableObject {
     @Published private(set) var status = CoreStatus()
     @Published private(set) var startError: String?
+    /// The last failure reading the index; cleared by the next good read.
+    @Published private(set) var libraryError: String?
     @Published private(set) var tracks: [Track] = []
     @Published var choosingFolder = false
 
@@ -26,6 +28,7 @@ final class AppModel: ObservableObject {
     private var loadedEpoch: Int64 = -1
     private var loadedCount: Int64 = -1
     private var lastLoad = Date.distantPast
+    private var loadedFinish: String?
     private var timer: Timer?
 
     init() {
@@ -42,15 +45,19 @@ final class AppModel: ObservableObject {
         if !status.folder.isEmpty, status.connected {
             try? Core.startSync() // pick up changes made elsewhere since the last run
         }
-        timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+        let timer = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.refresh() }
         }
+        RunLoop.main.add(timer, forMode: .common) // keep polling while menus are open
+        self.timer = timer
     }
 
     /// Polls the core and reloads the library when the index changed.
     func refresh() {
         let new = Core.status()
-        let finished = status.isBusy && !new.isBusy
+        // A sync that ended since the last load, even one that started and
+        // ended between two polls.
+        let finished = !new.isBusy && new.job.finished != loadedFinish
         if new != status { status = new }
         let changed = new.dbEpoch != loadedEpoch || new.tracks != loadedCount
         // While indexing, reload at most every 2 seconds; at the end, always.
@@ -69,10 +76,13 @@ final class AppModel: ObservableObject {
             tracks = try db?.tracks() ?? []
             loadedEpoch = status.dbEpoch
             loadedCount = status.tracks
-            lastLoad = Date()
+            loadedFinish = status.job.finished
+            libraryError = nil
         } catch {
-            startError = error.localizedDescription
+            db = nil // reopen on the next try
+            libraryError = error.localizedDescription
         }
+        lastLoad = Date()
     }
 
     // MARK: Setup
@@ -85,6 +95,7 @@ final class AppModel: ObservableObject {
     func useFolder(_ folder: String) throws {
         player.stop()
         db = nil
+        art.db = nil
         tracks = []
         loadedEpoch = -1
         try Core.setFolder(folder)
@@ -122,15 +133,23 @@ final class AppModel: ObservableObject {
     }
 }
 
+/// The playback position, published separately from Player so that
+/// views that only need the current track don't redraw on every tick.
+@MainActor
+final class PlaybackClock: ObservableObject {
+    @Published var position: Double = 0 // seconds
+    /// Seconds from play() to the first audio, for the 2-second target.
+    @Published var startLatency: Double?
+}
+
 /// Plays a queue of tracks from the core's localhost stream with AVPlayer.
 @MainActor
 final class Player: ObservableObject {
     @Published private(set) var current: Track?
     @Published private(set) var isPlaying = false
-    @Published private(set) var position: Double = 0 // seconds
     @Published private(set) var error: String?
-    /// Seconds from play() to the first audio, for the 2-second target.
-    @Published private(set) var startLatency: Double?
+    let clock = PlaybackClock()
+    var position: Double { clock.position }
 
     private let avPlayer = AVPlayer()
     private var queue: [Track] = []
@@ -146,17 +165,23 @@ final class Player: ObservableObject {
             forInterval: CMTime(seconds: 0.25, preferredTimescale: 600), queue: .main
         ) { [weak self] time in
             MainActor.assumeIsolated {
-                guard let self else { return }
-                self.position = time.seconds
-                if self.startLatency == nil, self.isPlaying, time.seconds > 0 {
-                    self.startLatency = Date().timeIntervalSince(self.started)
+                guard let self, self.current != nil else { return }
+                self.clock.position = time.seconds
+                if self.clock.startLatency == nil, self.isPlaying, time.seconds > 0 {
+                    self.clock.startLatency = Date().timeIntervalSince(self.started)
                 }
             }
         })
         observers.append(NotificationCenter.default.addObserver(
             forName: AVPlayerItem.didPlayToEndTimeNotification, object: nil, queue: .main
-        ) { [weak self] _ in
-            MainActor.assumeIsolated { self?.next() }
+        ) { [weak self] note in
+            MainActor.assumeIsolated {
+                // Only the item playing now: a late notice from the item the
+                // user just replaced must not skip the new one.
+                guard let self, let item = note.object as? AVPlayerItem,
+                      item === self.avPlayer.currentItem else { return }
+                self.next()
+            }
         })
         statusObservation = avPlayer.observe(\.timeControlStatus) { [weak self] p, _ in
             DispatchQueue.main.async {
@@ -179,14 +204,21 @@ final class Player: ObservableObject {
         let track = queue[i]
         current = track
         error = nil
-        startLatency = nil
+        clock.startLatency = nil
+        clock.position = 0
         started = Date()
         let url = base.appendingPathComponent("\(track.id).\(track.format)")
         let item = AVPlayerItem(url: url)
         itemObservation = item.observe(\.status) { [weak self] item, _ in
             guard item.status == .failed else { return }
             let message = item.error?.localizedDescription ?? "playback failed"
-            DispatchQueue.main.async { MainActor.assumeIsolated { self?.error = message } }
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard let self, item === self.avPlayer.currentItem else { return }
+                    self.error = message
+                    self.isPlaying = false
+                }
+            }
         }
         avPlayer.replaceCurrentItem(with: item)
         avPlayer.play()
@@ -212,6 +244,6 @@ final class Player: ObservableObject {
     func stop() {
         avPlayer.replaceCurrentItem(with: nil)
         current = nil
-        position = 0
+        clock.position = 0
     }
 }

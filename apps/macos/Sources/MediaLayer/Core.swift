@@ -11,6 +11,7 @@ struct CoreStatus: Decodable, Equatable {
         var current: String?
         var error: String?
         var failures: [String]?
+        var finished: String? // when the last sync ended
     }
 
     var connected = false

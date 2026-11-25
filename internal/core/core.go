@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 
 	_ "github.com/rclone/rclone/backend/drive" // Google Drive
 	"github.com/rclone/rclone/fs"
@@ -40,6 +41,9 @@ type Core struct {
 	job      jobStatus
 	jobDone  chan struct{}      // closed when the running job ends; nil if none
 	cancel   context.CancelFunc // stops the running job
+	// tracks is the index's track count, kept here so Status never waits
+	// on the database while the indexer writes.
+	tracks atomic.Int64
 	stream   *streamServer
 }
 
@@ -124,7 +128,16 @@ func (c *Core) openDB() error {
 	}
 	c.db = db
 	c.dbEpoch++
+	c.countTracks(db)
 	return nil
+}
+
+// countTracks refreshes the cached track count from db. It does not take
+// c.mu.
+func (c *Core) countTracks(db *index.DB) {
+	if n, err := db.TrackCount(); err == nil {
+		c.tracks.Store(n)
+	}
 }
 
 // Connected reports whether a Google Drive remote is configured.
