@@ -649,3 +649,32 @@ func TestPromoteRefusesForeignFolder(t *testing.T) {
 		t.Errorf("primary repo.json changed: %+v", r)
 	}
 }
+
+// Another device, or this one after picking the folder again, opens a
+// promoted primary directly.
+func TestOpenPromotedPrimary(t *testing.T) {
+	ctx := context.Background()
+	c, _, sec := newMirrorCore(t)
+	if err := c.sync(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := promote(t, c, "sec1"); err != nil {
+		t.Fatal(err)
+	}
+	b := newTestCore(t, sec)
+	b.mu.Lock()
+	b.settings.PrimaryRemote, b.settings.Folder = localPrimary, sec
+	b.mu.Unlock()
+	if err := b.sync(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.sync(ctx); err != nil {
+		t.Fatal(err)
+	}
+	b.mu.Lock()
+	id := b.settings.PrimaryID
+	b.mu.Unlock()
+	if id != "sec1" {
+		t.Errorf("PrimaryID = %q, want sec1", id)
+	}
+}

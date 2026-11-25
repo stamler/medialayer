@@ -151,6 +151,15 @@ func (c *Core) sync(ctx context.Context) error {
 		return fmt.Errorf("read the library's repo.json: %w", err)
 	} else if repo != nil && repo.Primary.Replica != "" {
 		c.mu.Lock()
+		if c.settings.PrimaryID == "" && repo.Primary.Folder == c.settings.Folder {
+			// A folder just picked that a promotion made the primary:
+			// take on the id it was given.
+			c.settings.PrimaryID = repo.Primary.Replica
+			if err := c.saveSettings(); err != nil {
+				c.mu.Unlock()
+				return err
+			}
+		}
 		mine := c.primaryID()
 		c.mu.Unlock()
 		if repo.Primary.Replica != mine {

@@ -661,7 +661,7 @@ struct SourcesBar: View {
 
     private func approvalMessage(_ s: CoreStatus.Source) -> String {
         var parts: [String] = []
-        if s.deletes > 0 { parts.append("move \(s.deletes) files that are no longer on the primary to its trash") }
+        if s.deletes > 0 { parts.append("move \(s.deletes) files that aren’t on the primary (including any added to this folder directly) to its trash") }
         if s.replaces > 0 { parts.append("replace \(s.replaces) files that differ, keeping the old ones in its trash") }
         if s.copies > 0 { parts.append("copy \(s.copies) new files") }
         return "This sync would " + parts.joined(separator: ", ") + ". The trash keeps files for 30 days."
