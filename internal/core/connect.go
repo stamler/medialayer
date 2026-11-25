@@ -178,6 +178,7 @@ func (c *Core) SetFolder(folder string) error {
 		c.settings.DBFile = ""
 		c.settings.Secondaries = nil                            // they hold copies of the old library
 		c.settings.PrimaryRemote, c.settings.PrimaryID = "", "" // picked in the first account
+		c.settings.Picked = true                                // the first sync checks for a promoted primary
 		c.mirrors = nil
 		c.fsys = nil
 		if err := c.saveSettings(); err != nil {

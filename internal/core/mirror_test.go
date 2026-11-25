@@ -663,7 +663,7 @@ func TestOpenPromotedPrimary(t *testing.T) {
 	}
 	b := newTestCore(t, sec)
 	b.mu.Lock()
-	b.settings.PrimaryRemote, b.settings.Folder = localPrimary, sec
+	b.settings.PrimaryRemote, b.settings.Folder, b.settings.Picked = localPrimary, sec, true
 	b.mu.Unlock()
 	if err := b.sync(ctx); err != nil {
 		t.Fatal(err)
@@ -676,5 +676,43 @@ func TestOpenPromotedPrimary(t *testing.T) {
 	b.mu.Unlock()
 	if id != "sec1" {
 		t.Errorf("PrimaryID = %q, want sec1", id)
+	}
+}
+
+// A device still set up for the old primary stops, and so does one that
+// picks the demoted primary, even at the same path as the new one.
+func TestOldPrimaryRefusedAfterPromotion(t *testing.T) {
+	ctx := context.Background()
+	c, lib, _ := newMirrorCore(t)
+	if err := c.sync(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := promote(t, c, "sec1"); err != nil {
+		t.Fatal(err)
+	}
+	for _, picked := range []bool{false, true} {
+		b := newTestCore(t, lib)
+		b.mu.Lock()
+		b.settings.PrimaryRemote, b.settings.Folder, b.settings.Picked = localPrimary, lib, picked
+		b.mu.Unlock()
+		if err := b.sync(ctx); err == nil || !strings.Contains(err.Error(), "moved") && !strings.Contains(err.Error(), "secondary") {
+			t.Errorf("picked=%v: sync = %v, want a refusal", picked, err)
+		}
+	}
+}
+
+// Picking a secondary as the library folder is refused.
+func TestPickedSecondaryRefused(t *testing.T) {
+	ctx := context.Background()
+	c, _, sec := newMirrorCore(t)
+	if err := c.sync(ctx); err != nil {
+		t.Fatal(err)
+	}
+	b := newTestCore(t, sec)
+	b.mu.Lock()
+	b.settings.PrimaryRemote, b.settings.Folder, b.settings.Picked = localPrimary, sec, true
+	b.mu.Unlock()
+	if err := b.sync(ctx); err == nil || !strings.Contains(err.Error(), "secondary") {
+		t.Errorf("sync = %v, want a refusal", err)
 	}
 }

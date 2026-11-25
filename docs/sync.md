@@ -169,7 +169,10 @@ synced.
 
 A sync refuses to run when the primary's `repo.json` names a different
 primary than this device's, and a secondary whose `repo.json` names
-another primary under the same generation is left alone.
+another primary under the same generation is left alone. Picking a folder
+as the library checks its `member.json`: a promoted primary's names the
+primary id it was given, which the device takes on; a secondary's names
+another, and is refused.
 
 ## Known gaps
 

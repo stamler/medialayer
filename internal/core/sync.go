@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -151,15 +152,32 @@ func (c *Core) sync(ctx context.Context) error {
 		return fmt.Errorf("read the library's repo.json: %w", err)
 	} else if repo != nil && repo.Primary.Replica != "" {
 		c.mu.Lock()
-		if c.settings.PrimaryID == "" && repo.Primary.Folder == c.settings.Folder {
-			// A folder just picked that a promotion made the primary:
-			// take on the id it was given.
-			c.settings.PrimaryID = repo.Primary.Replica
-			if err := c.saveSettings(); err != nil {
-				c.mu.Unlock()
+		picked := c.settings.Picked
+		c.mu.Unlock()
+		if picked {
+			// A folder just picked that a promotion made the primary takes
+			// on the id it was given. Its member.json, written while it was
+			// a secondary, names that id; a demoted primary's names its own.
+			var m memberRecord
+			b, err := readSmall(ctx, f, repoDir+"/member.json")
+			if err != nil && !absent(err) {
+				return fmt.Errorf("read the library's member.json: %w", err)
+			}
+			if err == nil && json.Unmarshal(b, &m) == nil && m.LibraryID == repo.LibraryID && m.Replica != repo.Primary.Replica {
+				return errors.New("this folder is a copy (a secondary) of a library whose primary is elsewhere; pick the primary")
+			}
+			c.mu.Lock()
+			if m.LibraryID == repo.LibraryID && m.Replica != "" {
+				c.settings.PrimaryID = repo.Primary.Replica
+			}
+			c.settings.Picked = false
+			err = c.saveSettings()
+			c.mu.Unlock()
+			if err != nil {
 				return err
 			}
 		}
+		c.mu.Lock()
 		mine := c.primaryID()
 		c.mu.Unlock()
 		if repo.Primary.Replica != mine {

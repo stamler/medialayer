@@ -73,6 +73,9 @@ type settings struct {
 	// removal or replacement, as anything it would change there was
 	// changed on it after the last check.
 	ReviewFirst string `json:"review_first,omitempty"`
+	// Picked is set from picking the folder until the first sync reads
+	// its repository.
+	Picked bool `json:"picked,omitempty"`
 }
 
 // New opens the core with its files in dataDir (on macOS,
