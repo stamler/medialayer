@@ -327,11 +327,6 @@ func TestMirrorRefusesUnsafeFolders(t *testing.T) {
 			if _, err := os.Stat(filepath.Join(sec, "taxes/2025.pdf")); name == "not empty, not a library" && err != nil {
 				t.Error("the folder's own file was moved")
 			}
-			for p := range after {
-				if strings.Contains(p, "/probe/") {
-					t.Errorf("probe file %s was left behind", p)
-				}
-			}
 		})
 	}
 }
@@ -380,5 +375,29 @@ func TestCheckLocalFolder(t *testing.T) {
 		if err := checkLocalFolder(ok); err != nil {
 			t.Errorf("%s: %v", ok, err)
 		}
+	}
+}
+
+func TestMirrorResumesCutShortFirstCopy(t *testing.T) {
+	ctx := context.Background()
+	c, _, sec := newMirrorCore(t)
+	if err := c.sync(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// As if the first copy stopped before repo.json was written.
+	if err := os.Remove(filepath.Join(sec, ".medialayer/repo.json")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(sec, "notes.txt")); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.sync(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if s := mirrorOf(t, c, "sec1"); s.State != MirrorSynced || s.Copies != 1 {
+		t.Errorf("secondary = %+v, want synced with 1 copy", s)
+	}
+	if _, err := os.Stat(filepath.Join(sec, ".medialayer/repo.json")); err != nil {
+		t.Error("repo.json was not written")
 	}
 }

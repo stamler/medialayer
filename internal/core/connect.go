@@ -46,19 +46,9 @@ func (c *Core) ConnectGoogleDrive(ctx context.Context) error {
 	if err := c.connectDrive(ctx, remoteName); err != nil {
 		return err
 	}
-	var err error
 	c.mu.Lock()
 	c.fsys = nil // a new account may see a different folder
-	// A different account's folder may be a different library, which
-	// must never be synced over the old one's secondaries.
-	if len(c.settings.Secondaries) > 0 {
-		c.settings.Secondaries, c.mirrors = nil, nil
-		err = c.saveSettings()
-	}
 	c.mu.Unlock()
-	if err != nil {
-		return err
-	}
 	return nil
 }
 

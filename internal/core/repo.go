@@ -278,6 +278,11 @@ func (c *Core) publish(ctx context.Context, f fs.Fs) error {
 	if repo == nil {
 		if libraryID == "" {
 			libraryID = index.NewID()
+		} else if err := c.dropSecondaries(); err != nil {
+			// The folder lost its repository, or is another account's
+			// folder at the same path: either way it may not hold what the
+			// secondaries copied, so they must not follow it unasked.
+			return err
 		}
 		repo = &repoRecord{
 			Format:     repoFormat,

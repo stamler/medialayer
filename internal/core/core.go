@@ -61,6 +61,9 @@ type settings struct {
 	// Secondaries hold copies of the library, synced one way from the
 	// primary (the Folder above).
 	Secondaries []source `json:"secondaries,omitempty"`
+	// ListedMembers is set while this device has listed secondaries in the
+	// primary's repo.json, so it clears them there when the last goes.
+	ListedMembers bool `json:"listed_members,omitempty"`
 }
 
 // New opens the core with its files in dataDir (on macOS,

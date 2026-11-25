@@ -132,9 +132,15 @@ func overlaps(a, b string) bool {
 // top of a disk, the home folder, and folders a cloud app syncs (such as
 // Google Drive for desktop), which might hold the primary.
 func checkLocalFolder(folder string) error {
+	if real, err := filepath.EvalSymlinks(folder); err == nil {
+		folder = real
+	}
 	parts := strings.Split(strings.Trim(filepath.ToSlash(folder), "/"), "/")
 	if folder == "/" || (len(parts) <= 2 && parts[0] == "Volumes") {
 		return errors.New("pick a folder on the disk, not the top of it")
+	}
+	if len(parts) >= 2 && parts[0] == "Volumes" && strings.HasPrefix(parts[1], "GoogleDrive") {
+		return errors.New("this folder is synced by a cloud app; add that cloud's folder directly instead")
 	}
 	if home, err := os.UserHomeDir(); err == nil {
 		if folder == home {
@@ -252,6 +258,18 @@ func (c *Core) setMirror(id string, update func(m *mirrorState)) {
 	update(m)
 }
 
+// dropSecondaries forgets the secondaries; their files stay.
+func (c *Core) dropSecondaries() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.settings.Secondaries) == 0 {
+		return nil
+	}
+	fs.Logf(nil, "the primary has no repo.json any more; secondaries need adding again")
+	c.settings.Secondaries, c.mirrors = nil, nil
+	return c.saveSettings()
+}
+
 // openSource opens a secondary's folder.
 func openSource(ctx context.Context, s source) (fs.Fs, error) {
 	if s.Remote == "" {
@@ -339,13 +357,6 @@ func putBytes(ctx context.Context, f fs.Fs, remote string, b []byte) error {
 	return err
 }
 
-// removeFile removes a file if it is there.
-func removeFile(ctx context.Context, f fs.Fs, remote string) {
-	if o, err := f.NewObject(ctx, remote); err == nil {
-		_ = o.Remove(ctx)
-	}
-}
-
 // target is a secondary that passed the checks before syncing.
 type target struct {
 	s     source
@@ -360,27 +371,42 @@ type target struct {
 //
 // Probe files make sure no secondary is the primary, inside it, or holds
 // it, however it was reached (another sign-in to the same account, a
-// shortcut, a local copy): one in the primary's .medialayer must not be
-// seen through the secondary, and one in each secondary's must not be
-// seen in the primary's listing.
+// shortcut, a local path): the primary's must not be seen through the
+// secondary, and each secondary's must not be seen in the primary's
+// listing. They are kept and rewritten in place, one per device and
+// folder, so Drive's own trash doesn't fill with them.
 func (c *Core) mirrorAll(ctx context.Context, f fs.Fs) error {
 	c.mu.Lock()
 	secs := append([]source(nil), c.settings.Secondaries...)
 	c.mu.Unlock()
+	c.mu.Lock()
+	listed := c.settings.ListedMembers
+	device := c.settings.DeviceID
+	c.mu.Unlock()
+	if len(secs) == 0 && !listed {
+		return nil // leave members other devices may have listed
+	}
 	repo, err := c.updateMembers(ctx, f, secs)
 	if err != nil {
 		return fmt.Errorf("update the library's members: %w", err)
+	}
+	if listed != (len(secs) > 0) {
+		c.mu.Lock()
+		c.settings.ListedMembers = len(secs) > 0
+		err := c.saveSettings()
+		c.mu.Unlock()
+		if err != nil {
+			return err
+		}
 	}
 	if len(secs) == 0 {
 		return nil
 	}
 	c.setJob(func(j *jobStatus) { j.Phase, j.Done, j.Total, j.Current = PhaseMirroring, 0, 0, "" })
 	run := index.NewID()
-	probe := repoDir + "/probe/" + run
-	if err := putBytes(ctx, f, probe, []byte(run)); err != nil {
+	if err := putBytes(ctx, f, repoDir+"/probe/"+device, []byte(run)); err != nil {
 		return fmt.Errorf("write a probe file: %w", err)
 	}
-	defer removeFile(context.WithoutCancel(ctx), f, probe)
 
 	fail := func(s source, err error) {
 		fs.Errorf(nil, "secondary %s: %v", s.Folder, err)
@@ -391,8 +417,7 @@ func (c *Core) mirrorAll(ctx context.Context, f fs.Fs) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		c.setMirror(s.ID, func(m *mirrorState) { m.state, m.err = MirrorSyncing, "" })
-		t, err := c.check(ctx, s, repo, run)
+		t, err := c.check(ctx, s, repo, device, run)
 		if err != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()
@@ -400,7 +425,6 @@ func (c *Core) mirrorAll(ctx context.Context, f fs.Fs) error {
 			fail(s, err)
 			continue
 		}
-		defer removeFile(context.WithoutCancel(ctx), t.dst, t.probe)
 		targets = append(targets, t)
 	}
 	if len(targets) == 0 {
@@ -418,6 +442,7 @@ func (c *Core) mirrorAll(ctx context.Context, f fs.Fs) error {
 			fail(t.s, errors.New("this folder is inside the primary; pick one outside it"))
 			continue
 		}
+		c.setMirror(t.s.ID, func(m *mirrorState) { m.state, m.err = MirrorSyncing, "" })
 		err := c.mirror(ctx, f, src, repo, t)
 		if err != nil && ctx.Err() != nil {
 			c.setMirror(t.s.ID, func(m *mirrorState) { m.state = "" })
@@ -431,16 +456,17 @@ func (c *Core) mirrorAll(ctx context.Context, f fs.Fs) error {
 }
 
 // check opens a secondary and makes sure it is safe to write: empty or a
-// copy of this library, and not the primary, nor holding it. It then
-// writes the secondary's probe file.
-func (c *Core) check(ctx context.Context, s source, repo *repoRecord, run string) (target, error) {
-	t := target{s: s, probe: repoDir + "/probe/" + run + "-" + s.ID}
+// copy of this library (or a first copy of it that was cut short), and
+// not the primary, nor holding it. It then writes the secondary's probe
+// file and, before the first copy, its member record.
+func (c *Core) check(ctx context.Context, s source, repo *repoRecord, device, run string) (target, error) {
+	t := target{s: s, probe: repoDir + "/probe/" + device + "-" + s.ID}
 	dst, err := openSource(ctx, s)
 	if err != nil {
 		return t, err
 	}
 	t.dst = dst
-	if _, err := dst.NewObject(ctx, repoDir+"/probe/"+run); err == nil {
+	if b, err := readSmall(ctx, dst, repoDir+"/probe/"+device); err == nil && string(b) == run {
 		return t, errors.New("this folder is the primary itself")
 	}
 	have, err := listLibrary(ctx, dst, true)
@@ -448,7 +474,7 @@ func (c *Core) check(ctx context.Context, s source, repo *repoRecord, run string
 		return t, fmt.Errorf("list %s: %w", s.Folder, err)
 	}
 	t.have = have
-	if have.probes[run] {
+	if have.probes[device] {
 		return t, errors.New("this folder holds the primary; pick one outside it")
 	}
 	if have.nested {
@@ -458,8 +484,18 @@ func (c *Core) check(ctx context.Context, s source, repo *repoRecord, run string
 	if err != nil {
 		return t, err
 	}
+	// member.json is written before the first copy, so a copy that was
+	// cut short, with files but no repo.json yet, is still recognised.
+	var mine memberRecord
+	if b, err := readSmall(ctx, dst, repoDir+"/member.json"); err == nil {
+		if err := json.Unmarshal(b, &mine); err != nil {
+			return t, fmt.Errorf("member.json: %w", err)
+		}
+	}
 	switch {
-	case theirs == nil && len(have.files) > 0:
+	case theirs == nil && mine.LibraryID != "" && mine.LibraryID != repo.LibraryID:
+		return t, errors.New("this folder holds part of a different MediaLayer library; pick an empty folder")
+	case theirs == nil && mine.LibraryID == "" && len(have.files) > 0:
 		return t, errors.New("this folder isn't empty and isn't a copy of this library; pick an empty folder")
 	case theirs != nil && theirs.LibraryID != repo.LibraryID:
 		return t, errors.New("this folder holds a different MediaLayer library; pick an empty folder or a copy of this library")
@@ -470,7 +506,34 @@ func (c *Core) check(ctx context.Context, s source, repo *repoRecord, run string
 	if err := putBytes(ctx, dst, t.probe, []byte(run)); err != nil {
 		return t, fmt.Errorf("write a probe file: %w", err)
 	}
+	if mine.LibraryID != repo.LibraryID {
+		b, _ := json.Marshal(memberRecord{LibraryID: repo.LibraryID, Replica: s.ID})
+		if err := putBytes(ctx, dst, repoDir+"/member.json", b); err != nil {
+			return t, err
+		}
+	}
 	return t, nil
+}
+
+// memberRecord is a secondary's .medialayer/member.json: which library
+// it is a copy of.
+type memberRecord struct {
+	LibraryID string `json:"library_id"`
+	Replica   string `json:"replica"`
+}
+
+// readSmall reads a small file.
+func readSmall(ctx context.Context, f fs.Fs, remote string) ([]byte, error) {
+	o, err := f.NewObject(ctx, remote)
+	if err != nil {
+		return nil, err
+	}
+	rc, err := o.Open(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rc.Close() }()
+	return io.ReadAll(io.LimitReader(rc, 1<<16))
 }
 
 // updateMembers makes the primary's repo.json list exactly the primary and
@@ -545,6 +608,23 @@ func (c *Core) mirror(ctx context.Context, f fs.Fs, src *listing, repo *repoReco
 		fs.Errorf(nil, "secondary %s: skipped %s, which the primary lists twice or only by case", s.Folder, p)
 	}
 
+	// A case-blind local disk keeps a folder's old case when the primary
+	// renames it by case only; match such paths as the same file.
+	lookup := func(p string) (fs.Object, bool) { d, ok := have.files[p]; return d, ok }
+	inSrc := func(p string) bool { _, ok := src.files[p]; return ok }
+	if s.Remote == "" {
+		haveFold := map[string]fs.Object{}
+		for p, d := range have.files {
+			haveFold[strings.ToLower(p)] = d
+		}
+		srcFold := map[string]bool{}
+		for p := range src.files {
+			srcFold[strings.ToLower(p)] = true
+		}
+		lookup = func(p string) (fs.Object, bool) { d, ok := haveFold[strings.ToLower(p)]; return d, ok }
+		inSrc = func(p string) bool { return srcFold[strings.ToLower(p)] }
+	}
+
 	var copies, replaces []string
 	var deletes []fs.Object
 	var lines []string
@@ -552,7 +632,7 @@ func (c *Core) mirror(ctx context.Context, f fs.Fs, src *listing, repo *repoReco
 		if skip[p] {
 			continue
 		}
-		d, ok := have.files[p]
+		d, ok := lookup(p)
 		switch {
 		case !ok:
 			copies = append(copies, p)
@@ -562,7 +642,7 @@ func (c *Core) mirror(ctx context.Context, f fs.Fs, src *listing, repo *repoReco
 		}
 	}
 	for p, d := range have.files {
-		if _, ok := src.files[p]; !ok && !skip[p] {
+		if !inSrc(p) && !skip[p] {
 			deletes = append(deletes, d)
 			lines = append(lines, "D "+p)
 		}
@@ -605,7 +685,8 @@ func (c *Core) mirror(ctx context.Context, f fs.Fs, src *listing, repo *repoReco
 		step(d.Remote())
 	}
 	for _, p := range replaces {
-		if err := toTrash(have.files[p]); err != nil {
+		old, _ := lookup(p)
+		if err := toTrash(old); err != nil {
 			return err
 		}
 		if _, err := operations.Copy(ctx, dst, nil, p, src.files[p]); err != nil {
