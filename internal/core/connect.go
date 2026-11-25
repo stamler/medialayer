@@ -70,11 +70,11 @@ func (c *Core) AddGoogleAccount(ctx context.Context) (string, error) {
 
 // driveAccounts lists the connected Google Drive remotes, the primary's
 // first.
-func driveAccounts() []string {
+func driveAccounts(primary string) []string {
 	out := []string{}
 	for _, name := range config.FileSections() {
 		if config.GetValue(name, "type") == "drive" && config.GetValue(name, "token") != "" {
-			if name == remoteName {
+			if name == primary {
 				out = append([]string{name}, out...)
 			} else {
 				out = append(out, name)

@@ -17,6 +17,7 @@ const (
 	PhaseIndexing   = "indexing"   // reading headers of new and changed files
 	PhasePublishing = "publishing" // writing .medialayer to the cloud
 	PhaseMirroring  = "mirroring"  // copying changes to the secondaries
+	PhasePromoting  = "promoting"  // switching the primary
 	PhaseDone       = "done"
 	PhaseError      = "error"
 )
@@ -65,7 +66,7 @@ func (c *Core) Status() Status {
 	}
 	s.Job.Failures = append([]string(nil), c.job.Failures...)
 	s.Sources = c.sourcesLocked()
-	s.Accounts = driveAccounts()
+	s.Accounts = driveAccounts(c.primaryRemote())
 	s.Notice = c.notice
 	if s.Job.Phase == "" {
 		s.Job.Phase = PhaseIdle
@@ -93,6 +94,12 @@ func (c *Core) StartSync() error {
 	if c.jobDone != nil {
 		return nil
 	}
+	return c.startJobLocked(c.sync)
+}
+
+// startJobLocked runs work as the job. The caller holds c.mu and has
+// checked that no job is running.
+func (c *Core) startJobLocked(work func(context.Context) error) error {
 	if c.settings.Folder == "" {
 		return errors.New("no library folder picked")
 	}
@@ -103,7 +110,7 @@ func (c *Core) StartSync() error {
 	c.notice = ""
 	go func() {
 		defer close(done)
-		err := c.sync(ctx)
+		err := work(ctx)
 		if db := c.currentDB(); db != nil {
 			c.countTracks(db)
 		}
@@ -136,6 +143,18 @@ func (c *Core) sync(ctx context.Context) error {
 		c.mu.Unlock()
 		if err != nil {
 			return err
+		}
+	}
+	// A device whose primary was promoted away on another device stops
+	// here rather than write to what is now a secondary.
+	if repo, err := readRepo(ctx, f); err != nil {
+		return fmt.Errorf("read the library's repo.json: %w", err)
+	} else if repo != nil && repo.Primary.Replica != "" {
+		c.mu.Lock()
+		mine := c.primaryID()
+		c.mu.Unlock()
+		if repo.Primary.Replica != mine {
+			return fmt.Errorf("the library's primary moved to %s on another device; this device doesn't follow a move yet", repo.Primary.Folder)
 		}
 	}
 	// A second pass happens only when another device published the

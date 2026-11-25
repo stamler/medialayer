@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -493,27 +494,43 @@ func TestMirrorCarriesEachIndexVersion(t *testing.T) {
 	}
 }
 
+// promote runs Promote and waits for its job.
+func promote(t *testing.T, c *Core, id string) error {
+	t.Helper()
+	if err := c.Promote(id); err != nil {
+		return err
+	}
+	c.mu.Lock()
+	done := c.jobDone
+	c.mu.Unlock()
+	<-done
+	if st := c.Status(); st.Job.Phase == PhaseError {
+		return errors.New(st.Job.Error)
+	}
+	return nil
+}
+
+func readRepoFile(t *testing.T, dir string) repoRecord {
+	t.Helper()
+	var r repoRecord
+	b, _ := os.ReadFile(filepath.Join(dir, ".medialayer/repo.json"))
+	if err := json.Unmarshal(b, &r); err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
+
 func TestPromoteAndBack(t *testing.T) {
 	ctx := context.Background()
 	c, lib, sec := newMirrorCore(t)
 	if err := c.sync(ctx); err != nil {
 		t.Fatal(err)
 	}
-	readRepoFile := func(dir string) repoRecord {
-		t.Helper()
-		var r repoRecord
-		b, _ := os.ReadFile(filepath.Join(dir, ".medialayer/repo.json"))
-		if err := json.Unmarshal(b, &r); err != nil {
-			t.Fatal(err)
-		}
-		return r
-	}
-
-	if err := c.Promote("sec1"); err != nil {
+	if err := promote(t, c, "sec1"); err != nil {
 		t.Fatal(err)
 	}
 	for _, dir := range []string{sec, lib} {
-		if r := readRepoFile(dir); r.Generation != 2 || r.Primary.Replica != "sec1" || r.Primary.Folder != sec {
+		if r := readRepoFile(t, dir); r.Generation != 2 || r.Primary.Replica != "sec1" || r.Primary.Folder != sec {
 			t.Errorf("%s repo.json = %+v", dir, r)
 		}
 	}
@@ -521,26 +538,18 @@ func TestPromoteAndBack(t *testing.T) {
 	if len(st.Sources) != 2 || !st.Sources[0].Primary || st.Sources[0].Folder != sec || st.Sources[1].Folder != lib || st.Sources[1].ID != replica {
 		t.Fatalf("sources = %+v", st.Sources)
 	}
-	// Going back needs the old primary synced as a secondary first.
-	if err := c.Promote(replica); err == nil {
-		t.Error("promoted a folder with no member.json")
-	}
-	if err := c.sync(ctx); err != nil {
-		t.Fatal(err)
-	}
+	// The promotion's own second sync makes the old primary a synced
+	// secondary, so going back works straight away.
 	if s := mirrorOf(t, c, replica); s.State != MirrorSynced || s.Copies+s.Replaces+s.Deletes != 0 {
 		t.Fatalf("old primary as a secondary = %+v", s)
 	}
-	if err := c.Promote(replica); err != nil {
+	if err := promote(t, c, replica); err != nil {
 		t.Fatal(err)
 	}
 	for _, dir := range []string{sec, lib} {
-		if r := readRepoFile(dir); r.Generation != 3 || r.Primary.Replica != replica || r.Primary.Folder != lib {
+		if r := readRepoFile(t, dir); r.Generation != 3 || r.Primary.Replica != replica || r.Primary.Folder != lib {
 			t.Errorf("%s repo.json = %+v", dir, r)
 		}
-	}
-	if err := c.sync(ctx); err != nil {
-		t.Fatal(err)
 	}
 	if s := mirrorOf(t, c, "sec1"); s.State != MirrorSynced {
 		t.Fatalf("secondary after going back = %+v", s)
@@ -550,20 +559,93 @@ func TestPromoteAndBack(t *testing.T) {
 	if err := json.Unmarshal(b, &m); err != nil || m.Generation != 3 || m.State != "synced" {
 		t.Errorf("member.json = %s", b)
 	}
+	if _, err := os.Stat(filepath.Join(lib, trashDir)); !os.IsNotExist(err) {
+		t.Errorf("the old primary has a trash folder (%v)", err)
+	}
 }
 
-func TestPromoteRefusesUnfinishedCopy(t *testing.T) {
+// Changes made since the last sync, on either side, are caught up before
+// the switch, so nothing is lost from the old primary.
+func TestPromoteCatchesUpFirst(t *testing.T) {
+	ctx := context.Background()
+	c, lib, sec := newMirrorCore(t)
+	if err := c.sync(ctx); err != nil {
+		t.Fatal(err)
+	}
+	write(t, filepath.Join(lib, "New/added.txt"), []byte("added after the sync"))
+	if err := os.Remove(filepath.Join(sec, "Extras/00.txt")); err != nil {
+		t.Fatal(err)
+	}
+	if err := promote(t, c, "sec1"); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{"New/added.txt", "Extras/00.txt"} {
+		for _, dir := range []string{lib, sec} {
+			if _, err := os.Stat(filepath.Join(dir, p)); err != nil {
+				t.Errorf("%s: %v", filepath.Join(dir, p), err)
+			}
+		}
+	}
+	if _, err := os.Stat(filepath.Join(lib, trashDir)); !os.IsNotExist(err) {
+		t.Errorf("the old primary has a trash folder (%v)", err)
+	}
+}
+
+// A file that turns up on the demoted primary is not removed without
+// asking, however few there are.
+func TestDemotedPrimaryAsksFirst(t *testing.T) {
 	ctx := context.Background()
 	c, _, sec := newMirrorCore(t)
 	if err := c.sync(ctx); err != nil {
 		t.Fatal(err)
 	}
-	b, _ := os.ReadFile(filepath.Join(sec, ".medialayer/member.json"))
-	write(t, filepath.Join(sec, ".medialayer/member.json"), bytes.Replace(b, []byte(`"synced"`), []byte(`"copying"`), 1))
-	if err := c.Promote("sec1"); err == nil || !strings.Contains(err.Error(), "didn't finish") {
-		t.Errorf("Promote = %v, want a refusal", err)
+	c.mu.Lock()
+	c.settings.ReviewFirst = "sec1"
+	c.mu.Unlock()
+	write(t, filepath.Join(sec, "Stray/one.txt"), []byte("edited on the secondary"))
+	if err := c.sync(ctx); err != nil {
+		t.Fatal(err)
 	}
-	if r, _ := readRepo(ctx, c.fsys); r == nil || r.Generation != 1 {
+	if s := mirrorOf(t, c, "sec1"); s.State != MirrorPaused || s.Deletes != 1 {
+		t.Fatalf("secondary = %+v, want a pause for one removal", s)
+	}
+	if _, err := os.Stat(filepath.Join(sec, "Stray/one.txt")); err != nil {
+		t.Errorf("the file went: %v", err)
+	}
+	if err := c.ApproveChanges("sec1"); err != nil {
+		t.Fatal(err)
+	}
+	c.mu.Lock()
+	done := c.jobDone
+	c.mu.Unlock()
+	if done != nil {
+		<-done
+	}
+	if s := mirrorOf(t, c, "sec1"); s.State != MirrorSynced {
+		t.Fatalf("after approval = %+v", s)
+	}
+	c.mu.Lock()
+	left := c.settings.ReviewFirst
+	c.mu.Unlock()
+	if left != "" {
+		t.Errorf("ReviewFirst = %q after a synced sync", left)
+	}
+}
+
+func TestPromoteRefusesForeignFolder(t *testing.T) {
+	ctx := context.Background()
+	c, lib, sec := newMirrorCore(t)
+	if err := c.sync(ctx); err != nil {
+		t.Fatal(err)
+	}
+	r := readRepoFile(t, sec)
+	r.LibraryID = "other"
+	b, _ := json.Marshal(r)
+	write(t, filepath.Join(sec, ".medialayer/repo.json"), b)
+	if err := promote(t, c, "sec1"); err == nil {
+		t.Error("promoted a folder holding another library")
+	}
+	if r := readRepoFile(t, lib); r.Generation != 1 || r.Primary.Replica != replica {
 		t.Errorf("primary repo.json changed: %+v", r)
 	}
 }

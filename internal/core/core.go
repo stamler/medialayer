@@ -69,6 +69,10 @@ type settings struct {
 	// ListedMembers is set while this device has listed secondaries in the
 	// primary's repo.json, so it clears them there when the last goes.
 	ListedMembers bool `json:"listed_members,omitempty"`
+	// ReviewFirst is a demoted primary whose next sync pauses before any
+	// removal or replacement, as anything it would change there was
+	// changed on it after the last check.
+	ReviewFirst string `json:"review_first,omitempty"`
 }
 
 // New opens the core with its files in dataDir (on macOS,

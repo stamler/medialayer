@@ -10,21 +10,60 @@ import (
 	"github.com/rclone/rclone/fs"
 )
 
-// Promote makes a secondary the library's primary. It is allowed only
-// when the secondary is a complete copy of the current index version: its
-// member.json says synced at this device's version and the current
-// generation. The generation is raised by one, the new repo.json is
-// written to the new primary first (which must succeed) and then to the
-// old primary, which becomes a secondary. Promoting the old primary back
-// works the same way, once a sync has made it a synced secondary.
+// Promote makes a secondary the library's primary, as a job that runs in
+// the background like a sync. The job first syncs the library, so the
+// secondary holds every file the primary has now and nothing else, and
+// only then checks it: its member.json must say synced at this device's
+// index version under the current generation. The generation is raised by
+// one, the new repo.json is written to the new primary first (which must
+// succeed) and then to the old primary, the sources are swapped, and a
+// second sync makes the old primary a secondary in step with the new one.
+// That first sync of the old primary pauses before removing or replacing
+// anything, since such a change would come from an edit on it made during
+// the switch.
 //
 // Files are not moved or copied: a synced secondary already holds them.
 func (c *Core) Promote(id string) error {
 	c.mu.Lock()
+	defer c.mu.Unlock()
 	if c.jobDone != nil {
-		c.mu.Unlock()
 		return errors.New("the library is syncing; wait for it to finish")
 	}
+	found := false
+	for _, s := range c.settings.Secondaries {
+		found = found || s.ID == id
+	}
+	if !found {
+		return fmt.Errorf("no secondary %s", id)
+	}
+	return c.startJobLocked(func(ctx context.Context) error {
+		if err := c.sync(ctx); err != nil {
+			return err
+		}
+		c.mu.Lock()
+		m := c.mirrors[id]
+		c.mu.Unlock()
+		if m == nil || m.state != MirrorSynced {
+			why := "its sync didn't finish"
+			if m != nil && m.err != "" {
+				why = m.err
+			} else if m != nil && m.state == MirrorPaused {
+				why = "its sync is paused for review"
+			}
+			return fmt.Errorf("couldn't make it the primary: %s", why)
+		}
+		c.setJob(func(j *jobStatus) { j.Phase, j.Done, j.Total, j.Current = PhasePromoting, 0, 0, "" })
+		if err := c.swapPrimary(ctx, id); err != nil {
+			return err
+		}
+		return c.sync(ctx)
+	})
+}
+
+// swapPrimary makes secondary id the primary. It runs inside the job, so
+// nothing else changes the settings meanwhile.
+func (c *Core) swapPrimary(ctx context.Context, id string) error {
+	c.mu.Lock()
 	var target source
 	var others []source
 	for _, s := range c.settings.Secondaries {
@@ -42,8 +81,6 @@ func (c *Core) Promote(id string) error {
 	if target.ID == "" {
 		return fmt.Errorf("no secondary %s", id)
 	}
-
-	ctx := context.Background()
 	f, err := c.libraryFs(ctx)
 	if err != nil {
 		return err
@@ -94,6 +131,7 @@ func (c *Core) Promote(id string) error {
 	}
 	c.settings.Secondaries = append(others, oldPrimary)
 	c.settings.ListedMembers = true
+	c.settings.ReviewFirst = oldPrimary.ID
 	c.fsys = nil
 	delete(c.mirrors, target.ID)
 	c.stream.forgetAll()

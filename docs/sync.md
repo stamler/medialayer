@@ -143,22 +143,33 @@ it is only missing later changes.
 ## Promoting a secondary
 
 Right-click a secondary's chip and choose Make Primary (offered only when
-the chip shows synced and no sync is running). The core then:
+the chip shows synced and no sync is running). It runs in the background
+like a sync, and nothing else can start meanwhile:
 
-1. Checks the secondary as above against this device: `member.json` says
-   `synced`, names this library, holds this device's index version, and was
-   written under the current generation; its `repo.json` names no newer one.
-2. Raises the generation by one and writes a `repo.json` naming the
-   secondary as primary (with the time and device) to the new primary
+1. A full sync first, so the secondary matches the primary as it is now:
+   files added to the primary since the last sync are copied, and anything
+   removed or edited on the secondary is put back. If that sync doesn't
+   leave the secondary synced (it fails, or pauses at 5%), nothing changes.
+2. The check above, against this device: `member.json` says `synced`,
+   names this library, holds this device's index version, and was written
+   under the current generation; its `repo.json` names no newer one.
+3. The generation is raised by one and a `repo.json` naming the secondary
+   as primary (with the time and device) is written to the new primary
    first, which must succeed, then to the old primary. If the old primary
    can't take it (a full cloud), the higher generation on the new primary
-   still wins, and the next sync rewrites it.
-3. Makes the old primary a secondary and starts a sync, which marks it
-   `synced` under the new generation. No files move: the copy already
-   holds them.
+   still wins, and a later sync rewrites it.
+4. The old primary becomes a secondary and a second sync runs. That first
+   sync of the old primary pauses before removing or replacing anything,
+   however little, since such a change would come from an edit made on it
+   during the switch. No files move otherwise: the copy already holds
+   them.
 
-To switch back, wait for that sync to finish (the old primary's chip shows
-synced), then Make Primary on it the same way.
+To switch back, Make Primary on the old primary's chip once it shows
+synced.
+
+A sync refuses to run when the primary's `repo.json` names a different
+primary than this device's, and a secondary whose `repo.json` names
+another primary under the same generation is left alone.
 
 ## Known gaps
 
@@ -171,8 +182,10 @@ synced), then Make Primary on it the same way.
 - The 5% limit is counted per sync, not per day.
 - Each device lists its own secondaries in the primary's `repo.json`, so
   two devices with different secondaries overwrite each other's list.
-- Other members' `repo.json` is rewritten only by their next sync, and
-  changes found on the old primary after promotion aren't flagged yet.
+- Other members' `repo.json` is rewritten only by their next sync.
+- Another device doesn't follow a promotion made elsewhere: its sync
+  stops with "the primary moved" (when the old primary took the new
+  `repo.json`) until the library is picked again there.
 - Paths the primary lists twice (or twice by case or Unicode form) are in
   the index but not on the secondary. On exFAT or FAT disks modification
   times are kept to 2 seconds, and HFS+ disks keep names decomposed, so

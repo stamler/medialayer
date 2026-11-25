@@ -140,12 +140,11 @@ final class AppModel: ObservableObject {
         refresh()
     }
 
-    /// Makes a secondary the primary, then syncs so the old primary
-    /// becomes a secondary in step with it.
+    /// Makes a secondary the primary. The core does it as a background
+    /// job: a sync, the switch, and a sync of the old primary.
     func promote(_ id: String) throws {
         try Core.promote(id)
         refresh()
-        try? Core.startSync()
     }
 
     func approveChanges(_ id: String) throws {

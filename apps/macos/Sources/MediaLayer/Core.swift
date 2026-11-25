@@ -44,7 +44,7 @@ struct CoreStatus: Decodable, Equatable {
     var notice: String?
     var error: String?
 
-    var isBusy: Bool { ["opening", "listing", "indexing", "publishing", "mirroring"].contains(job.phase) }
+    var isBusy: Bool { ["opening", "listing", "indexing", "publishing", "mirroring", "promoting"].contains(job.phase) }
 }
 
 struct CoreError: LocalizedError {

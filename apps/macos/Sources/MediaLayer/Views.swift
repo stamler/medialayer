@@ -536,6 +536,7 @@ struct StatusBar: View {
             case "listing": Text("Listing \(model.status.folder)… \(j.done) files")
             case "indexing": Text("Indexing \(j.done) of \(j.total)" + (j.failed > 0 ? ", \(j.failed) failed" : ""))
             case "publishing": Text("Saving the library to Google Drive…")
+            case "promoting": Text("Switching the primary…")
             case "mirroring":
                 let s = model.status.sources?.first { $0.state == "syncing" }
                 Text("Copying to \(s?.name ?? "secondaries")…" + (j.total > 0 ? " \(j.done) of \(j.total)" : ""))
@@ -755,6 +756,8 @@ struct AddSourceSheet: View {
         }
     }
 
+    private var primaryRemote: String? { model.status.sources?.first { $0.primary }?.remote }
+
     private var chooser: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text("Add a source").font(.title2)
@@ -763,8 +766,8 @@ struct AddSourceSheet: View {
                 .fixedSize(horizontal: false, vertical: true)
             ForEach(model.status.accounts ?? [], id: \.self) { remote in
                 option(icon: "drive",
-                       title: remote == "gdrive" ? "Google Drive, same account" : "Google Drive (\(remote))",
-                       detail: remote == "gdrive" ? "Another folder in the primary's Google account" : "A folder in that Google account") {
+                       title: remote == primaryRemote ? "Google Drive, same account" : "Google Drive (\(remote))",
+                       detail: remote == primaryRemote ? "Another folder in the primary's Google account" : "A folder in that Google account") {
                     account = remote
                 }
             }

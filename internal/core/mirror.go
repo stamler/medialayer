@@ -541,6 +541,10 @@ func (c *Core) check(ctx context.Context, f fs.Fs, s source, repo *repoRecord, d
 	case theirs != nil && theirs.Generation > repo.Generation:
 		return t, fmt.Errorf("this folder names a newer primary (generation %d, this device knows %d), so it was left alone",
 			theirs.Generation, repo.Generation)
+	case theirs != nil && theirs.Generation == repo.Generation && theirs.Primary.Replica != repo.Primary.Replica:
+		return t, errors.New("this folder names a different primary under the same generation, so it was left alone")
+	case s.ID == repo.Primary.Replica:
+		return t, errors.New("this folder is the library's primary")
 	}
 	if err := putBytes(ctx, dst, t.probe, []byte(run)); err != nil {
 		return t, fmt.Errorf("write a probe file: %w", err)
@@ -736,7 +740,10 @@ func (c *Core) mirror(ctx context.Context, f fs.Fs, src *listing, repo *repoReco
 		return nil
 	}
 	snapName := snapshotName(version)
-	if changes > 0 && float64(changes) > massChange*float64(max(len(src.files), 1)) && sig != approved {
+	c.mu.Lock()
+	strict := c.settings.ReviewFirst == s.ID // a demoted primary: any change asks first
+	c.mu.Unlock()
+	if changes > 0 && (strict || float64(changes) > massChange*float64(max(len(src.files), 1))) && sig != approved {
 		c.setMirror(s.ID, func(m *mirrorState) {
 			m.state, m.pending = MirrorPaused, sig
 			m.copies, m.replaces, m.deletes = len(copies), len(replaces), len(deletes)
@@ -808,6 +815,15 @@ func (c *Core) mirror(ctx context.Context, f fs.Fs, src *listing, repo *repoReco
 	}
 	if err := emptyTrash(ctx, dst, time.Now()); err != nil {
 		fs.Errorf(dst, "empty trash: %v", err)
+	}
+	if strict {
+		c.mu.Lock()
+		c.settings.ReviewFirst = ""
+		err := c.saveSettings()
+		c.mu.Unlock()
+		if err != nil {
+			return err
+		}
 	}
 	c.setMirror(s.ID, func(m *mirrorState) {
 		m.state, m.err, m.synced, m.pending = MirrorSynced, "", time.Now().UTC(), ""
