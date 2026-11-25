@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"image"
 	_ "image/jpeg" // DecodeConfig for cover sizes
@@ -275,7 +276,7 @@ func coverScore(base string) (score int, ok bool) {
 
 // discFolder matches the per-disc folders of a multi-disc album, whose
 // cover is usually in the album folder above.
-var discFolder = regexp.MustCompile(`(?i)^(cd|dis[ck])[\s_-]*\d+\b`)
+var discFolder = regexp.MustCompile(`(?i)^(cd|dis[ck])[\s_-]*\d+(\b|of)`)
 
 // folderArt gives tracks with no art of their own the front cover from
 // their folder, stored once in the art pack. It runs on every sync, so a
@@ -286,6 +287,17 @@ func (c *Core) folderArt(ctx context.Context, db *index.DB, pack *artPack, image
 	if err != nil || len(bare) == 0 {
 		return err
 	}
+	// Leave out images that already failed in this session, so the next
+	// best one in the folder gets its turn.
+	usable := map[string][]fs.Object{}
+	for dir, imgs := range images {
+		for _, o := range imgs {
+			if !c.badCover(o, false) {
+				usable[dir] = append(usable[dir], o)
+			}
+		}
+	}
+	images = usable
 	byDir := map[string][]string{} // folder holding the cover -> file ids
 	for p, id := range bare {
 		dir := path.Dir(p)
@@ -305,9 +317,6 @@ func (c *Core) folderArt(ctx context.Context, db *index.DB, pack *artPack, image
 			return err
 		}
 		o := pickCover(images[dir])
-		if o != nil && c.badCover(o, false) {
-			o = nil // failed earlier in this session; don't download it again
-		}
 		if o == nil {
 			c.setJob(func(j *jobStatus) { j.Done++ })
 			continue
@@ -324,10 +333,10 @@ func (c *Core) folderArt(ctx context.Context, db *index.DB, pack *artPack, image
 				return err
 			}
 			if len(data) > maxFolderImage {
-				return fmt.Errorf("larger than %d MiB", maxFolderImage>>20)
+				return badImageError{fmt.Errorf("larger than %d MiB", maxFolderImage>>20)}
 			}
 			if _, _, err := image.DecodeConfig(bytes.NewReader(data)); err != nil {
-				return fmt.Errorf("not a readable image: %w", err)
+				return badImageError{fmt.Errorf("not a readable image: %w", err)}
 			}
 			mime := "image/jpeg"
 			if strings.EqualFold(path.Ext(o.Remote()), ".png") {
@@ -342,8 +351,8 @@ func (c *Core) folderArt(ctx context.Context, db *index.DB, pack *artPack, image
 			}
 			return db.AddFileArt(ids, sum[:], 3)
 		}()
-		if err != nil && ctx.Err() == nil {
-			c.badCover(o, true)
+		if errors.As(err, new(badImageError)) {
+			c.badCover(o, true) // a network or disk error is retried next sync
 		}
 		c.setJob(func(j *jobStatus) {
 			j.Done++
@@ -358,6 +367,12 @@ func (c *Core) folderArt(ctx context.Context, db *index.DB, pack *artPack, image
 	}
 	return nil
 }
+
+// badImageError is a folder image that can never be a cover: too large or
+// not decodable.
+type badImageError struct{ error }
+
+func (e badImageError) Unwrap() error { return e.error }
 
 // badCover reports whether this version of an image failed as a cover
 // earlier in this session, and with add, records that it did.

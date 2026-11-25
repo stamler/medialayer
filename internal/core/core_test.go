@@ -498,6 +498,39 @@ func TestFolderCoverForTracksWithoutEmbeddedArt(t *testing.T) {
 	}
 }
 
+// A cover that can't be decoded is remembered, and the next sync falls
+// back to the folder's next best image.
+func TestFolderCoverFallsBackAfterBadImage(t *testing.T) {
+	ctx := context.Background()
+	lib := writeLibrary(t, bytes.Repeat([]byte("embedded"), 100))
+	front := testPNG(t, 7)
+	for name, data := range map[string][]byte{
+		"B/Other/cover.jpg": []byte("RIFF....WEBP not a jpeg"),
+		"B/Other/front.jpg": front,
+	} {
+		if err := os.WriteFile(filepath.Join(lib, name), data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	c := newTestCore(t, lib)
+	if err := c.sync(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if st := c.Status(); st.Job.Failed != 1 {
+		t.Errorf("failed = %d, want 1 for the bad cover.jpg", st.Job.Failed)
+	}
+	if err := c.sync(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var sha []byte
+	if err := dbQueryRow(c.currentDB(), `SELECT a.art_sha256 FROM file_art a JOIN file f ON f.id = a.file_id WHERE f.path = 'B/Other/01.flac'`, &sha); err != nil {
+		t.Fatal(err)
+	}
+	if want := sha256.Sum256(front); !bytes.Equal(sha, want[:]) {
+		t.Error("B/Other did not fall back to front.jpg")
+	}
+}
+
 // testPNG is a small valid image; seed makes each one different.
 func testPNG(t *testing.T, seed int) []byte {
 	t.Helper()
