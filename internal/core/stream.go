@@ -188,6 +188,9 @@ func (s *streamServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if start == 0 && end < headProbeMax && end < size-1 {
 		p, err := openHead(r.Context(), o, end+1)
+		if err != nil && r.Context().Err() != nil {
+			return // the player cancelled the probe; nothing went wrong
+		}
 		if err != nil {
 			s.forget(id) // the file may have changed or moved
 			fs.Errorf(o, "stream: %v", err)
