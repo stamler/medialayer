@@ -12,6 +12,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"unicode"
@@ -188,8 +189,8 @@ func isImage(p string) bool {
 
 // pickCover chooses a folder's front cover from its images, or nil. Names
 // like cover, folder or front win; then names that mention them; then a
-// lone image, or a scene-release "00-....jpg". Backs, discs, inlays and
-// other scans are never picked.
+// scene release's "00-....jpg" or a lone image. Backs, inlays, disc and
+// booklet scans, and macOS "._" files are never picked.
 func pickCover(imgs []fs.Object) fs.Object {
 	var best fs.Object
 	bestScore := 99
@@ -198,31 +199,13 @@ func pickCover(imgs []fs.Object) fs.Object {
 		if o.Size() <= 0 || o.Size() > maxFolderImage {
 			continue
 		}
-		name := strings.ToLower(strings.TrimSuffix(path.Base(o.Remote()), path.Ext(o.Remote())))
-		words := map[string]bool{}
-		for _, w := range strings.FieldsFunc(name, func(r rune) bool {
-			return !unicode.IsLetter(r) && !unicode.IsDigit(r)
-		}) {
-			words[w] = true
-		}
-		if words["back"] || words["inlay"] || words["inside"] || words["tray"] {
+		score, ok := coverScore(path.Base(o.Remote()))
+		if !ok {
 			continue
-		}
-		var score int
-		switch {
-		case name == "cover" || name == "folder" || name == "front" || name == "albumart" || name == "album":
-			score = 0
-		case words["front"] || words["cover"] || words["folder"]:
-			score = 1
-		case strings.HasPrefix(name, "00"): // scene releases: 00-artist-album-....jpg
-			score = 2
-		case words["cd"] || words["disc"] || words["booklet"] || words["matrix"] || words["scan"]:
-			continue
-		default:
-			score = 4
 		}
 		candidates++
-		if score < bestScore || (score == bestScore && o.Remote() < best.Remote()) {
+		if score < bestScore || (score == bestScore &&
+			strings.ToLower(o.Remote()) < strings.ToLower(best.Remote())) {
 			best, bestScore = o, score
 		}
 	}
@@ -231,6 +214,64 @@ func pickCover(imgs []fs.Object) fs.Object {
 	}
 	return best
 }
+
+// coverScore ranks an image file name as a front cover, lower is better;
+// ok is false for names that are not a front cover.
+func coverScore(base string) (score int, ok bool) {
+	if strings.HasPrefix(base, ".") {
+		return 0, false // hidden, or macOS AppleDouble "._" metadata
+	}
+	name := strings.ToLower(strings.TrimSuffix(base, path.Ext(base)))
+	var list []string
+	words := map[string]bool{}
+	for _, w := range strings.FieldsFunc(name, func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
+	}) {
+		w = strings.TrimRightFunc(w, unicode.IsDigit) // "cd1" is "cd"
+		list = append(list, w)
+		words[w] = true
+	}
+	for _, w := range []string{"back", "rear", "inlay", "inside", "tray"} {
+		if words[w] {
+			return 0, false
+		}
+	}
+	if strings.Contains(name, "back") {
+		return 0, false // "backcover"
+	}
+	scans := map[string]bool{"cd": true, "disc": true, "disk": true, "booklet": true,
+		"matrix": true, "scan": true, "label": true}
+	if strings.HasPrefix(name, "00") {
+		// Scene releases name the cover 00-artist-album-source-year-group.jpg,
+		// where the source ("cd") is a tag, not what the image shows. A scan
+		// of the disc ends in it: 00-artist-album-cd.jpg.
+		if len(list) > 0 && scans[list[len(list)-1]] {
+			return 0, false
+		}
+		if strings.Contains(name, "front") || strings.Contains(name, "cover") {
+			return 1, true
+		}
+		return 2, true
+	}
+	for w := range scans {
+		if words[w] {
+			return 0, false
+		}
+	}
+	switch name {
+	case "cover", "folder", "front", "albumart", "album":
+		return 0, true
+	}
+	switch {
+	case strings.Contains(name, "front") || strings.Contains(name, "cover") || strings.Contains(name, "folder"):
+		return 1, true
+	}
+	return 4, true
+}
+
+// discFolder matches the per-disc folders of a multi-disc album, whose
+// cover is usually in the album folder above.
+var discFolder = regexp.MustCompile(`(?i)^(cd|dis[ck])[\s_-]*\d+$`)
 
 // folderArt gives tracks with no art of their own the front cover from
 // their folder, stored once in the art pack. It runs on every sync, so a
@@ -241,9 +282,12 @@ func (c *Core) folderArt(ctx context.Context, db *index.DB, pack *artPack, image
 	if err != nil || len(bare) == 0 {
 		return err
 	}
-	byDir := map[string][]string{} // folder -> file ids
+	byDir := map[string][]string{} // folder holding the cover -> file ids
 	for p, id := range bare {
 		dir := path.Dir(p)
+		if pickCover(images[dir]) == nil && discFolder.MatchString(path.Base(dir)) {
+			dir = path.Dir(dir) // CD1/01.flac: the cover is in the album folder
+		}
 		if len(images[dir]) > 0 {
 			byDir[dir] = append(byDir[dir], id)
 		}
@@ -271,6 +315,12 @@ func (c *Core) folderArt(ctx context.Context, db *index.DB, pack *artPack, image
 			data, err := io.ReadAll(io.LimitReader(rc, maxFolderImage+1))
 			if err != nil {
 				return err
+			}
+			if len(data) > maxFolderImage {
+				return fmt.Errorf("larger than %d MiB", maxFolderImage>>20)
+			}
+			if _, _, err := image.DecodeConfig(bytes.NewReader(data)); err != nil {
+				return fmt.Errorf("not a readable image: %w", err)
 			}
 			mime := "image/jpeg"
 			if strings.EqualFold(path.Ext(o.Remote()), ".png") {
@@ -393,6 +443,10 @@ func (a *artPack) store(sha []byte, p media.Picture) error {
 		a.f = f
 	}
 	if _, err := a.f.Write(p.Data); err != nil {
+		// A partial write would shift every later offset: start a new
+		// pack for the next image instead.
+		_ = a.f.Close()
+		a.f, a.size = nil, 0
 		return err
 	}
 	w, h := p.Width, p.Height

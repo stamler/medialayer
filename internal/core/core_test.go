@@ -6,6 +6,9 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
+	"image"
+	"image/color"
+	"image/png"
 	"io"
 	"math/rand"
 	"net/http"
@@ -440,12 +443,18 @@ func TestFolderCoverForTracksWithoutEmbeddedArt(t *testing.T) {
 	ctx := context.Background()
 	embedded := bytes.Repeat([]byte("embedded"), 100)
 	lib := writeLibrary(t, embedded) // A/Album has embedded art, B/Other none
-	cover := bytes.Repeat([]byte("front"), 500)
+	cover := testPNG(t, 3)
 	for name, data := range map[string][]byte{
-		"B/Other/00-b-other-cd-flac-2006.jpg": cover,
-		"B/Other/back.jpg":                    []byte("back of the case"),
-		"A/Album/folder.jpg":                  []byte("not needed: embedded art wins"),
+		"B/Other/00-b-other-cd-flac-2006.jpg":   cover,
+		"B/Other/._00-b-other-cd-flac-2006.jpg": []byte("AppleDouble"),
+		"B/Other/back.jpg":                      testPNG(t, 4),
+		"A/Album/folder.jpg":                    testPNG(t, 5),
+		"C/Box/cover.png":                       testPNG(t, 6),
+		"C/Box/CD2/01.flac":                     testFLAC([]string{"TITLE=Disc two"}, nil, 1000),
 	} {
+		if err := os.MkdirAll(filepath.Dir(filepath.Join(lib, name)), 0o755); err != nil {
+			t.Fatal(err)
+		}
 		if err := os.WriteFile(filepath.Join(lib, name), data, 0o644); err != nil {
 			t.Fatal(err)
 		}
@@ -473,8 +482,8 @@ func TestFolderCoverForTracksWithoutEmbeddedArt(t *testing.T) {
 	if err := dbQueryRow(db, `SELECT count(*) FROM art`, &arts); err != nil {
 		t.Fatal(err)
 	}
-	if arts != 2 {
-		t.Errorf("art rows = %d, want 2 (embedded and folder cover)", arts)
+	if arts != 3 {
+		t.Errorf("art rows = %d, want 3 (embedded, B's and C's folder covers)", arts)
 	}
 
 	// Nothing changed: no new snapshot, no new reads.
@@ -484,6 +493,21 @@ func TestFolderCoverForTracksWithoutEmbeddedArt(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(lib, ".medialayer/snapshots/000002.sqlite")); err == nil {
 		t.Error("an unchanged library made a new snapshot")
 	}
+	if dirty, _ := db.Meta("dirty"); dirty != "0" {
+		t.Errorf("dirty = %q after an unchanged sync", dirty)
+	}
+}
+
+// testPNG is a small valid image; seed makes each one different.
+func testPNG(t *testing.T, seed int) []byte {
+	t.Helper()
+	img := image.NewRGBA(image.Rect(0, 0, 4, 4))
+	img.Set(0, 0, color.RGBA{R: byte(seed), A: 255})
+	var b bytes.Buffer
+	if err := png.Encode(&b, img); err != nil {
+		t.Fatal(err)
+	}
+	return b.Bytes()
 }
 
 func TestPickCover(t *testing.T) {
@@ -519,6 +543,12 @@ func TestPickCover(t *testing.T) {
 		{[]string{"back.jpg", "Cover.JPG", "cd.jpg"}, "Cover.JPG"},
 		{[]string{"Album - Front.png", "Album - Back.png"}, "Album - Front.png"},
 		{[]string{"00-sam_roberts-chemical_city-cd-flac-2006.jpg"}, "00-sam_roberts-chemical_city-cd-flac-2006.jpg"},
+		{[]string{"00-artist-album-cd.jpg", "00-artist-album-proof.jpg"}, "00-artist-album-proof.jpg"},
+		{[]string{"._Front Cover.jpg", "Front Cover.jpg"}, "Front Cover.jpg"},
+		{[]string{"frontcover.jpg", "backcover.jpg"}, "frontcover.jpg"},
+		{[]string{"cd1.jpg"}, ""},
+		{[]string{"rear.jpg", "booklet-01.jpg"}, ""},
+		{[]string{"Front.jpg", "cover.jpg"}, "cover.jpg"},
 		{[]string{"scan.jpg", "only.jpg"}, "only.jpg"},
 		{[]string{"a.jpg", "b.jpg"}, ""},
 		{[]string{"back.jpg", "inlay.jpg"}, ""},
