@@ -333,10 +333,16 @@ func (c *Core) folderArt(ctx context.Context, db *index.DB, pack *artPack, image
 				return err
 			}
 			if len(data) > maxFolderImage {
-				return badImageError{fmt.Errorf("larger than %d MiB", maxFolderImage>>20)}
+				return badImageError{error: fmt.Errorf("larger than %d MiB", maxFolderImage>>20)}
 			}
-			if _, _, err := image.DecodeConfig(bytes.NewReader(data)); err != nil {
-				return badImageError{fmt.Errorf("not a readable image: %w", err)}
+			cfg, _, err := image.DecodeConfig(bytes.NewReader(data))
+			if err != nil {
+				return badImageError{error: fmt.Errorf("not a readable image: %w", err)}
+			}
+			// A wide or tall image that isn't named as the cover, such as a
+			// scene release's band photo, is not taken for one.
+			if score, _ := coverScore(path.Base(o.Remote())); score >= 2 && !squarish(cfg.Width, cfg.Height) {
+				return badImageError{error: fmt.Errorf("%d×%d is not a cover's shape", cfg.Width, cfg.Height), notCover: true}
 			}
 			mime := "image/jpeg"
 			if strings.EqualFold(path.Ext(o.Remote()), ".png") {
@@ -354,6 +360,10 @@ func (c *Core) folderArt(ctx context.Context, db *index.DB, pack *artPack, image
 		if errors.As(err, new(badImageError)) {
 			c.badCover(o, true) // a network or disk error is retried next sync
 		}
+		var bad badImageError
+		if errors.As(err, &bad) && bad.notCover {
+			err = nil // not a failure: the folder just has no cover
+		}
 		c.setJob(func(j *jobStatus) {
 			j.Done++
 			if err != nil {
@@ -370,7 +380,16 @@ func (c *Core) folderArt(ctx context.Context, db *index.DB, pack *artPack, image
 
 // badImageError is a folder image that can never be a cover: too large or
 // not decodable.
-type badImageError struct{ error }
+type badImageError struct {
+	error
+	notCover bool // readable, but not shaped like a cover
+}
+
+// squarish reports whether an image is near enough to square to be a
+// front cover.
+func squarish(w, h int) bool {
+	return w > 0 && h > 0 && w*10 <= h*13 && h*10 <= w*13
+}
 
 func (e badImageError) Unwrap() error { return e.error }
 

@@ -596,3 +596,14 @@ func TestPickCover(t *testing.T) {
 		}
 	}
 }
+
+func TestSquarish(t *testing.T) {
+	for _, tc := range []struct {
+		w, h int
+		want bool
+	}{{500, 500, true}, {300, 268, true}, {1413, 1391, true}, {3141, 1676, false}, {600, 1000, false}, {0, 0, false}} {
+		if got := squarish(tc.w, tc.h); got != tc.want {
+			t.Errorf("squarish(%d, %d) = %v", tc.w, tc.h, got)
+		}
+	}
+}
