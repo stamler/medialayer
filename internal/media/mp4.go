@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -24,6 +25,14 @@ var ErrNotMP4 = errors.New("not an MP4 file with ALAC or AAC audio")
 // two days of AAC.
 const maxPackets = 1 << 23
 
+// maxPacket bounds one packet: an ALAC packet of 65536 samples of 8
+// channels at 32 bits is 2 MB.
+const maxPacket = 4 << 20
+
+// maxHeld bounds the packets readPackets holds while it reads ahead to
+// one stored out of order.
+const maxHeld = 64 << 20
+
 // maxMoov bounds the "moov" box read, against corrupt files; it holds the
 // sample tables and the cover art, a few MB in a long file.
 const maxMoov = 64 << 20
@@ -39,8 +48,11 @@ type MP4Track struct {
 	Duration   uint64 // in Timescale units
 	// Samples are the track's packets in order.
 	Samples []MP4Sample
-	// esds is AAC's decoder configuration, part of its hash.
-	esds []byte
+	// aacConfig is AAC's object type and AudioSpecificConfig, part of its
+	// hash; not the rest of the esds box, whose bit rates muxers rewrite.
+	aacConfig []byte
+	// stts is the total of the time-to-sample table, in Timescale units.
+	stts uint64
 }
 
 // MP4Sample is one packet's place in the file.
@@ -126,7 +138,7 @@ func ReadMP4Moov(fetch FetchFunc, size int64) ([]byte, error) {
 			}
 			n, hdr = int64(binary.BigEndian.Uint64(h[8:])), 16
 		}
-		if n < hdr || pos+n > size {
+		if n < hdr || n > size-pos {
 			return nil, fmt.Errorf("box %q runs past the end of the file: %w", typ, ErrNotMP4)
 		}
 		if typ == "moov" {
@@ -157,7 +169,20 @@ func fullBox(b []byte) []byte {
 
 // MP4AudioTrack finds the first audio track in moov and reads its
 // details and sample table.
+//
+// A file with video (a video track of more than one frame, not a cover)
+// is not a track: ErrUnsupported. So is one whose audio tracks are all in
+// codecs MediaLayer doesn't read.
 func MP4AudioTrack(moov []byte) (*MP4Track, error) {
+	for _, trak := range boxes(moov) {
+		mdia := child(trak.body, "mdia")
+		if hdlr := fullBox(child(mdia, "hdlr")); trak.typ == "trak" && len(hdlr) >= 8 && string(hdlr[4:8]) == "vide" {
+			if stsz := fullBox(boxPath(mdia, "minf", "stbl", "stsz")); len(stsz) < 8 || binary.BigEndian.Uint32(stsz[4:]) > 1 {
+				return nil, fmt.Errorf("a video: %w (%w)", ErrNotMP4, ErrUnsupported)
+			}
+		}
+	}
+	var unsupported error
 	for _, trak := range boxes(moov) {
 		if trak.typ != "trak" {
 			continue
@@ -175,13 +200,19 @@ func MP4AudioTrack(moov []byte) (*MP4Track, error) {
 			}
 		}
 		stbl := boxPath(mdia, "minf", "stbl")
-		if err := t.readEntry(fullBox(child(stbl, "stsd"))); err != nil {
+		if err := t.readEntry(fullBox(child(stbl, "stsd"))); errors.Is(err, ErrUnsupported) {
+			unsupported = err
+			continue // another audio track may be in a codec MediaLayer reads
+		} else if err != nil {
 			return nil, err
 		}
 		if err := t.readSampleTable(stbl); err != nil {
 			return nil, err
 		}
 		return t, nil
+	}
+	if unsupported != nil {
+		return nil, unsupported
 	}
 	return nil, fmt.Errorf("no audio track: %w (%w)", ErrNotMP4, ErrUnsupported)
 }
@@ -210,19 +241,24 @@ func (t *MP4Track) readEntry(stsd []byte) error {
 			return ErrNotMP4
 		}
 		rest = rest[16:]
-	case 2:
+	case 2: // the real rate and channel count are in the version 2 fields
 		if len(rest) < 36 {
 			return ErrNotMP4
 		}
+		t.SampleRate = uint32(math.Float64frombits(binary.BigEndian.Uint64(rest[4:])))
+		t.Channels = int(binary.BigEndian.Uint32(rest[12:]))
 		rest = rest[36:]
 	}
 	switch e.typ {
 	case "alac":
-		cookie := child(rest, "alac")
+		cookie := fullBox(child(rest, "alac"))
+		if cookie == nil { // QuickTime keeps it in a "wave" box
+			cookie = child(rest, "wave")
+		}
 		if cookie == nil {
 			return fmt.Errorf("ALAC with no magic cookie: %w", ErrNotMP4)
 		}
-		c, err := parseALACConfig(fullBox(cookie))
+		c, err := parseALACConfig(cookie)
 		if err != nil {
 			return fmt.Errorf("%w: %v", ErrNotMP4, err)
 		}
@@ -230,18 +266,30 @@ func (t *MP4Track) readEntry(stsd []byte) error {
 		t.SampleRate, t.Channels, t.BitDepth = c.SampleRate, int(c.Channels), int(c.BitDepth)
 	case "mp4a":
 		t.Codec = "aac"
-		t.esds = child(rest, "esds")
-		if t.esds == nil { // QuickTime keeps it in a "wave" box
-			t.esds = child(child(rest, "wave"), "esds")
+		esds := child(rest, "esds")
+		if esds == nil { // QuickTime keeps it in a "wave" box
+			esds = child(child(rest, "wave"), "esds")
 		}
+		oti, asc := parseESDS(fullBox(esds))
+		if oti != 0x40 && oti != 0x66 && oti != 0x67 && oti != 0x68 { // MPEG-4 and MPEG-2 AAC
+			return fmt.Errorf("audio object type %#x in mp4a: %w (%w)", oti, ErrNotMP4, ErrUnsupported)
+		}
+		t.aacConfig = append([]byte{oti}, asc...)
 	default:
 		return fmt.Errorf("audio codec %q: %w (%w)", e.typ, ErrNotMP4, ErrUnsupported)
 	}
 	return nil
 }
 
-// readSampleTable works out every packet's offset and size.
+// readSampleTable works out every packet's offset and size, and the
+// track's length from the time-to-sample table.
 func (t *MP4Track) readSampleTable(stbl []byte) error {
+	if stts := fullBox(child(stbl, "stts")); len(stts) >= 4 {
+		n := int(binary.BigEndian.Uint32(stts))
+		for i := 0; i < n && 4+8*i+8 <= len(stts); i++ {
+			t.stts += uint64(binary.BigEndian.Uint32(stts[4+8*i:])) * uint64(binary.BigEndian.Uint32(stts[8+8*i:]))
+		}
+	}
 	stsz := fullBox(child(stbl, "stsz"))
 	stsc := fullBox(child(stbl, "stsc"))
 	var chunks []int64
@@ -282,7 +330,7 @@ func (t *MP4Track) readSampleTable(stbl []byte) error {
 	if len(stsc) < 4+12*runs || runs == 0 {
 		return fmt.Errorf("short stsc: %w", ErrNotMP4)
 	}
-	t.Samples = make([]MP4Sample, 0, count)
+	t.Samples = make([]MP4Sample, 0, min(count, 1<<16)) // count is unchecked yet
 	s := 0
 	for r := range runs {
 		first := int(binary.BigEndian.Uint32(stsc[4+12*r:])) - 1
@@ -368,6 +416,9 @@ func parseILST(ilst []byte, info *Info) {
 				continue
 			}
 			key, ok := mp4Freeform[string(n)]
+			if !ok && strings.HasPrefix(string(n), "iTun") {
+				continue // iTunes' own housekeeping: iTunNORM, iTunSMPB...
+			}
 			if !ok {
 				key = strings.ToUpper(strings.ReplaceAll(string(n), " ", "_"))
 			}
@@ -487,19 +538,28 @@ func HashMP4Audio(fetch FetchFunc, open OpenFunc, size int64) ([]byte, error) {
 	var finish func() ([]byte, error)
 	switch t.Codec {
 	case "alac":
-		add, finish, err = alacHasher(t.ALAC)
+		var count func() uint64
+		add, finish, count, err = alacHasher(t.ALAC)
 		if err != nil {
 			return nil, err
+		}
+		if t.Timescale == t.SampleRate && t.stts > 0 {
+			want, done := t.stts, finish
+			finish = func() ([]byte, error) {
+				sum, err := done()
+				if err == nil && count() != want {
+					return nil, fmt.Errorf("decoded %d samples, the time table says %d: %w", count(), want, ErrAudioMismatch)
+				}
+				return sum, err
+			}
 		}
 	default:
 		h := sha256.New()
 		h.Write([]byte("aac\x00"))
-		if t.esds != nil && len(t.esds) < 1<<16 {
-			var n [4]byte
-			binary.LittleEndian.PutUint32(n[:], uint32(len(t.esds)))
-			h.Write(n[:])
-			h.Write(t.esds)
-		}
+		var n [4]byte
+		binary.LittleEndian.PutUint32(n[:], uint32(len(t.aacConfig)))
+		h.Write(n[:])
+		h.Write(t.aacConfig)
 		add = func(p []byte) error {
 			var n [4]byte
 			binary.LittleEndian.PutUint32(n[:], uint32(len(p)))
@@ -516,10 +576,11 @@ func HashMP4Audio(fetch FetchFunc, open OpenFunc, size int64) ([]byte, error) {
 }
 
 // alacHasher decodes ALAC packets into a pcmHash.
-func alacHasher(c ALACConfig) (add func([]byte) error, finish func() ([]byte, error), err error) {
+// count gives the samples decoded so far.
+func alacHasher(c ALACConfig) (add func([]byte) error, finish func() ([]byte, error), count func() uint64, err error) {
 	h, err := newPCMHash(c.SampleRate, c.Channels, c.BitDepth)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	d := NewALACDecoder(c)
 	add = func(p []byte) error {
@@ -535,7 +596,7 @@ func alacHasher(c ALACConfig) (add func([]byte) error, finish func() ([]byte, er
 		}
 		return h.sum.Sum(nil), nil
 	}
-	return add, finish, nil
+	return add, finish, func() uint64 { return h.samples }, nil
 }
 
 // readPackets reads the packets in file order through one reader, and
@@ -559,12 +620,16 @@ func readPackets(samples []MP4Sample, open OpenFunc, size int64, add func([]byte
 	defer func() { _ = rc.Close() }()
 	pos := first.Offset
 	var held map[int][]byte // packets read ahead of their turn
+	heldBytes := 0
 	next := 0
 	buf := make([]byte, 0, 1<<16)
 	for _, i := range order {
 		s := samples[i]
 		if s.Offset < pos || s.Offset+int64(s.Size) > end {
 			return fmt.Errorf("overlapping packets: %w", ErrNotMP4)
+		}
+		if s.Size > maxPacket {
+			return fmt.Errorf("packet of %d bytes: %w", s.Size, ErrNotMP4)
 		}
 		if _, err := io.CopyN(io.Discard, rc, s.Offset-pos); err != nil {
 			return err
@@ -586,6 +651,9 @@ func readPackets(samples []MP4Sample, open OpenFunc, size int64, add func([]byte
 		if held == nil {
 			held = map[int][]byte{}
 		}
+		if heldBytes += len(p); heldBytes > maxHeld {
+			return fmt.Errorf("packets too far out of order: %w", ErrNotMP4)
+		}
 		held[i] = append([]byte(nil), p...)
 		for {
 			q, ok := held[next]
@@ -593,6 +661,7 @@ func readPackets(samples []MP4Sample, open OpenFunc, size int64, add func([]byte
 				break
 			}
 			delete(held, next)
+			heldBytes -= len(q)
 			if err := add(q); err != nil {
 				return err
 			}
@@ -603,4 +672,67 @@ func readPackets(samples []MP4Sample, open OpenFunc, size int64, add func([]byte
 		return fmt.Errorf("packets left unread: %w", ErrNotMP4)
 	}
 	return nil
+}
+
+// parseESDS reads an esds box's body (after its version and flags) for
+// the decoder's object type and its AudioSpecificConfig. Descriptors are
+// a tag byte, a length of 1 to 4 bytes of 7 bits, and a body.
+func parseESDS(b []byte) (objectType byte, config []byte) {
+	desc := func(b []byte) (tag byte, body, rest []byte, ok bool) {
+		if len(b) < 2 {
+			return 0, nil, nil, false
+		}
+		tag, b = b[0], b[1:]
+		n := 0
+		for i := 0; ; i++ {
+			if i == 4 || len(b) == 0 {
+				return 0, nil, nil, false
+			}
+			c := b[0]
+			b = b[1:]
+			n = n<<7 | int(c&0x7f)
+			if c&0x80 == 0 {
+				break
+			}
+		}
+		if n > len(b) {
+			return 0, nil, nil, false
+		}
+		return tag, b[:n], b[n:], true
+	}
+	tag, es, _, ok := desc(b)
+	if !ok || tag != 3 || len(es) < 3 {
+		return 0, nil
+	}
+	flags := es[2]
+	es = es[3:]          // ES_ID and flags
+	if flags&0x80 != 0 { // depends on another stream
+		if len(es) < 2 {
+			return 0, nil
+		}
+		es = es[2:]
+	}
+	if flags&0x40 != 0 { // a URL
+		if len(es) < 1 || len(es) < 1+int(es[0]) {
+			return 0, nil
+		}
+		es = es[1+int(es[0]):]
+	}
+	if flags&0x20 != 0 { // an OCR stream
+		if len(es) < 2 {
+			return 0, nil
+		}
+		es = es[2:]
+	}
+	tag, dc, _, ok := desc(es)
+	if !ok || tag != 4 || len(dc) < 13 {
+		return 0, nil
+	}
+	objectType = dc[0]
+	// Stream type, buffer size and bit rates, then the decoder's own
+	// configuration.
+	if tag, asc, _, ok := desc(dc[13:]); ok && tag == 5 {
+		config = asc
+	}
+	return objectType, config
 }

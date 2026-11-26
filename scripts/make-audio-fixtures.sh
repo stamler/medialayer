@@ -29,6 +29,12 @@ ff -i src.wav -c:a alac -sample_fmt s16p -metadata title="A Title" -metadata art
 ff -i src.wav -c:a aac -b:a 96k aac.m4a
 ff -i src.wav -i cover.png -map 0 -map 1 -c:a aac -b:a 96k -c:v copy -disposition:v attached_pic \
 	-metadata title="A Title" -metadata artist="An Artist" aac-tagged.m4a
+# Remuxes, which must hash the same: AAC with its bit rates rewritten,
+# ALAC the way QuickTime stores it.
+ff -i aac.m4a -c copy -movflags faststart aac-remux.m4a
+ff -i alac16.m4a -c copy -f mov alac16-qt.m4a
+# A video, which is not a track.
+ff -f lavfi -i "color=c=blue:s=16x16:d=0.3" -i src.wav -c:v mjpeg -c:a aac -b:a 32k -shortest video.mp4
 src 0.2 96000 stereo; ff -i src.wav -c:a alac -sample_fmt s32p alac24.m4a
 src 0.1 48000 5.1; ff -i src.wav -c:a alac -sample_fmt s32p alac24-51.caf
 src 0.2 48000 mono; ff -i src.wav -c:a alac -sample_fmt s16p alac16-mono.mp4

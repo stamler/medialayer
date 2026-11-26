@@ -306,7 +306,7 @@ func HashCAFAudio(fetch FetchFunc, open OpenFunc, size int64) ([]byte, error) {
 	if len(samples) == 0 {
 		return nil, ErrNoAudio
 	}
-	add, finish, err := alacHasher(f.alac)
+	add, finish, _, err := alacHasher(f.alac)
 	if err != nil {
 		return nil, err
 	}

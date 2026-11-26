@@ -235,20 +235,22 @@ func (d *ALACDecoder) element(r *alacReader, channels, want int) (int, error) {
 			return 0, errCorrupt
 		}
 		var mode, quant, mult, order [2]uint32
-		var coefs [2][32]int32
+		var coefs [2][32]int16 // 16 bits, as the reference decoders keep them
 		for ch := range channels {
 			h, err := r.bits(16)
 			if err != nil {
 				return 0, err
 			}
 			mode[ch], quant[ch], mult[ch], order[ch] = h>>12, h>>8&15, h>>5&7, h&31
-			if quant[ch] == 0 || int(order[ch]) >= n || mode[ch] != 0 && mode[ch] != 15 {
+			if quant[ch] == 0 || order[ch] >= c.FrameLength || mode[ch] != 0 && mode[ch] != 15 {
 				return 0, errCorrupt
 			}
 			for i := int(order[ch]) - 1; i >= 0; i-- {
-				if coefs[ch][i], err = r.signed(16); err != nil {
+				v, err := r.signed(16)
+				if err != nil {
 					return 0, err
 				}
+				coefs[ch][i] = int16(v)
 			}
 		}
 		if extraBits > 0 {
@@ -388,7 +390,7 @@ func alacScalar(r *alacReader, k, bps uint) (uint32, error) {
 
 // alacPredict undoes ALAC's adaptive predictor, in place (in and out
 // may be the same).
-func alacPredict(in, out []int32, bps uint, coefs []int32, order int, quant uint) {
+func alacPredict(in, out []int32, bps uint, coefs []int16, order int, quant uint) {
 	n := len(in)
 	if n == 0 {
 		return
@@ -422,7 +424,7 @@ func alacPredict(in, out []int32, bps uint, coefs []int32, order int, quant uint
 		pred := out[base+1 : base+1+order]
 		var val int32
 		for j := range order {
-			val += int32((uint32(pred[j]) - uint32(d)) * uint32(coefs[j]))
+			val += int32((uint32(pred[j]) - uint32(d)) * uint32(int32(coefs[j])))
 		}
 		val = int32((int64(val) + int64(1)<<(quant-1)) >> quant)
 		val = int32(uint32(val) + uint32(d) + errVal)
@@ -432,7 +434,7 @@ func alacPredict(in, out []int32, bps uint, coefs []int32, order int, quant uint
 			for j := 0; j < order && int32(errVal*uint32(sign)) > 0; j++ {
 				v := d - pred[j]
 				s := signOf(v) * sign
-				coefs[j] -= s
+				coefs[j] -= int16(s)
 				v *= s
 				errVal -= uint32(v>>quant) * uint32(j+1)
 			}

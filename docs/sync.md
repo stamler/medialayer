@@ -234,8 +234,10 @@ leaves it as it was:
   audio, so the hash is of the file without its tags. For MP3, that is
   the file less any ID3v2 tags at the start and an ID3v1, APEv2 or
   Lyrics3 v2 tag at the end (`internal/media/audiospan.go`). For AAC in
-  MP4, it is the decoder configuration (`esds`) and every packet, in
-  order, wherever they sit in the file (`internal/media/mp4.go`).
+  MP4, it is the decoder configuration (the object type and
+  AudioSpecificConfig from `esds`, not the bit rates muxers rewrite) and
+  every packet, in order, wherever they sit in the file
+  (`internal/media/mp4.go`), so a remux keeps the hash.
 
 `meta.audio_hash_version` in the index names this way of hashing (`3`).
 An index opened with another version has its hashes cleared, so they are

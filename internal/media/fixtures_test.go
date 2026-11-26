@@ -202,6 +202,16 @@ func TestAACHashIgnoresTags(t *testing.T) {
 	if !bytes.Equal(h("aac.m4a"), h("aac-tagged.m4a")) {
 		t.Fatal("tags and a cover changed an AAC file's hash")
 	}
+	if !bytes.Equal(h("aac.m4a"), h("aac-remux.m4a")) {
+		t.Error("a remux of AAC hashes differently")
+	}
+	fetch, open, size := fileFuncs(t, "video.mp4")
+	if _, err := ParseMP4(fetch, size); !errors.Is(err, ErrUnsupported) {
+		t.Errorf("a video: %v", err)
+	}
+	if _, err := HashMP4Audio(fetch, open, size); !errors.Is(err, ErrUnsupported) {
+		t.Errorf("a video's hash: %v", err)
+	}
 	if bytes.Equal(h("aac.m4a"), h("alac16.m4a")) {
 		t.Fatal("AAC and ALAC hash the same")
 	}
