@@ -24,9 +24,24 @@ indexing, publishing and copying to the secondaries. It is built in
   one small file per device, `lease-<device id>.json`, with the device's
   name, a state (`waiting`, `held` or `released`), a token for this take
   of the lock, a counter raised on every write, and when it was taken and
-  last renewed. Each device writes only its own file, because Drive has no
-  "create only if absent": two devices writing one shared file at once
-  would leave two files of the same name. The files are not in a folder
+  last renewed, for example:
+
+  ```json
+  {
+    "device": "01M8C6FWHCDCD4R944YMM6E3K5",
+    "name": "Studio Mac",
+    "state": "held",
+    "token": "01M8C6G2Y4R6TQK0B9J7ZP3D1X",
+    "seq": 7,
+    "taken": "2026-11-26T15:02:10Z",
+    "renewed": "2026-11-26T15:14:10Z"
+  }
+  ```
+
+  A claim released by another device that took over also has
+  `taken_by`, that device's id. Each device writes only its own file,
+  because Drive has no "create only if absent": two devices writing one
+  shared file at once would leave two files of the same name. The files are not in a folder
   of their own, as two devices creating that folder at once could leave
   two folders of one name on Drive.
 - **Taking it.** The device first checks that the primary is still its
@@ -47,9 +62,12 @@ indexing, publishing and copying to the secondaries. It is built in
   every 15 seconds. A device that couldn't renew for 9 minutes (a Mac
   asleep, say, or a renewal stuck on the network) stops before anyone
   else could take over: every write of the sync (each file copied,
-  trashed or uploaded, `member.json` and `repo.json`) first checks that
+  trashed, uploaded or removed, including old snapshots and expired
+  trash, `member.json` and `repo.json`) first checks that
   the lock was renewed within 9 minutes, by both the wall clock and the
-  device's own uptime clock, and a stuck renewal gives up at that time.
+  device's own uptime clock, and a stuck renewal gives up at that time. Each 15-second check also
+  cancels the sync on its own once the lock has lapsed, even while a
+  renewal is still waiting on the network.
   A device that lost the lock tries again about 2 minutes later, and the
   sync resumes as described under Resuming.
 - **Releasing it.** When the sync ends, the claim is rewritten as
@@ -68,10 +86,20 @@ indexing, publishing and copying to the secondaries. It is built in
   nothing is synced until there is space. A renewal refused for a full
   cloud stops the sync too. This also blocks Make Primary away from a
   full primary.
-- **What you see.** Playback and browsing are never affected. While
-  another device syncs, the status bar says "Syncing on <device>. This
-  Mac will sync after it.", and the core tries again about every 2
-  minutes (as does Update Library). The device's name is its host name.
+- **What you see.** Playback and browsing are never affected.
+  - While another device syncs (or is taking the lock), the status bar
+    says "Syncing on <device>. This Mac will sync after it." The core
+    tries again about every 2 minutes, and Update Library tries at once.
+    The device's name is its host name, with hyphens shown as spaces.
+  - After taking over a stale lock, the status bar shows a notice: "Took
+    over syncing from <device>, which stopped without finishing."
+  - A lost lock shows "Update failed: this device lost the sync lock: …"
+    with the reason (taken over, held by another device too, or not
+    renewed in time), and the core tries again about 2 minutes later.
+  - A full primary shows "Update failed: the primary's cloud is full, so
+    this device can't take the sync lock; free up space there to sync".
+  - For the apps, the core's status reports a waiting device as job
+    phase `waiting`, with `holder` naming the device syncing.
 - **Make Primary** holds the old primary's lock for the whole job, and
   takes the target's lock before the switch, keeping it through the sync
   after the switch. If another device holds either, the job waits as a

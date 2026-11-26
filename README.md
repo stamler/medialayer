@@ -46,7 +46,9 @@ The macOS app ([apps/macos](apps/macos/README.md)):
   secondary's trash for 30 days. A sync pauses for review when removals and replacements exceed 5% of the
   library's files.
   Every secondary also gets the current index, so each one is a complete
-  library.
+  library. Only one device syncs a library at a time; another device
+  shows who is syncing and syncs after it (see
+  [docs/sync.md](docs/sync.md#the-sync-lock)).
 - **Status bar chips.** One chip per source, with an icon for its type. The
   primary is highlighted, and each secondary shows its sync state.
 - **Make Primary.** A synced secondary can become the primary, and you can
