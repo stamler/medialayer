@@ -1,0 +1,372 @@
+package index
+
+import (
+	"database/sql"
+	"errors"
+	"fmt"
+	"slices"
+	"strings"
+	"time"
+)
+
+// Playlists live in the index (tables playlist and playlist_item), so
+// they travel with the library: they are in every snapshot that goes to
+// the primary and the secondaries. An item names a file by id, and a file
+// row is never deleted, only marked missing, so an item whose file
+// disappears stays in its place and comes back with the file. Readers
+// skip items whose file is missing.
+//
+// Item positions run 0, 1, 2, ... in each playlist. Every write here
+// rewrites them densely and, in the same transaction, sets meta "dirty",
+// so that the next sync publishes a new index version.
+
+// ErrNoPlaylist means no playlist has the given id.
+var ErrNoPlaylist = errors.New("no such playlist")
+
+// Playlist is one playlist.
+type Playlist struct {
+	ID        string
+	Name      string
+	UpdatedAt int64 // Unix ms
+}
+
+// Playlists returns every playlist, by name.
+func (d *DB) Playlists() ([]Playlist, error) {
+	rows, err := d.db.Query(`SELECT id, name, updated_at FROM playlist ORDER BY name, id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Playlist
+	for rows.Next() {
+		var p Playlist
+		if err := rows.Scan(&p.ID, &p.Name, &p.UpdatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+// PlaylistItems returns a playlist's file ids in order, including files
+// that are missing now.
+func (d *DB) PlaylistItems(id string) ([]string, error) {
+	tx, err := d.db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := playlistExists(tx, id); err != nil {
+		return nil, err
+	}
+	return playlistItems(tx, id)
+}
+
+func cleanName(name string) (string, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return "", errors.New("a playlist needs a name")
+	}
+	return name, nil
+}
+
+func markDirty(tx *sql.Tx) error {
+	_, err := tx.Exec(`INSERT INTO meta (key, value) VALUES ('dirty', '1')
+		ON CONFLICT (key) DO UPDATE SET value = excluded.value`)
+	return err
+}
+
+func playlistExists(tx *sql.Tx, id string) error {
+	var n int
+	if err := tx.QueryRow(`SELECT count(*) FROM playlist WHERE id = ?`, id).Scan(&n); err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrNoPlaylist
+	}
+	return nil
+}
+
+func playlistItems(tx *sql.Tx, id string) ([]string, error) {
+	rows, err := tx.Query(`SELECT file_id FROM playlist_item WHERE playlist_id = ? ORDER BY pos`, id)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var f string
+		if err := rows.Scan(&f); err != nil {
+			return nil, err
+		}
+		out = append(out, f)
+	}
+	return out, rows.Err()
+}
+
+// CreatePlaylist makes an empty playlist and returns its id.
+func (d *DB) CreatePlaylist(name string) (string, error) {
+	name, err := cleanName(name)
+	if err != nil {
+		return "", err
+	}
+	tx, err := d.db.Begin()
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = tx.Rollback() }()
+	id := NewID()
+	if _, err := tx.Exec(`INSERT INTO playlist (id, name, updated_at) VALUES (?, ?, ?)`,
+		id, name, time.Now().UnixMilli()); err != nil {
+		return "", err
+	}
+	if err := markDirty(tx); err != nil {
+		return "", err
+	}
+	return id, tx.Commit()
+}
+
+// RenamePlaylist renames a playlist.
+func (d *DB) RenamePlaylist(id, name string) error {
+	name, err := cleanName(name)
+	if err != nil {
+		return err
+	}
+	tx, err := d.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	var old string
+	err = tx.QueryRow(`SELECT name FROM playlist WHERE id = ?`, id).Scan(&old)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrNoPlaylist
+	}
+	if err != nil || old == name {
+		return err
+	}
+	if _, err := tx.Exec(`UPDATE playlist SET name = ?, updated_at = ? WHERE id = ?`,
+		name, time.Now().UnixMilli(), id); err != nil {
+		return err
+	}
+	if err := markDirty(tx); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// DeletePlaylist deletes a playlist and its items. Its files stay.
+func (d *DB) DeletePlaylist(id string) error {
+	tx, err := d.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := playlistExists(tx, id); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM playlist_item WHERE playlist_id = ?`, id); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM playlist WHERE id = ?`, id); err != nil {
+		return err
+	}
+	if err := markDirty(tx); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// editItems rewrites a playlist's items as edit returns them, in one
+// transaction. Nothing is written when the items don't change.
+func (d *DB) editItems(id string, edit func(tx *sql.Tx, items []string) ([]string, error)) error {
+	tx, err := d.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := playlistExists(tx, id); err != nil {
+		return err
+	}
+	items, err := playlistItems(tx, id)
+	if err != nil {
+		return err
+	}
+	next, err := edit(tx, slices.Clone(items))
+	if err != nil {
+		return err
+	}
+	if slices.Equal(items, next) {
+		return nil
+	}
+	if _, err := tx.Exec(`DELETE FROM playlist_item WHERE playlist_id = ?`, id); err != nil {
+		return err
+	}
+	for pos, f := range next {
+		if _, err := tx.Exec(`INSERT INTO playlist_item (playlist_id, pos, file_id) VALUES (?, ?, ?)`,
+			id, pos, f); err != nil {
+			return fmt.Errorf("write playlist item: %w", err)
+		}
+	}
+	if _, err := tx.Exec(`UPDATE playlist SET updated_at = ? WHERE id = ?`, time.Now().UnixMilli(), id); err != nil {
+		return err
+	}
+	if err := markDirty(tx); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// AddToPlaylist inserts files before the item at position before, or at
+// the end when before is negative or past the end. Ids the index doesn't
+// know are an error, and nothing is added.
+func (d *DB) AddToPlaylist(id string, fileIDs []string, before int) error {
+	return d.editItems(id, func(tx *sql.Tx, items []string) ([]string, error) {
+		for _, f := range fileIDs {
+			var n int
+			if err := tx.QueryRow(`SELECT count(*) FROM file WHERE id = ?`, f).Scan(&n); err != nil {
+				return nil, err
+			}
+			if n == 0 {
+				return nil, fmt.Errorf("no file with id %q in the library", f)
+			}
+		}
+		if before < 0 || before > len(items) {
+			before = len(items)
+		}
+		return slices.Insert(items, before, fileIDs...), nil
+	})
+}
+
+// checkPositions returns the given positions as a set, or an error if one
+// is out of range.
+func checkPositions(positions []int, n int) (map[int]bool, error) {
+	set := map[int]bool{}
+	for _, p := range positions {
+		if p < 0 || p >= n {
+			return nil, fmt.Errorf("the playlist has no item at position %d", p)
+		}
+		set[p] = true
+	}
+	return set, nil
+}
+
+// RemoveFromPlaylist removes the items at the given positions.
+func (d *DB) RemoveFromPlaylist(id string, positions []int) error {
+	return d.editItems(id, func(_ *sql.Tx, items []string) ([]string, error) {
+		drop, err := checkPositions(positions, len(items))
+		if err != nil {
+			return nil, err
+		}
+		var out []string
+		for i, f := range items {
+			if !drop[i] {
+				out = append(out, f)
+			}
+		}
+		return out, nil
+	})
+}
+
+// MovePlaylistItems moves the items at the given positions, keeping their
+// order, to just before the item that is at position before now, or to
+// the end when before is negative or past the end. This is how a list
+// view reports a drag: as Swift's move(fromOffsets:toOffset:).
+func (d *DB) MovePlaylistItems(id string, positions []int, before int) error {
+	return d.editItems(id, func(_ *sql.Tx, items []string) ([]string, error) {
+		move, err := checkPositions(positions, len(items))
+		if err != nil {
+			return nil, err
+		}
+		if before < 0 || before > len(items) {
+			before = len(items)
+		}
+		var moved, rest []string
+		at := 0 // where the moved items go in rest
+		for i, f := range items {
+			if move[i] {
+				moved = append(moved, f)
+				continue
+			}
+			if i < before {
+				at++
+			}
+			rest = append(rest, f)
+		}
+		return slices.Insert(rest, at, moved...), nil
+	})
+}
+
+// CopyPlaylists copies d's playlists into dst, which holds the same
+// library under its own file ids: each item finds its file in dst by
+// path, and items whose path dst doesn't know are left out. A playlist
+// dst already has (by id) is left as dst has it. It returns how many
+// playlists it copied, and marks dst dirty if any.
+func (d *DB) CopyPlaylists(dst *DB) (int, error) {
+	lists, err := d.Playlists()
+	if err != nil || len(lists) == 0 {
+		return 0, err
+	}
+	type item struct{ playlist, path string }
+	rows, err := d.db.Query(`SELECT i.playlist_id, f.path FROM playlist_item i
+		JOIN file f ON f.id = i.file_id ORDER BY i.playlist_id, i.pos`)
+	if err != nil {
+		return 0, err
+	}
+	var items []item
+	for rows.Next() {
+		var it item
+		if err := rows.Scan(&it.playlist, &it.path); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		items = append(items, it)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+
+	tx, err := dst.db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	copied := map[string]bool{}
+	for _, p := range lists {
+		res, err := tx.Exec(`INSERT INTO playlist (id, name, updated_at) VALUES (?, ?, ?)
+			ON CONFLICT (id) DO NOTHING`, p.ID, p.Name, p.UpdatedAt)
+		if err != nil {
+			return 0, err
+		}
+		if n, _ := res.RowsAffected(); n > 0 {
+			copied[p.ID] = true
+		}
+	}
+	pos := map[string]int{}
+	for _, it := range items {
+		if !copied[it.playlist] {
+			continue
+		}
+		var fileID string
+		err := tx.QueryRow(`SELECT id FROM file WHERE path = ?`, it.path).Scan(&fileID)
+		if errors.Is(err, sql.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return 0, err
+		}
+		if _, err := tx.Exec(`INSERT INTO playlist_item (playlist_id, pos, file_id) VALUES (?, ?, ?)`,
+			it.playlist, pos[it.playlist], fileID); err != nil {
+			return 0, err
+		}
+		pos[it.playlist]++
+	}
+	if len(copied) == 0 {
+		return 0, nil
+	}
+	if err := markDirty(tx); err != nil {
+		return 0, err
+	}
+	return len(copied), tx.Commit()
+}
