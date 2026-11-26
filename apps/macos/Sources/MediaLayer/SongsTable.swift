@@ -337,6 +337,12 @@ final class SongsTableController: NSObject, NSTableViewDataSource, NSTableViewDe
                 ?? CloudsCellView(frame: NSRect(x: 0, y: 0, width: 60, height: Self.rowHeight))
             cell.show(state.clouds.clouds(for: t))
             return cell
+        case .fileHash, .audioHash:
+            let cell = (tableView.makeView(withIdentifier: HashCell.reuseID, owner: nil) as? HashCell)
+                ?? HashCell(frame: NSRect(x: 0, y: 0, width: 90, height: Self.rowHeight))
+            cell.show(c == .fileHash ? t.fileSHA : t.audioSHA,
+                      what: c == .fileHash ? "file hash" : "audio hash")
+            return cell
         default:
             let id = c.isNumeric ? TextCell.numberID : TextCell.textID
             let cell = (tableView.makeView(withIdentifier: id, owner: nil) as? TextCell)
@@ -725,6 +731,67 @@ final class CoverView: NSView {
     }
 }
 
+/// A hash, shortened to its first 7 characters as Git does, and a button
+/// that copies the whole hash. Empty while the hash isn't known.
+final class HashCell: NSTableCellView {
+    static let reuseID = NSUserInterfaceItemIdentifier("SongsTable.hash")
+    private let copyButton = NSButton(frame: .zero)
+    private var fullHash = ""
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        identifier = Self.reuseID
+        let field = NSTextField(labelWithString: "")
+        field.font = .monospacedSystemFont(ofSize: NSFont.systemFontSize, weight: .regular)
+        field.lineBreakMode = .byClipping
+        let height = ceil(field.intrinsicContentSize.height)
+        let side: CGFloat = 16
+        field.frame = NSRect(x: 2, y: floor((bounds.height - height) / 2),
+                             width: bounds.width - side - 6, height: height)
+        field.autoresizingMask = [.width, .minYMargin, .maxYMargin]
+        addSubview(field)
+        textField = field
+
+        copyButton.bezelStyle = .inline
+        copyButton.isBordered = false
+        copyButton.image = NSImage(systemSymbolName: "doc.on.doc", accessibilityDescription: "Copy")?
+            .withSymbolConfiguration(.init(pointSize: 10, weight: .regular))
+        copyButton.contentTintColor = .secondaryLabelColor
+        copyButton.imagePosition = .imageOnly
+        copyButton.target = self
+        copyButton.action = #selector(copyHash)
+        copyButton.frame = NSRect(x: bounds.width - side - 2, y: floor((bounds.height - side) / 2),
+                                  width: side, height: side)
+        copyButton.autoresizingMask = [.minXMargin, .minYMargin, .maxYMargin]
+        addSubview(copyButton)
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
+
+    /// White on a selected row's highlight, as the row's text is.
+    override var backgroundStyle: NSView.BackgroundStyle {
+        didSet {
+            copyButton.contentTintColor = backgroundStyle == .emphasized
+                ? .alternateSelectedControlTextColor : .secondaryLabelColor
+        }
+    }
+
+    func show(_ hash: String, what: String) {
+        fullHash = hash
+        textField?.stringValue = String(hash.prefix(7))
+        textField?.toolTip = hash.isEmpty ? nil : hash
+        copyButton.isHidden = hash.isEmpty
+        copyButton.toolTip = "Copy the full \(what)"
+        copyButton.setAccessibilityLabel("Copy the full \(what)")
+    }
+
+    @objc private func copyHash() {
+        guard !fullHash.isEmpty else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(fullHash, forType: .string)
+    }
+}
+
 /// The Clouds cell: one icon per source, dimmed where the source may not
 /// hold the track, with the reason as its tooltip.
 final class CloudsCellView: NSTableCellView {
@@ -807,7 +874,7 @@ enum CloudGlyphs {
 /// The Songs table's columns, in their default order.
 enum SongColumn: String, CaseIterable, Identifiable {
     case art, name, time, artist, albumArtist, album, genre, composer, year, disc, track, kind,
-         bitRate, size, modified, clouds
+         bitRate, size, modified, clouds, fileHash, audioHash
 
     var id: String { rawValue } // saved, so don't rename
 
@@ -829,12 +896,14 @@ enum SongColumn: String, CaseIterable, Identifiable {
         case .size: "Size"
         case .modified: "Date Modified"
         case .clouds: "Clouds"
+        case .fileHash: "File Hash"
+        case .audioHash: "Audio Hash"
         }
     }
 
     var visibleByDefault: Bool {
         switch self {
-        case .albumArtist, .composer, .disc, .bitRate, .size, .modified: false
+        case .albumArtist, .composer, .disc, .bitRate, .size, .modified, .fileHash, .audioHash: false
         default: true
         }
     }
@@ -861,6 +930,7 @@ enum SongColumn: String, CaseIterable, Identifiable {
         case .size: return (56, 70, false)
         case .modified: return (90, 130, false)
         case .clouds: return (44, 60, false)
+        case .fileHash, .audioHash: return (84, 84, true) // 7 characters and the copy button
         }
     }
 
@@ -890,6 +960,8 @@ enum SongColumn: String, CaseIterable, Identifiable {
         case .bitRate: return KeyPathComparator(\Track.bitRate, order: order)
         case .size: return KeyPathComparator(\Track.size, order: order)
         case .modified: return KeyPathComparator(\Track.mtimeMS, order: order)
+        case .fileHash: return KeyPathComparator(\Track.fileSHA, order: order)
+        case .audioHash: return KeyPathComparator(\Track.audioSHA, order: order)
         }
     }
 
@@ -902,6 +974,8 @@ enum SongColumn: String, CaseIterable, Identifiable {
     func text(_ t: Track) -> String {
         switch self {
         case .art, .clouds: return ""
+        case .fileHash: return String(t.fileSHA.prefix(7))
+        case .audioHash: return String(t.audioSHA.prefix(7))
         case .name: return t.displayTitle
         case .time: return formatDuration(t.durationMS)
         case .artist: return t.artist

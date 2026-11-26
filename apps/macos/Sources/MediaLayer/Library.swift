@@ -24,6 +24,10 @@ struct Track: Identifiable, Hashable {
     let year: String
     let artSHA: String? // hex SHA-256 of the cover, front cover first
     let mtimeMS: Int64 // the file's modification time on the primary
+    /// Lowercase hex SHA-256 of the whole file, as the cloud lists it, and
+    /// of its audio alone (tags skipped); "" until known.
+    var fileSHA = ""
+    var audioSHA = ""
 
     /// The artist the Artists column groups by, as iTunes does.
     var browseArtist: String { albumArtist.isEmpty ? artist : albumArtist }
@@ -55,7 +59,8 @@ extension Track {
             id: "\(id)\(Track.fakeMark)\(n)", path: path, format: format, size: size, durationMS: durationMS,
             sampleRate: sampleRate, bitDepth: bitDepth, title: title, artist: numbered(artist),
             albumArtist: numbered(albumArtist), album: numbered(album), genre: genre, composer: composer,
-            trackNumber: trackNumber, discNumber: discNumber, year: year, artSHA: artSHA, mtimeMS: mtimeMS
+            trackNumber: trackNumber, discNumber: discNumber, year: year, artSHA: artSHA, mtimeMS: mtimeMS,
+            fileSHA: fileSHA, audioSHA: audioSHA
         )
     }
 }
@@ -100,7 +105,7 @@ final class LibraryDB {
         let sql = """
             SELECT f.id, f.path, f.format, f.size, f.duration_ms, f.sample_rate, f.bit_depth, \(tags),
               (SELECT hex(art_sha256) FROM file_art WHERE file_id = f.id ORDER BY role <> 3, role LIMIT 1),
-              f.mtime
+              f.mtime, lower(hex(f.sha256)), lower(hex(f.audio_sha256))
             FROM file f WHERE f.missing = 0
             """
         var stmt: OpaquePointer?
@@ -124,7 +129,8 @@ final class LibraryDB {
                 genre: text(11), composer: text(12),
                 trackNumber: leadingInt(text(13)), discNumber: leadingInt(text(14)),
                 year: String(text(15).prefix(4)), artSHA: art.isEmpty ? nil : art,
-                mtimeMS: sqlite3_column_int64(stmt, 17)
+                mtimeMS: sqlite3_column_int64(stmt, 17),
+                fileSHA: text(18), audioSHA: text(19)
             ))
             rc = sqlite3_step(stmt)
         }

@@ -147,6 +147,7 @@ final class AppModel: ObservableObject {
     private var db: LibraryDB?
     private var loadedEpoch: Int64 = -1
     private var loadedCount: Int64 = -1
+    private var loadedAudioHashed: Int64 = -1
     private var lastLoad = Date.distantPast
     private var loadedFinish: String?
     private var timer: Timer?
@@ -248,6 +249,13 @@ final class AppModel: ObservableObject {
         // While indexing, reload at most every 2 seconds; at the end, always.
         if !new.dbPath.isEmpty, changed || finished, finished || Date().timeIntervalSince(lastLoad) > 2 {
             reload()
+        } else if !new.dbPath.isEmpty, let h = new.audioHashes, h.hashed != loadedAudioHashed,
+                  SongColumns.isVisible(.audioHash, in: columns.visibility),
+                  !h.running || Date().timeIntervalSince(lastLoad) > 10 {
+            // The background hash pass fills in the Audio Hash column, while
+            // it shows: every 10 seconds while the pass runs, and once when
+            // it stops.
+            reload()
         }
     }
 
@@ -273,6 +281,7 @@ final class AppModel: ObservableObject {
             try reloadPlaylists()
             loadedEpoch = status.dbEpoch
             loadedCount = status.tracks
+            loadedAudioHashed = status.audioHashes?.hashed ?? -1
             loadedFinish = status.job.finished
             libraryError = nil
         } catch {

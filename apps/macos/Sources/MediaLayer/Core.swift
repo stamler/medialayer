@@ -48,6 +48,15 @@ struct CoreStatus: Decodable, Equatable {
     var accounts: [String]? = []
     var notice: String?
     var error: String?
+    /// The background audio-hash pass's progress.
+    var audioHashes: AudioHashes?
+
+    struct AudioHashes: Decodable, Equatable {
+        var running = false
+        var hashed: Int64 = 0
+        var total: Int64 = 0
+        var failed: Int64 = 0
+    }
 
     var isBusy: Bool { ["opening", "listing", "indexing", "publishing", "mirroring", "promoting"].contains(job.phase) }
 }
