@@ -430,37 +430,117 @@ struct BrowserColumn: View, Equatable {
         a.title == b.title && a.selection == b.selection && a.values == b.values
     }
 
-    // A change waiting to be applied (see listSelection).
-    @State private var pending: String??
-
-    // List selection can't hold nil, so "All" is the empty string.
-    private var listSelection: Binding<String?> {
-        Binding(get: { (pending ?? selection) ?? "" }, set: { value in
-            let new = (value ?? "").isEmpty ? nil : value
-            guard new != (pending ?? selection) else { return }
-            // The list can report a selection change while the table is
-            // updating (when indexing changes the values). Changing the model
-            // inside that callback is reentrant for AppKit, so do it after.
-            pending = .some(new)
-            DispatchQueue.main.async {
-                if let p = pending { selection = p }
-                pending = nil
-            }
-        })
-    }
-
     var body: some View {
         VStack(spacing: 0) {
             Text(title).font(.caption.bold()).foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity).frame(height: Self.headerHeight)
             Divider()
-            List(selection: listSelection) {
-                Text("All (\(values.count) \(values.count == 1 ? String(title.dropLast()) : title))").tag("")
-                ForEach(values, id: \.self) { Text($0).lineLimit(1).tag($0) }
-            }
-            .listStyle(.plain)
+            BrowserList(title: title, values: values, selection: $selection)
         }
         .frame(minWidth: 140)
+    }
+}
+
+/// A browser column's list: "All (n Genres)", then the values. An
+/// NSTableView with reused AppKit cells: a SwiftUI List made a hosting
+/// view per row, and rebuilt them all when the values changed.
+struct BrowserList: NSViewRepresentable {
+    let title: String
+    let values: [String]
+    @Binding var selection: String?
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    func makeNSView(context: Context) -> NSScrollView { context.coordinator.scrollView }
+
+    func updateNSView(_ view: NSScrollView, context: Context) {
+        context.coordinator.selection = $selection
+        context.coordinator.show(title: title, values: values, selected: selection)
+    }
+
+    @MainActor
+    final class Coordinator: NSObject, NSTableViewDataSource, NSTableViewDelegate {
+        static let cellID = NSUserInterfaceItemIdentifier("BrowserList.cell")
+
+        let scrollView = NSScrollView()
+        var selection: Binding<String?>?
+        private let table = NSTableView()
+        private var title = ""
+        private var values: [String] = []
+        /// Each value's row; row 0 is All.
+        private var rowOf: [String: Int] = [:]
+        /// Set while this code changes the table, so its selection
+        /// callbacks don't write back to the model.
+        private var updating = false
+
+        override init() {
+            super.init()
+            let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("value"))
+            column.minWidth = 40
+            column.width = 120
+            column.resizingMask = .autoresizingMask
+            table.addTableColumn(column)
+            table.headerView = nil
+            table.style = .plain
+            table.usesAutomaticRowHeights = false
+            table.rowHeight = 20
+            table.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
+            table.allowsMultipleSelection = false
+            table.allowsEmptySelection = false
+            table.allowsTypeSelect = true
+            table.dataSource = self
+            table.delegate = self
+            scrollView.documentView = table
+            scrollView.hasVerticalScroller = true
+            scrollView.autohidesScrollers = true
+            scrollView.borderType = .noBorder
+        }
+
+        /// Reloads only when the values change, then selects the model's
+        /// choice, or All.
+        func show(title: String, values: [String], selected: String?) {
+            if title != self.title || values != self.values {
+                self.title = title
+                self.values = values
+                var rows = [String: Int](minimumCapacity: values.count)
+                for (i, v) in values.enumerated() where rows[v] == nil { rows[v] = i + 1 }
+                rowOf = rows
+                updating = true
+                table.reloadData()
+                updating = false
+            }
+            let row = selected.flatMap { rowOf[$0] } ?? 0
+            if table.selectedRow != row {
+                updating = true
+                table.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+                updating = false
+            }
+        }
+
+        func numberOfRows(in tableView: NSTableView) -> Int { values.count + 1 }
+
+        func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+            let cell = (tableView.makeView(withIdentifier: Self.cellID, owner: nil) as? TextCell)
+                ?? TextCell(identifier: Self.cellID, numeric: false)
+            cell.textField?.stringValue = text(row)
+            return cell
+        }
+
+        private func text(_ row: Int) -> String {
+            if row == 0 { return "All (\(values.count) \(values.count == 1 ? String(title.dropLast()) : title))" }
+            return values.indices.contains(row - 1) ? values[row - 1] : ""
+        }
+
+        func tableView(_ tableView: NSTableView, typeSelectStringFor tableColumn: NSTableColumn?, row: Int) -> String? {
+            row == 0 ? nil : text(row)
+        }
+
+        func tableViewSelectionDidChange(_ notification: Notification) {
+            guard !updating, table.selectedRow >= 0 else { return }
+            let row = table.selectedRow
+            let new: String? = row == 0 || !values.indices.contains(row - 1) ? nil : values[row - 1]
+            if selection?.wrappedValue != new { selection?.wrappedValue = new }
+        }
     }
 }
 
