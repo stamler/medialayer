@@ -23,6 +23,10 @@ type FLACSource struct {
 	serial uint32
 	// audioStart is where the first frame (or audio page) starts.
 	audioStart, size int64
+	// base is the first frame's number for its first sample: not 0 in a
+	// stream cut from a longer one without renumbering its frames.
+	base      uint64
+	baseKnown bool
 }
 
 // ErrNoFrame is returned when no frame starts in the part of the file
@@ -64,12 +68,29 @@ func OpenFLACSource(fetch FetchFunc, size, maxHeader int64, ogg bool) (*FLACSour
 	if s.Total == 0 {
 		return nil, fmt.Errorf("a FLAC stream of unknown length: %w", ErrNotFLAC)
 	}
+	open := func(off, n int64) (io.ReadCloser, error) {
+		b, err := fetch(off, min(n, 1<<20))
+		return io.NopCloser(bytes.NewReader(b)), err
+	}
+	f, err := s.framesAt(open, s.audioStart, s.size-s.audioStart)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+	// The header is enough: a damaged first frame still gives its number
+	// (First stays 0 when the header itself is bad: the usual base).
+	_, _ = f.d.Next()
+	s.base, s.baseKnown = f.d.First, true
 	return s, nil
 }
 
 // FLACFrames decodes frames from a point in a FLACSource.
 type FLACFrames struct {
 	d    *FLACDecoder
+	src  *FLACSource
+	br   *bufio.Reader
+	st   *oggStream // in Ogg
+	base uint64     // FLACSource.base
 	rc   io.ReadCloser
 	next uint64 // the next frame's first sample
 	seen bool
@@ -83,11 +104,39 @@ func (f *FLACFrames) Next() (first uint64, n int, err error) {
 		return 0, 0, err
 	}
 	if !f.seen { // later frames follow on, whatever their headers say
-		f.next, f.seen = f.d.First, true
+		if f.d.First < f.base {
+			return 0, 0, fmt.Errorf("frame numbered before the stream's first: %w", ErrFLACFrame)
+		}
+		f.next, f.seen = f.d.First-f.base, true
 	}
 	first = f.next
 	f.next += uint64(n)
 	return first, n, nil
+}
+
+// Resync carries on after a frame Next failed to decode, from the next
+// frame found: the frame numbers then say where it is.
+func (f *FLACFrames) Resync() error {
+	if f.st != nil {
+		st := f.st
+		for {
+			if err := st.next(); err != nil {
+				return ErrNoFrame
+			}
+			if st.skipContinued() {
+				break
+			}
+		}
+		f.d = newFLACFrameDecoder(f.src.Info, st)
+	} else {
+		d, err := f.src.nativeFrames(f.br)
+		if err != nil {
+			return err
+		}
+		f.d = d
+	}
+	f.seen = false
+	return nil
 }
 
 // Samples is the last frame's samples, by channel.
@@ -113,7 +162,11 @@ func (s *FLACSource) framesAt(open OpenFunc, off, length int64) (*FLACFrames, er
 		_ = rc.Close()
 		return nil, err
 	}
-	return &FLACFrames{d: d, rc: rc}, nil
+	f := &FLACFrames{d: d, rc: rc, src: s, br: br, base: s.base}
+	if s.ogg {
+		f.st = d.br.r.(*oggStream)
+	}
+	return f, nil
 }
 
 // nativeFrames finds a frame in a native FLAC stream: a sync code and a
@@ -130,7 +183,9 @@ func (s *FLACSource) nativeFrames(br *bufio.Reader) (*FLACDecoder, error) {
 		_ = br.UnreadByte() // right after ReadByte, so it can't fail
 		p, _ := br.Peek(16)
 		probe := &FLACDecoder{Info: s.Info, br: newBitReader(bytes.NewReader(p))}
-		if probe.checkHeader() == nil {
+		// A plausible sample number makes a false sync code all but
+		// impossible, past the CRC-8.
+		if probe.checkHeader() == nil && (!s.baseKnown || probe.First >= s.base && probe.First-s.base < s.Total) {
 			return newFLACFrameDecoder(s.Info, br), nil
 		}
 		_, _ = br.Discard(1)
@@ -180,11 +235,8 @@ func (s *FLACSource) oggFrames(br *bufio.Reader) (*FLACDecoder, error) {
 		}
 		p.segs, p.body = bytes.Clone(p.segs), bytes.Clone(p.body)
 		_, _ = br.Discard(n)
-		st := &oggStream{r: br, serial: s.serial, seq: p.seq, seqOK: true, page: p, ended: p.flags&4 != 0}
-		for tries := 0; !st.skipContinued(); tries++ {
-			if tries == 4 { // packets this long aren't frames
-				return nil, ErrNoFrame
-			}
+		st := &oggStream{r: br, serial: s.serial, seq: p.seq, seqOK: true, page: p, ended: p.flags&4 != 0, pastBOS: true}
+		for !st.skipContinued() { // pages within one long frame
 			if err := st.next(); err != nil {
 				return nil, ErrNoFrame
 			}

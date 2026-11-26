@@ -34,7 +34,9 @@ The macOS app ([apps/macos](apps/macos/README.md)):
   localhost endpoint, one ranged request per play or seek. FLAC in Ogg
   and FLAC at depths other than 16 and 24 bits, which Apple's decoders
   don't play, are decoded by the core and streamed as WAVE; a seek finds
-  its frame by bisecting the file, a few small reads.
+  its frame by bisecting the file, a few small reads. A WAVE stream holds at
+  most 4 GB, about 46 minutes of 32-bit stereo at 192 kHz; longer tracks
+  of those kinds don't play yet.
 - **Search** from the toolbar (⌘F), across titles, artists, albums,
   composers and genres, ignoring case and accents.
 - **Sidebar and playlists.** A collapsible sidebar (⌃⌘S) with playlists:

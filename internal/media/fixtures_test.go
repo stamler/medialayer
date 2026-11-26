@@ -368,6 +368,14 @@ func TestOggFLAC(t *testing.T) {
 	if n < 2 {
 		t.Fatalf("only %d Ogg FLAC fixtures", n)
 	}
+	// Two FLAC streams multiplexed: the first is the track.
+	mux, err := os.ReadFile("testdata/flac16-mux.oga")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := HashOggFLAC(bytes.NewReader(mux)); err != nil || hex.EncodeToString(got) != fixtureHashes(t)["flac16.flac"] {
+		t.Errorf("multiplexed: %x, %v", got, err)
+	}
 	fetch, _, size := fileFuncs(t, "flac16.oga")
 	info, err := ParseOggFLAC(fetch, size, 1<<20)
 	if err != nil {

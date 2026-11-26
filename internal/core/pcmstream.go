@@ -48,11 +48,11 @@ func newWAVLayout(src *media.FLACSource) (wavLayout, error) {
 	l := wavLayout{}
 	l.width, l.shift = src.PCMLayout()
 	l.frameBytes = int64(l.width) * int64(info.Channels)
-	data := int64(src.Total) * l.frameBytes
-	if data > 1<<32-1-wavHeaderLen {
-		return l, fmt.Errorf("%d samples are too many for a WAVE file", src.Total)
+	if src.Total > uint64(1<<32-2-wavHeaderLen)/uint64(l.frameBytes) {
+		return l, fmt.Errorf("%d samples are too many for a WAVE file (4 GB)", src.Total)
 	}
-	l.size = wavHeaderLen + data
+	data := int64(src.Total) * l.frameBytes
+	l.size = wavHeaderLen + data + data&1 // chunks are padded to even lengths
 	h := make([]byte, 0, wavHeaderLen)
 	h = append(h, "RIFF"...)
 	h = binary.LittleEndian.AppendUint32(h, uint32(l.size-8))
@@ -117,6 +117,9 @@ func (s *streamServer) servePCM(w http.ResponseWriter, r *http.Request, id strin
 		return
 	}
 	s.forget(id)
+	s.mu.Lock()
+	delete(s.pcm, id)
+	s.mu.Unlock()
 	fs.Errorf(o, "stream decoded: %v", err)
 	http.Error(w, err.Error(), http.StatusBadGateway)
 }
@@ -148,17 +151,22 @@ func (s *streamServer) writePCM(w http.ResponseWriter, r *http.Request, o fs.Obj
 	var frames *media.FLACFrames
 	from := max(start, wavHeaderLen) - wavHeaderLen
 	sample := uint64(from / l.frameBytes)
-	if end >= wavHeaderLen {
-		open := func(off, n int64) (io.ReadCloser, error) {
-			rc, err := o.Open(ctx, &fs.RangeOption{Start: off, End: off + n - 1})
-			if err != nil {
-				return nil, err
-			}
-			return struct {
-				io.Reader
-				io.Closer
-			}{ctxReader{ctx, io.LimitReader(rc, n)}, rc}, nil
+	open := func(off, n int64) (io.ReadCloser, error) {
+		rc, err := o.Open(ctx, &fs.RangeOption{Start: off, End: off + n - 1})
+		if err != nil {
+			return nil, err
 		}
+		return struct {
+			io.Reader
+			io.Closer
+		}{ctxReader{ctx, io.LimitReader(rc, n)}, rc}, nil
+	}
+	defer func() {
+		if frames != nil {
+			_ = frames.Close()
+		}
+	}()
+	if end >= wavHeaderLen {
 		if frames, err = src.Seek(open, sample); err != nil {
 			if ctx.Err() == nil {
 				fs.Errorf(o, "stream decoded: seek to sample %d: %v", sample, err)
@@ -166,7 +174,6 @@ func (s *streamServer) writePCM(w http.ResponseWriter, r *http.Request, o fs.Obj
 			}
 			return
 		}
-		defer func() { _ = frames.Close() }()
 	}
 	w.WriteHeader(status)
 	if start < wavHeaderLen {
@@ -180,25 +187,45 @@ func (s *streamServer) writePCM(w http.ResponseWriter, r *http.Request, o fs.Obj
 	left := end + 1 - max(start, wavHeaderLen) // bytes still to send
 	skip := from % l.frameBytes                // of the first sample
 	var buf []byte
-	for left > 0 {
+	zeros := make([]byte, 64<<10)
+	silence := func(n int64) bool {
+		for n > 0 {
+			k := min(n, int64(len(zeros)))
+			if _, err := w.Write(zeros[:k]); err != nil {
+				return false
+			}
+			n -= k
+		}
+		return true
+	}
+	retries := 0
+	for left > 0 && sample < src.Total {
 		first, n, err := frames.Next()
 		if err != nil {
-			if !errors.Is(err, io.EOF) && ctx.Err() == nil {
-				fs.Errorf(o, "stream decoded: %v", err)
+			if errors.Is(err, io.EOF) || ctx.Err() != nil {
+				break
 			}
-			break
+			// A damaged frame: carry on from a frame past it, silent
+			// in between, rather than silent to the end.
+			fs.Errorf(o, "stream decoded: after sample %d: %v", sample, err)
+			if retries++; retries > 64 || frames.Resync() != nil {
+				break
+			}
+			continue
 		}
-		if first+uint64(n) > src.Total { // past what the header promised
-			n = int(max(src.Total, first) - first)
-		}
+		n = int(min(uint64(n), src.Total-min(first, src.Total))) // past what the header promised
 		if first+uint64(n) <= sample {
 			continue
 		}
-		i := 0
-		if first < sample {
-			i = int(sample - first)
+		if first > sample { // samples lost to a damaged frame
+			gap := min(int64(first-sample)*l.frameBytes-skip, left)
+			if !silence(gap) {
+				return
+			}
+			left -= gap
+			sample, skip = first, 0
 		}
-		buf = media.AppendPCM(buf[:0], frames.Samples(), i, n, l.width, l.shift)
+		buf = media.AppendPCM(buf[:0], frames.Samples(), int(sample-first), n, l.width, l.shift)
 		out := buf[min(skip, int64(len(buf))):]
 		skip = 0
 		out = out[:min(int64(len(out)), left)]
@@ -209,13 +236,6 @@ func (s *streamServer) writePCM(w http.ResponseWriter, r *http.Request, o fs.Obj
 		sample = first + uint64(n)
 	}
 	// A stream that ends early (a damaged file) ends in silence, so the
-	// length matches what the header said.
-	zeros := make([]byte, 64<<10)
-	for left > 0 {
-		n := min(left, int64(len(zeros)))
-		if _, err := w.Write(zeros[:n]); err != nil {
-			return
-		}
-		left -= n
-	}
+	// length matches what the header said; so does the pad byte.
+	silence(left)
 }

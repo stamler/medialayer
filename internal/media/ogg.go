@@ -102,6 +102,9 @@ type oggStream struct {
 	off    int // where segment seg starts in page.body
 	pos    int // the next byte, for ReadByte
 	ended  bool
+	// pastBOS is set once a page that starts no stream is read: a
+	// stream's first page after that starts a chained stream.
+	pastBOS bool
 }
 
 // next moves to the stream's next page, skipping other streams' pages.
@@ -118,8 +121,11 @@ func (s *oggStream) next() error {
 		if err != nil {
 			return err
 		}
+		if p.flags&2 == 0 {
+			s.pastBOS = true
+		}
 		if p.serial != s.serial {
-			if p.flags&2 != 0 && s.seqOK {
+			if p.flags&2 != 0 && s.pastBOS {
 				s.ended = true // a chained stream starts: ours is over
 				return io.EOF
 			}
@@ -137,31 +143,42 @@ func (s *oggStream) next() error {
 	}
 }
 
-// packet returns the next whole packet, at most max bytes.
+// errBigPacket is a packet over the size asked for: read, but not kept.
+var errBigPacket = errors.New("Ogg packet too big")
+
+// packet returns the next whole packet; one over max bytes is read to
+// its end and errBigPacket returned.
 func (s *oggStream) packet(max int) ([]byte, error) {
 	var out []byte
+	started, big := false, false
 	for {
 		if s.page == nil || s.seg == len(s.page.segs) {
 			last := s.page
 			if err := s.next(); err != nil {
-				if errors.Is(err, io.EOF) && out != nil {
+				if errors.Is(err, io.EOF) && started {
 					return nil, io.ErrUnexpectedEOF
 				}
 				return nil, err
 			}
-			if cont := s.page.flags&1 != 0; cont != (out != nil) && last != nil {
+			if cont := s.page.flags&1 != 0; cont != started && last != nil {
 				return nil, fmt.Errorf("Ogg packet continuation mismatch: %w", ErrNotOggFLAC)
 			}
 		}
 		l := int(s.page.segs[s.seg])
-		out = append(out, s.page.body[s.off:s.off+l]...)
+		started = true
+		if !big {
+			out = append(out, s.page.body[s.off:s.off+l]...)
+		}
+		if len(out) > max {
+			out, big = nil, true
+		}
 		s.seg++
 		s.off += l
-		if len(out) > max {
-			return nil, fmt.Errorf("Ogg packet of over %d bytes: %w", max, ErrNotOggFLAC)
-		}
 		if l < 255 {
 			s.pos = s.off
+			if big {
+				return nil, errBigPacket
+			}
 			return out, nil
 		}
 	}
@@ -230,6 +247,9 @@ func readOggFLACHeader(r *bufio.Reader, max int) (*OggFLACHeader, *oggStream, er
 	}
 	first, err := s.packet(1 << 10)
 	if err != nil {
+		if errors.Is(err, io.EOF) || errors.Is(err, errBigPacket) {
+			err = fmt.Errorf("no FLAC mapping header: %w", ErrNotOggFLAC)
+		}
 		return nil, nil, err
 	}
 	// 0x7F "FLAC", version 1.0, the header packet count, "fLaC", then
@@ -242,24 +262,40 @@ func readOggFLACHeader(r *bufio.Reader, max int) (*OggFLACHeader, *oggStream, er
 		return nil, nil, err
 	}
 	h.Meta = append([]byte("fLaC"), first[13:]...)
-	last := first[13]&0x80 != 0
+	// The mapping header counts the header packets after it, or is 0
+	// when it doesn't; then the last metadata block's flag ends them.
+	count := int(binary.BigEndian.Uint16(first[7:]))
+	last := count == 0 && first[13]&0x80 != 0
 	lastAt := 4
-	for n := 0; !last; n++ {
+	for n := 0; !last && (count == 0 || n < count); n++ {
 		if n >= maxBlocks {
 			return nil, nil, fmt.Errorf("more than %d FLAC metadata blocks: %w", maxBlocks, ErrNotOggFLAC)
 		}
 		p, err := s.packet(max - len(h.Meta))
+		if errors.Is(err, errBigPacket) {
+			continue // a cover over the header limit: left out, as for native FLAC
+		}
+		if errors.Is(err, io.EOF) {
+			err = fmt.Errorf("file ends in the header packets: %w", ErrNotOggFLAC)
+		}
 		if err != nil {
 			return nil, nil, err
 		}
 		if len(p) < 4 || int(p[1])<<16|int(p[2])<<8|int(p[3]) != len(p)-4 || p[0]&0x7f == 0 || p[0]&0x7f == 127 {
 			return nil, nil, fmt.Errorf("bad FLAC metadata packet: %w", ErrNotOggFLAC)
 		}
-		last = p[0]&0x80 != 0
+		last = count == 0 && p[0]&0x80 != 0
 		lastAt = len(h.Meta)
 		h.Meta = append(h.Meta, p...)
 	}
-	h.Meta[lastAt] |= 0x80 // the mapping lets the last-block flag go unset
+	for i := 4; i < len(h.Meta); { // the flag only on the last block
+		n := int(h.Meta[i+1])<<16 | int(h.Meta[i+2])<<8 | int(h.Meta[i+3])
+		h.Meta[i] &^= 0x80
+		if i == lastAt {
+			h.Meta[i] |= 0x80
+		}
+		i += 4 + n
+	}
 	if s.page != nil && s.seg != len(s.page.segs) {
 		return nil, nil, fmt.Errorf("audio on the last header page: %w", ErrNotOggFLAC)
 	}
@@ -301,6 +337,9 @@ func lastGranule(fetch FetchFunc, size int64, serial uint32) int64 {
 			continue
 		}
 		if p, _, err := parseOggPage(b[i:]); err == nil && p.serial == serial && p.granule > 0 {
+			if p.granule >= 1<<36 { // more than STREAMINFO could count
+				return 0
+			}
 			return p.granule
 		}
 	}

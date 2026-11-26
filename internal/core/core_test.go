@@ -22,6 +22,7 @@ import (
 	"github.com/rclone/rclone/fs"
 
 	"github.com/stamler/medialayer/internal/index"
+	"github.com/stamler/medialayer/internal/media"
 )
 
 // testFLAC builds a small FLAC file with the given tags and cover.
@@ -628,12 +629,18 @@ func TestStreamServesDecodedFLAC(t *testing.T) {
 			t.Fatal(err)
 		}
 		write(t, filepath.Join(lib, "D", name), b)
+		if name == "flac32.flac" { // and a copy with a damaged frame
+			b = bytes.Clone(b)
+			b[len(b)/2] ^= 0x40
+			write(t, filepath.Join(lib, "D", "damaged.flac"), b)
+		}
 	}
 	c := newTestCore(t, lib)
 	if err := c.index(ctx, c.fsys); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"flac32.flac", "flac16.oga", "flac24-51.ogg"} {
+	wavs := map[string][]byte{}
+	for _, name := range []string{"flac32.flac", "flac16.oga", "flac24-51.ogg", "damaged.flac"} {
 		t.Run(name, func(t *testing.T) {
 			var id string
 			if err := c.currentDB().SQL().QueryRow(`SELECT id FROM file WHERE path = ?`, "D/"+name).Scan(&id); err != nil {
@@ -663,6 +670,17 @@ func TestStreamServesDecodedFLAC(t *testing.T) {
 			if int(binary.LittleEndian.Uint32(wav[64:])) != len(wav)-wavHeaderLen {
 				t.Fatalf("data chunk of %d bytes in %d", binary.LittleEndian.Uint32(wav[64:]), len(wav))
 			}
+			wavs[name] = wav
+			if name == "damaged.flac" {
+				// Silence where the damaged frame was, and the audio after.
+				clean := wavs["flac32.flac"]
+				if len(wav) != len(clean) || !bytes.Equal(wav[len(wav)-4096:], clean[len(clean)-4096:]) ||
+					!bytes.Equal(wav[:wavHeaderLen], clean[:wavHeaderLen]) || bytes.Equal(wav, clean) {
+					t.Fatalf("damaged: %d bytes, clean %d; head same %v tail same %v", len(wav), len(clean),
+						bytes.Equal(wav[:4096], clean[:4096]), bytes.Equal(wav[len(wav)-4096:], clean[len(clean)-4096:]))
+				}
+				return
+			}
 			// The samples are the audio hash's, shifted to fill their bytes.
 			data, bits := wav[wavHeaderLen:], byte(width*8) // whole-byte depths: no shift
 			head := append([]byte("pcm\x00"), 0, 0, 0, 0, chans, bits)
@@ -677,5 +695,18 @@ func TestStreamServesDecodedFLAC(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestWAVLayoutPadsOddData(t *testing.T) {
+	src := &media.FLACSource{Info: media.StreamInfo{SampleRate: 44100, Channels: 1, BitsPerSample: 24}, Total: 3}
+	l, err := newWAVLayout(src)
+	if err != nil || l.size != wavHeaderLen+10 || binary.LittleEndian.Uint32(l.header[4:]) != uint32(l.size-8) ||
+		binary.LittleEndian.Uint32(l.header[64:]) != 9 {
+		t.Fatalf("%+v, %v", l, err)
+	}
+	src.Total = 1 << 40
+	if _, err := newWAVLayout(src); err == nil {
+		t.Fatal("a WAVE file over 4 GB")
 	}
 }

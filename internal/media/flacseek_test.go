@@ -11,7 +11,8 @@ import (
 func TestFLACSourceSeeks(t *testing.T) {
 	defer func(old int64) { seekSpan = old }(seekSpan)
 	seekSpan = 1 << 10 // bisect even in small files
-	for _, name := range []string{"flac16.flac", "flac24.flac", "flac32.flac", "flac16-51.flac", "flac16.oga", "flac24-51.ogg"} {
+	for _, name := range []string{"flac16.flac", "flac24.flac", "flac32.flac", "flac16-51.flac", "flac16.oga", "flac24-51.ogg",
+		"flac16-cut.flac", "flac16-cut.oga", "flac16-mux.oga"} {
 		t.Run(name, func(t *testing.T) {
 			b, err := os.ReadFile(filepath.Join("testdata", name))
 			if err != nil {

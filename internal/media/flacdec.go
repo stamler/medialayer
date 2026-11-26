@@ -303,8 +303,8 @@ func (d *FLACDecoder) header() (blockSize int, chCode uint64, bps uint8, err err
 
 	d.First = num
 	if h>>16 == 0 { // a frame number: times the fixed block size
-		fixed := uint64(blockSize)
-		if info.MinBlock == info.MaxBlock && info.MaxBlock > 0 {
+		fixed := uint64(blockSize) // only the last frame is shorter
+		if info.MaxBlock > 0 {
 			fixed = uint64(info.MaxBlock)
 		}
 		d.First = num * fixed
