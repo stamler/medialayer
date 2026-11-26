@@ -189,19 +189,22 @@ func matchMoves(ctx context.Context, db *index.DB, known map[string]index.Known,
 		}
 	}
 	moved := map[string]bool{}
+	marked := false
 	for p, objs := range claims {
 		if len(objs) != 1 {
 			continue // two copies of the file: neither is known to be the move
+		}
+		// Marked first, so no move is ever in the index unmarked.
+		if !marked {
+			if err := db.MarkFilesChanged(); err != nil {
+				return nil, err
+			}
+			marked = true
 		}
 		if err := db.MoveFile(known[p].ID, objs[0].Remote()); err != nil {
 			return nil, fmt.Errorf("move %s to %s in the index: %w", p, objs[0].Remote(), err)
 		}
 		moved[p] = true
-	}
-	if len(moved) > 0 {
-		if err := db.MarkFilesChanged(); err != nil {
-			return nil, err
-		}
 	}
 	return moved, ctx.Err()
 }

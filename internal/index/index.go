@@ -308,10 +308,22 @@ func (d *DB) MarkFilesChanged() error {
 
 // MoveFile gives a file row a new path, for a file that was moved or
 // renamed: it keeps its id, so playlists keep it. The path must not be
-// indexed already.
+// indexed already. The row's modification time is cleared and its cloud
+// locations dropped, so the file counts as changed until indexing its new
+// path succeeds: a failed read is retried by the next sync, not skipped.
 func (d *DB) MoveFile(id, path string) error {
-	_, err := d.db.Exec(`UPDATE file SET path = ?, missing = 0 WHERE id = ?`, path, id)
-	return err
+	tx, err := d.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.Exec(`UPDATE file SET path = ?, missing = 0, mtime = 0 WHERE id = ?`, path, id); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM location WHERE file_id = ?`, id); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // SetMissing marks files as missing (true) or present (false) by id.

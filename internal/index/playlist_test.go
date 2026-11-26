@@ -173,6 +173,42 @@ func TestPlaylistEdits(t *testing.T) {
 }
 
 // Items keep their file when it goes missing and is indexed again.
+// A moved row keeps its id and counts as changed until it is indexed at
+// its new path: its modification time no longer matches, and its stale
+// cloud location is gone.
+func TestMoveFileForcesReindex(t *testing.T) {
+	d, err := Open(filepath.Join(t.TempDir(), "index.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = d.Close() }()
+	id, err := d.PutFile(File{Path: "old.flac", Size: 5, MTime: 1234, Replica: "gdrive", CloudID: "x",
+		Info: &media.Info{Format: "flac"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.SetMissing([]string{id}, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.MoveFile(id, "new.flac"); err != nil {
+		t.Fatal(err)
+	}
+	known, err := d.KnownFiles()
+	if err != nil {
+		t.Fatal(err)
+	}
+	k, ok := known["new.flac"]
+	if !ok || k.ID != id || k.Missing || k.MTime != 0 {
+		t.Errorf("moved row = %+v (found %v), want id %s, present, mtime 0", k, ok, id)
+	}
+	if _, ok := known["old.flac"]; ok {
+		t.Error("the old path is still indexed")
+	}
+	if l, err := d.Locate(id, "gdrive"); err != nil || l.CloudID != "" {
+		t.Errorf("location after the move = %+v (%v), want none", l, err)
+	}
+}
+
 func TestPlaylistSurvivesReindexing(t *testing.T) {
 	d, f := testDB(t, "a.flac", "b.flac")
 	id, err := d.CreatePlaylist("P")
