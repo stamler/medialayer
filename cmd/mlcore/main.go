@@ -301,6 +301,18 @@ func MLMovePlaylistItems(id, positionsJSON *C.char, before C.int) *C.char {
 	return errStr(c.MovePlaylistItems(C.GoString(id), positions, int(before)))
 }
 
+// MLRemoveMissingFromPlaylist removes the items whose file is missing
+// from the library, which the app hides.
+//
+//export MLRemoveMissingFromPlaylist
+func MLRemoveMissingFromPlaylist(id *C.char) *C.char {
+	c, err := get()
+	if err != nil {
+		return errStr(err)
+	}
+	return errStr(c.RemoveMissingFromPlaylist(C.GoString(id)))
+}
+
 // MLFree frees a string returned by any ML function.
 //
 //export MLFree
