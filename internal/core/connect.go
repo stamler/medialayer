@@ -189,6 +189,7 @@ func (c *Core) SetFolder(folder string) error {
 		c.settings.PrimaryRemote, c.settings.PrimaryID = "", "" // picked in the first account
 		c.settings.Picked = true                                // the first sync checks for a promoted primary
 		c.mirrors = nil
+		c.primaryFull = false
 		c.fsys = nil
 		if err := c.saveSettings(); err != nil {
 			c.mu.Unlock()

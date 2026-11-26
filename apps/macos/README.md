@@ -135,6 +135,9 @@ Known limits:
   needed.
 - Switching between Songs and a playlist resets the table's scroll
   position.
+- After a restore, a carried playlist that you edit before indexing
+  ends keeps your version: songs the restored index didn't list yet
+  aren't added back to it.
 
 ## Now Playing and media keys
 
