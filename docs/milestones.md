@@ -26,8 +26,9 @@ Open the app, connect one or more clouds, pick the music folder, and choose
 the primary. No command line.
 
 - Google Drive signs in through MediaLayer's own OAuth client (users never
-  create client IDs). Proton uses account sign-in as rclone does; SMB uses a
-  username and password; iCloud Drive on Apple devices needs nothing.
+  create client IDs). Proton signs in with the account's password (and
+  2FA code), through rclone's backend, keeping only the session; SMB uses
+  a username and password; iCloud Drive on Apple devices needs nothing.
 - If the folder already has a `.medialayer` repository, the library appears
   in seconds. Otherwise indexing starts automatically, on any device,
   iPhone included, and resumes if interrupted.
@@ -93,9 +94,18 @@ and work on it continues after the AppKit table.
    (the smaller of 5% and 30 files over a rolling 24 hours, with tag
    edits told apart by audio hashes: decoded samples for FLAC and ALAC,
    audio bytes for MP3 and AAC, made by a background pass over every
-   track); Proton
-   and SMB sources come next. How it
-   works now: [sync.md](sync.md).
+   track). Proton Drive works as a secondary, signing in with the
+   account's password and 2FA code and keeping only the session; it
+   can't be made the primary yet, and one Proton account is connected at
+   a time. SMB comes next. How it works now: [sync.md](sync.md).
+
+   An idea for SMB, to be worked out: a small helper installed on the
+   machine that serves the share pre-generates the library there, all of
+   it or the slow parts (the index from file headers, art packs, perhaps
+   audio hashes), reading files at disk speed instead of over the
+   network. Onboarding a large SMB library would then take a fraction of
+   the time, and the helper might also do some rudimentary sync, such as
+   noticing changes on the share as they happen.
 5. **macOS desktop features.** Menu bar control, cache cap with offline
    albums, write-mode toggle, the optional Tauon mount, a notarized build
    with Sparkle updates.

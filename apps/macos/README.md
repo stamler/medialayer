@@ -38,6 +38,15 @@ The app uses MediaLayer's own Google OAuth client, read for now from
 It asks for full Drive access, because it writes `.medialayer` into the
 music folder.
 
+## Proton Drive
+
+Add Source can add a folder on Proton Drive as a secondary. Sign in with
+the Proton username and password; the app asks for a 2FA code or the
+mailbox password if the account uses one. The password isn't kept, only
+the session Proton returns (which can unlock the account's files until it
+ends), so sign in again when Proton ends it.
+A Proton folder can't be made the primary yet.
+
 ## Files
 
 Everything local lives in `~/Library/Application Support/MediaLayer` and

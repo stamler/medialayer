@@ -155,9 +155,15 @@ times differ are checksums compared, and the provider's checksum comes
 from the listing too (Drive's MD5). Nothing is downloaded to compare. A
 local secondary with a differing time is read from its own disk.
 
-Paths are matched in Unicode NFC, and on local disks also ignoring case,
-so names an HFS+ disk keeps decomposed, or a case-only rename, don't
-churn.
+Paths are matched in Unicode NFC, and on local disks and Proton Drive
+also ignoring case, so names an HFS+ disk keeps decomposed, or a
+case-only rename, don't churn.
+
+On Proton Drive, which keeps SHA-1 and can't change a file's
+modification time after its upload, a file whose time alone differs is
+the same file when its size and SHA-1 match, rather than one to upload
+again. The `.medialayer` files are compared by SHA-1 there too, where
+Drive and local disks use MD5.
 
 The result is a list of copies (missing on the secondary), replacements
 (different on the secondary, because the primary changed or the file was
@@ -497,6 +503,51 @@ become synced, and you can't switch back until it has space.
 - A sync leaves a secondary alone when its `repo.json` names another
   primary under the same generation, or when it is the primary.
 
+## Proton Drive
+
+A folder on Proton Drive can be a secondary, with the same rules as a
+Google Drive one. Add Source signs in with the Proton username and
+password, then a 2FA code or the mailbox password if the account uses
+one. The password goes to Proton only: the core keeps the session Proton
+returns, in its own rclone config. That session includes the salted key
+password that unlocks the account's keys, so the config file can
+decrypt the account's Drive until Proton ends the session (even after a
+password change). Moving it to the Keychain is still to do.
+
+rclone's backend clears a saved session whenever opening with it fails,
+offline or cancelled as much as when Proton ended it, and then signs in
+with the password, which MediaLayer doesn't keep. So the core never lets
+it clear the session: a failed open says the sign-in may have ended, and
+works again once Proton can be reached. If Proton really ended the
+session, Add Source, "Proton Drive, sign in again" fixes it.
+
+- **Secondary only.** Make Primary is refused for a Proton folder for
+  now. A Proton primary would need indexing, streaming and the sync lock
+  checked against its encrypted blocks and slower API first.
+- **One account at a time.** rclone's Proton backend keeps the config
+  that a renewed session is saved to in a package variable, set by
+  whichever Proton remote was opened last. With two accounts open at
+  once (a sync to one while browsing the other), one account's session
+  could be saved under the other's remote. Signing in to a different
+  account replaces the connected one only while the library doesn't use
+  it. Fixing this upstream (keeping the config per remote) would lift
+  the limit.
+- **Case.** Proton isn't known to tell names apart by case alone, so
+  paths are matched ignoring case, as on local disks: of two primary
+  paths that differ only by case, neither is kept there.
+- **One session, several clients.** Each Proton folder a sync opens,
+  and the folder picker, is a client of its own on the one session.
+  When the access token expires, the first to renew it changes the
+  refresh token, and another that tries to renew with the old one is
+  refused for the rest of that sync (the session in the config stays
+  good, so the next sync works). Two Proton secondaries in one account,
+  or browsing Proton during a sync to it, can hit this. Sharing one
+  client per account would fix it.
+- Signing in to another account, or again, doesn't log the old session
+  out at Proton; it ends there on its own.
+- Unfinished uploads leave drafts on Proton. MediaLayer is the only
+  writer of its folders, so it replaces its own drafts on the next try.
+
 ## Known gaps
 
 - A replacement moves the secondary's old version to trash before copying
@@ -539,3 +590,5 @@ become synced, and you can't switch back until it has space.
 - A device restoring the library reads the index from the primary only, so
   while the primary is full it gets the primary's older version.
 - The pause review shows counts, not the files.
+- Proton Drive has been built against rclone's backend but not yet run
+  against a real account by the sync tests, which use local folders.
