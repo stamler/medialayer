@@ -107,3 +107,22 @@ and work on it continues after the AppKit table.
    Picard's tag names; lookups keep to one request per second. Gate:
    retagging the test album leaves `audio_sha256` unchanged and every
    secondary matches the primary.
+8. **Tempo, pitch and beat matching.** Three playback controls on the
+   Mac and iOS players. Time stretching changes speed without changing
+   pitch; pitch shifting changes key without changing speed, in
+   semitones; beat matching brings the next track to the current track's
+   tempo and lines up their beats through a crossfade. `AVPlayer` can
+   stretch time but can't shift pitch on its own or play two tracks in
+   sync, so playback moves to `AVAudioEngine` with `AVAudioUnitTimePitch`.
+   The engine can't play the core's localhost stream as a URL, so the app
+   fetches and decodes the stream itself and handles seeking, buffering
+   and (on iOS) interruptions and route changes. Beat matching needs each
+   track's tempo and beat grid, measured from the audio when the track
+   plays (or is cached, on the Mac), with a BPM tag as a hint. These
+   measurements stay in a cache on each device rather than in the shared
+   index, so listening never republishes the index; sharing them is a
+   later choice. Indexing still never reads audio. Gate: a track stretched
+   from 0.5x to 2x keeps its pitch, a shift of plus or minus 12 semitones
+   keeps its speed, two tracks from the test library mix with beats that
+   stay aligned through the crossfade, a track still starts within about
+   2 seconds, and the Feel targets above still hold.
