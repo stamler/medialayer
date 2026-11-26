@@ -145,4 +145,64 @@ enum Core {
     static func prepare(_ fileID: String) {
         fileID.withCString { MLPrepare(UnsafeMutablePointer(mutating: $0)) }
     }
+
+    // MARK: Playlists
+    //
+    // The core writes playlists into the index and marks it changed, so the
+    // next sync publishes them. Positions count from 0 over all of a
+    // playlist's items, including ones whose file is missing; `before` is
+    // the position to insert or move in front of, -1 for the end.
+
+    private static func json<T: Encodable>(_ value: T) -> String {
+        (try? JSONEncoder().encode(value)).map { String(decoding: $0, as: UTF8.self) } ?? "[]"
+    }
+
+    /// Makes an empty playlist and returns its id.
+    static func createPlaylist(name: String) throws -> String {
+        struct Reply: Decodable { var id: String?; var error: String? }
+        let json = name.withCString { take(MLCreatePlaylist(UnsafeMutablePointer(mutating: $0))) } ?? "{}"
+        let reply = try JSONDecoder().decode(Reply.self, from: Data(json.utf8))
+        if let error = reply.error { throw CoreError(message: error) }
+        guard let id = reply.id else { throw CoreError(message: "the core returned no playlist id") }
+        return id
+    }
+
+    static func renamePlaylist(_ id: String, to name: String) throws {
+        try check(id.withCString { i in
+            name.withCString { n in
+                MLRenamePlaylist(UnsafeMutablePointer(mutating: i), UnsafeMutablePointer(mutating: n))
+            }
+        })
+    }
+
+    static func deletePlaylist(_ id: String) throws {
+        try check(id.withCString { MLDeletePlaylist(UnsafeMutablePointer(mutating: $0)) })
+    }
+
+    static func addToPlaylist(_ id: String, fileIDs: [String], before: Int = -1) throws {
+        let ids = json(fileIDs)
+        try check(id.withCString { i in
+            ids.withCString { f in
+                MLAddToPlaylist(UnsafeMutablePointer(mutating: i), UnsafeMutablePointer(mutating: f), Int32(before))
+            }
+        })
+    }
+
+    static func removeFromPlaylist(_ id: String, positions: [Int]) throws {
+        let list = json(positions)
+        try check(id.withCString { i in
+            list.withCString { p in
+                MLRemoveFromPlaylist(UnsafeMutablePointer(mutating: i), UnsafeMutablePointer(mutating: p))
+            }
+        })
+    }
+
+    static func movePlaylistItems(_ id: String, positions: [Int], before: Int) throws {
+        let list = json(positions)
+        try check(id.withCString { i in
+            list.withCString { p in
+                MLMovePlaylistItems(UnsafeMutablePointer(mutating: i), UnsafeMutablePointer(mutating: p), Int32(before))
+            }
+        })
+    }
 }
