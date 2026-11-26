@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/rclone/Proton-API-Bridge/common"
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/config"
 	"github.com/rclone/rclone/fs/rc"
@@ -123,17 +124,33 @@ func (c *Core) connectDrive(ctx context.Context, name string) error {
 	return nil
 }
 
-// ListFolders lists the folders inside dir ("" for the top of My Drive)
+// remoteConnected reports whether remote is configured and signed in.
+func remoteConnected(remote string) bool {
+	switch config.GetValue(remote, "type") {
+	case "":
+		return false
+	case "drive":
+		return config.GetValue(remote, "token") != ""
+	case protonType:
+		return protonSignedIn(remote)
+	}
+	return true
+}
+
+// ListFolders lists the folders inside dir ("" for the top of the drive)
 // on a connected remote ("" for the primary's), sorted by name, as paths
 // relative to the top.
 func (c *Core) ListFolders(ctx context.Context, remote, dir string) ([]string, error) {
 	if remote == "" {
 		remote = remoteName
 	}
-	if config.GetValue(remote, "token") == "" {
+	if !remoteConnected(remote) {
+		if config.GetValue(remote, "type") == protonType {
+			return nil, protonError(common.ErrUsernameAndPasswordRequired)
+		}
 		return nil, errors.New("not connected to Google Drive")
 	}
-	f, err := fs.NewFs(ctx, remote+":")
+	f, err := openSource(ctx, source{Remote: remote})
 	if err != nil {
 		return nil, err
 	}

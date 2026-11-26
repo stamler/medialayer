@@ -120,6 +120,12 @@ type SourceStatus struct {
 	// compares it with the index it reads to tell whether the secondary
 	// holds every track it lists.
 	Version int `json:"version,omitempty"`
+	// CaseBlind is set for a secondary whose paths sync matches ignoring
+	// case, so paths that differ only by case are not kept there.
+	CaseBlind bool `json:"case_blind,omitempty"`
+	// CantPromote says why a secondary can't be made the primary,
+	// whatever its state; "" when it can.
+	CantPromote string `json:"cant_promote,omitempty"`
 }
 
 // sourcesLocked lists the primary and the secondaries. The caller holds
@@ -136,7 +142,8 @@ func (c *Core) sourcesLocked() []SourceStatus {
 		ID: c.primaryID(), Type: source{Remote: pr}.sourceType(), Remote: pr, Folder: c.settings.Folder, Primary: true,
 	}}
 	for _, s := range c.settings.Secondaries {
-		st := SourceStatus{ID: s.ID, Type: s.sourceType(), Remote: s.Remote, Folder: s.Folder}
+		st := SourceStatus{ID: s.ID, Type: s.sourceType(), Remote: s.Remote, Folder: s.Folder,
+			CaseBlind: s.caseBlind(), CantPromote: s.cantPromote()}
 		if m := c.mirrors[s.ID]; m != nil {
 			st.State, st.Error, st.Synced = m.state, m.err, m.synced
 			if m.state == MirrorSynced {
@@ -313,7 +320,25 @@ func openSource(ctx context.Context, s source) (fs.Fs, error) {
 	if s.Remote == "" || s.Remote == localPrimary {
 		return fs.NewFs(ctx, s.Folder)
 	}
+	if s.sourceType() == protonType {
+		return openProton(ctx, s.Remote, s.Folder)
+	}
 	return fs.NewFs(ctx, s.Remote+":"+s.Folder)
+}
+
+// cantPromote says why the secondary can't be made the primary, or "".
+func (s source) cantPromote() string {
+	if s.sourceType() == protonType {
+		return "Proton Drive can't be the primary yet; it can hold a copy"
+	}
+	return ""
+}
+
+// caseBlind reports whether a secondary's paths are matched ignoring
+// case: on local disks, which may be case-blind, and on Proton Drive,
+// which isn't known to tell names apart by case alone.
+func (s source) caseBlind() bool {
+	return s.Remote == "" || s.sourceType() == protonType
 }
 
 // listing is a library folder's files outside .medialayer, by path.
@@ -741,11 +766,12 @@ func planSignature(lines []string) string {
 func (c *Core) mirror(ctx context.Context, f fs.Fs, src *listing, repo *repoRecord, version int, t target) error {
 	dst, have, s := t.dst, t.have, t.s
 	// Paths are matched in Unicode NFC, as HFS+ disks keep names
-	// decomposed and Drive composed, and on local disks also by case, as
+	// decomposed and Drive composed, and on local disks (and Proton) also
+	// ignoring case, as
 	// a case-blind disk keeps a folder's old case when the primary renames
 	// it by case only.
 	key := func(p string) string { return norm.NFC.String(p) }
-	if s.Remote == "" {
+	if s.caseBlind() {
 		key = func(p string) string { return strings.ToLower(norm.NFC.String(p)) }
 	}
 	// Paths the primary lists twice (Drive), or twice under one key, are
@@ -770,6 +796,15 @@ func (c *Core) mirror(ctx context.Context, f fs.Fs, src *listing, repo *repoReco
 	}
 	lookup := func(p string) (fs.Object, bool) { d, ok := haveKeys[key(p)]; return d, ok }
 
+	// Proton keeps a file's modification time from its upload and can't
+	// change it, so a file whose time alone differs (with the same size
+	// and SHA-1) is the same file, rather than one to upload again.
+	eqCtx := ctx
+	if s.sourceType() == protonType {
+		var ci *fs.ConfigInfo
+		eqCtx, ci = fs.AddConfig(ctx)
+		ci.NoUpdateModTime = true
+	}
 	var copies, replaces []string
 	var deletes []fs.Object
 	var lines []string
@@ -781,7 +816,7 @@ func (c *Core) mirror(ctx context.Context, f fs.Fs, src *listing, repo *repoReco
 		switch {
 		case !ok:
 			copies = append(copies, p)
-		case !operations.Equal(ctx, o, d):
+		case !operations.Equal(eqCtx, o, d):
 			replaces = append(replaces, p)
 			lines = append(lines, "R "+p)
 		}

@@ -34,7 +34,12 @@ func (c *Core) Promote(id string) error {
 	}
 	found := false
 	for _, s := range c.settings.Secondaries {
-		found = found || s.ID == id
+		if s.ID == id {
+			if why := s.cantPromote(); why != "" {
+				return errors.New(why)
+			}
+			found = true
+		}
 	}
 	if !found {
 		return fmt.Errorf("no secondary %s", id)

@@ -189,7 +189,7 @@ func (c *Core) countTracks(db *index.DB) {
 	}
 }
 
-// Connected reports whether a Google Drive remote is configured.
+// Connected reports whether the primary's cloud is connected.
 func (c *Core) Connected() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -202,7 +202,7 @@ func (c *Core) connectedLocked() bool {
 	if r == localPrimary {
 		return true
 	}
-	return config.GetValue(r, "type") != "" && config.GetValue(r, "token") != ""
+	return remoteConnected(r)
 }
 
 // libraryFs returns the rclone Fs for the library folder, opening it on

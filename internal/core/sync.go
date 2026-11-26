@@ -53,7 +53,9 @@ type Status struct {
 	// Accounts are the connected Google accounts (rclone remotes), the
 	// primary's first.
 	Accounts []string `json:"accounts"`
-	Notice   string   `json:"notice,omitempty"`
+	// ProtonAccounts are the connected Proton accounts: at most one.
+	ProtonAccounts []ProtonAccount `json:"proton_accounts"`
+	Notice         string          `json:"notice,omitempty"`
 	// AudioHashes is the background pass that hashes every track's audio,
 	// once it has counted them.
 	AudioHashes *AudioHashStatus `json:"audio_hashes,omitempty"`
@@ -73,6 +75,7 @@ func (c *Core) Status() Status {
 	s.Job.Failures = append([]string(nil), c.job.Failures...)
 	s.Sources = c.sourcesLocked()
 	s.Accounts = driveAccounts(c.primaryRemote())
+	s.ProtonAccounts = protonAccounts()
 	s.Notice = c.notice
 	if c.hash.known {
 		h := c.hash.status

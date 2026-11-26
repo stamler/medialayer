@@ -2,8 +2,6 @@ package core
 
 import (
 	"context"
-	"crypto/md5"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -539,13 +537,18 @@ func (c *Core) uploadPacks(ctx context.Context, f fs.Fs, db *index.DB) error {
 }
 
 // sameFile reports whether remote object o has the same contents as the
-// local file, by size and MD5. Without an MD5 from the remote it says no,
-// so the file is written again.
+// local file, by size and a hash the remote keeps: MD5, or else SHA-1
+// (Proton Drive). Without either it says no, so the file is written
+// again.
 func sameFile(ctx context.Context, o fs.Object, local string) bool {
 	if o.Size() != fileSize(local) {
 		return false
 	}
-	theirs, err := o.Hash(ctx, hash.MD5)
+	ht := hash.MD5
+	if !o.Fs().Hashes().Contains(ht) {
+		ht = hash.SHA1
+	}
+	theirs, err := o.Hash(ctx, ht)
 	if err != nil || theirs == "" {
 		return false
 	}
@@ -554,11 +557,11 @@ func sameFile(ctx context.Context, o fs.Object, local string) bool {
 		return false
 	}
 	defer func() { _ = in.Close() }()
-	h := md5.New()
-	if _, err := io.Copy(h, in); err != nil {
+	mine, err := hash.StreamTypes(in, hash.NewHashSet(ht))
+	if err != nil {
 		return false
 	}
-	return hex.EncodeToString(h.Sum(nil)) == theirs
+	return strings.EqualFold(mine[ht], theirs)
 }
 
 // fileSize is a local file's size, or -1.

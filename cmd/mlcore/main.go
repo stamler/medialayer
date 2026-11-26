@@ -7,7 +7,8 @@
 // strings; every returned string is owned by the caller, who frees it
 // with MLFree. A NULL return means success where a function returns an
 // error message. The core runs inside the app; Swift calls the blocking
-// functions (MLConnectGoogleDrive, MLAddGoogleAccount, MLListFolders) off the main thread.
+// functions (MLConnectGoogleDrive, MLAddGoogleAccount, MLConnectProton,
+// MLListFolders) off the main thread.
 //
 // gomobile will replace this once full Xcode is part of the build.
 package main
@@ -115,9 +116,34 @@ func MLAddGoogleAccount() *C.char {
 	return jsonStr(map[string]string{"error": err.Error()})
 }
 
+// MLConnectProton signs in to Proton Drive with a username, password,
+// mailbox password and 2FA code (the last two may be empty). It blocks
+// until Proton answers and returns {"remote": "..."} or {"error": "..."},
+// with "need": "2fa" or "mailbox" when the account needs that too.
+//
+//export MLConnectProton
+func MLConnectProton(user, password, mailbox, code *C.char) *C.char {
+	c, err := get()
+	if err == nil {
+		var remote string
+		remote, err = c.ConnectProton(context.Background(), C.GoString(user), C.GoString(password), C.GoString(mailbox), C.GoString(code))
+		if err == nil {
+			return jsonStr(map[string]string{"remote": remote})
+		}
+	}
+	out := map[string]string{"error": err.Error()}
+	switch {
+	case errors.Is(err, core.ErrProtonNeeds2FA):
+		out["need"] = "2fa"
+	case errors.Is(err, core.ErrProtonNeedsMailbox):
+		out["need"] = "mailbox"
+	}
+	return jsonStr(out)
+}
+
 // MLListFolders returns {"folders": [...]} or {"error": "..."} for the
-// folders inside dir ("" for the top of My Drive) on a Google account
-// ("" for the primary's).
+// folders inside dir ("" for the top of the drive) on a connected
+// account ("" for the primary's).
 //
 //export MLListFolders
 func MLListFolders(remote, dir *C.char) *C.char {
@@ -146,7 +172,7 @@ func MLSetFolder(folder *C.char) *C.char {
 	return errStr(c.SetFolder(C.GoString(folder)))
 }
 
-// MLAddSecondary adds a folder on a connected Google account (or, with
+// MLAddSecondary adds a folder on a connected account (or, with
 // an empty remote, a local folder) as a secondary and starts syncing.
 //
 //export MLAddSecondary
