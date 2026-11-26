@@ -126,9 +126,11 @@ struct FolderPicker: View {
     }
 }
 
-/// Browses the folders of a Google account and picks one.
+/// Browses the folders of a connected account and picks one.
 struct DriveFolderPicker: View {
     var remote = "" // "" for the primary's account
+    /// The name of the top of the drive.
+    var rootName = "My Drive"
     let title: String
     let message: String
     var onCancel: (() -> Void)?
@@ -138,7 +140,7 @@ struct DriveFolderPicker: View {
     let onPick: (String) throws -> Void
 
     @State private var newName = ""
-    @State private var path: [String] = [] // folder names from the top of My Drive
+    @State private var path: [String] = [] // folder names from the top of the drive
     @State private var folders: [String] = []
     @State private var loading = false
     @State private var error: String?
@@ -151,7 +153,7 @@ struct DriveFolderPicker: View {
             Text(title).font(.title)
             Text(message).foregroundStyle(.secondary)
             HStack(spacing: 4) {
-                Button("My Drive") { path = [] }.buttonStyle(.link)
+                Button(rootName) { path = [] }.buttonStyle(.link)
                 ForEach(path.indices, id: \.self) { i in
                     Image(systemName: "chevron.right").foregroundStyle(.tertiary)
                     Button(path[i]) { path = Array(path[...i]) }.buttonStyle(.link)
@@ -169,7 +171,7 @@ struct DriveFolderPicker: View {
             if let error { Text(error).foregroundStyle(.red).textSelection(.enabled) }
             if allowNew {
                 HStack {
-                    TextField("New folder in “\(path.last ?? "My Drive")”", text: $newName)
+                    TextField("New folder in “\(path.last ?? rootName)”", text: $newName)
                         .textFieldStyle(.roundedBorder)
                     Button("Use New Folder") {
                         do { try onPick(path.isEmpty ? trimmedName : current + "/" + trimmedName) }
@@ -181,7 +183,7 @@ struct DriveFolderPicker: View {
             HStack {
                 if let onCancel { Button("Cancel", action: onCancel).keyboardShortcut(.cancelAction) }
                 Spacer()
-                Button("Use “\(path.last ?? "My Drive")”") {
+                Button("Use “\(path.last ?? rootName)”") {
                     do { try onPick(current) } catch { self.error = error.localizedDescription }
                 }
                 .buttonStyle(.borderedProminent)
@@ -808,7 +810,8 @@ struct SourcesBar: View {
             }
             if !source.primary {
                 Button("Make Primary…") { promoting = source }
-                    .disabled(source.state != "synced" || core.status.isBusy)
+                    .disabled(source.state != "synced" || core.status.isBusy || source.cantPromote != nil)
+                    .help(source.cantPromote ?? "")
                 Button("Stop Syncing to “\(source.name)”") {
                     do { try model.removeSecondary(source.id) } catch { self.error = error.localizedDescription }
                 }
@@ -920,29 +923,42 @@ struct DriveGlyph: Shape {
     }
 }
 
-/// Adds a secondary: a folder on a Google account or on this Mac, which
-/// then gets a copy of the library and follows the primary.
+/// Adds a secondary: a folder on a Google or Proton account or on this
+/// Mac, which then gets a copy of the library and follows the primary.
 struct AddSourceSheet: View {
     @EnvironmentObject var model: AppModel
     @EnvironmentObject var core: StatusModel
     @Environment(\.dismiss) private var dismiss
     @State private var account: String? // the remote whose folders to browse
+    /// Signing in to Proton, with this username filled in.
+    @State private var protonSignIn: String?
+    /// The account being browsed is a Proton one.
+    @State private var browsingProton = false
     @State private var working = false
     @State private var error: String?
 
     var body: some View {
         if let account {
+            let proton = browsingProton || (core.status.protonAccounts?.contains { $0.remote == account } ?? false)
             DriveFolderPicker(
                 remote: account,
+                rootName: proton ? "Proton Drive" : "My Drive",
                 title: "Pick the folder for the copy",
                 message: "MediaLayer copies the library here and keeps it in step with the primary, one way. Files it removes or replaces go to the folder's .medialayer/trash for 30 days.",
-                onCancel: { self.account = nil },
+                onCancel: { self.account = nil; browsingProton = false },
                 allowNew: true
             ) { folder in
                 try model.addSecondary(remote: account, folder: folder)
                 dismiss()
             }
             .frame(width: 560, height: 480)
+        } else if let user = protonSignIn {
+            ProtonSignInView(user: user, onCancel: { protonSignIn = nil }) { remote in
+                protonSignIn = nil
+                browsingProton = true
+                account = remote
+            }
+            .frame(width: 460)
         } else {
             chooser.frame(width: 460)
         }
@@ -972,6 +988,27 @@ struct AddSourceSheet: View {
                 }
             }
             .disabled(working)
+            ForEach(core.status.protonAccounts ?? [], id: \.self) { a in
+                option(icon: "protondrive", title: "Proton Drive (\(a.user))",
+                       detail: a.signedIn ? "A folder in that Proton account" : "Signed out: sign in again to use it") {
+                    if a.signedIn {
+                        browsingProton = true
+                        account = a.remote
+                    } else {
+                        protonSignIn = a.user
+                    }
+                }
+            }
+            if let a = core.status.protonAccounts?.first {
+                option(icon: "protondrive", title: "Proton Drive, sign in again",
+                       detail: "If its folders can't be opened, or to switch to another Proton account") {
+                    protonSignIn = a.user
+                }
+            } else {
+                option(icon: "protondrive", title: "Proton Drive", detail: "Sign in with your Proton account") {
+                    protonSignIn = ""
+                }
+            }
             option(icon: "local", title: "A folder on this Mac or a disk", detail: "Such as an external drive") {
                 pickLocal()
             }
@@ -1015,6 +1052,84 @@ struct AddSourceSheet: View {
             try model.addSecondary(remote: "", folder: url.path)
             dismiss()
         } catch { self.error = error.localizedDescription }
+    }
+}
+
+/// Signs in to Proton Drive. The password is sent to Proton and not
+/// kept: MediaLayer keeps only the session. When Proton ends it, the
+/// sync's error says so, and the user signs in again here from Add
+/// Source. A 2FA code or a mailbox password is asked for when the account
+/// needs one.
+struct ProtonSignInView: View {
+    @State var user: String
+    let onCancel: () -> Void
+    let onSignedIn: (String) -> Void
+
+    @State private var password = ""
+    @State private var mailbox = ""
+    @State private var code = ""
+    @State private var askCode = false
+    @State private var askMailbox = false
+    @State private var working = false
+    @State private var error: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Sign in to Proton Drive").font(.title2)
+            Text("Your password goes to Proton only. MediaLayer keeps the session Proton gives it, which unlocks your files until Proton ends it. One Proton account can be connected at a time.")
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Form {
+                TextField("Username or email", text: $user)
+                    .textContentType(.username)
+                SecureField("Password", text: $password)
+                    .textContentType(.password)
+                if askMailbox {
+                    SecureField("Mailbox password", text: $mailbox)
+                }
+                if askCode {
+                    TextField("2FA code", text: $code)
+                        .textContentType(.oneTimeCode)
+                }
+            }
+            if working { Text("Signing in…").foregroundStyle(.secondary) }
+            if let error { Text(error).foregroundStyle(.red).textSelection(.enabled) }
+            HStack {
+                Button("Cancel", action: onCancel).keyboardShortcut(.cancelAction)
+                Spacer()
+                Button("Sign In", action: signIn)
+                    .buttonStyle(.borderedProminent)
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(working || user.trimmingCharacters(in: .whitespaces).isEmpty || password.isEmpty
+                              || (askCode && code.isEmpty) || (askMailbox && mailbox.isEmpty))
+            }
+        }
+        .padding(24)
+    }
+
+    private func signIn() {
+        working = true
+        error = nil
+        Task {
+            do {
+                let remote = try await Core.connectProton(user: user, password: password, mailbox: mailbox, code: code)
+                working = false
+                onSignedIn(remote)
+            } catch let e as Core.ProtonSignInError {
+                working = false
+                error = e.message
+                code = "" // each try signs in afresh, and a code is good once
+                switch e.need {
+                case .twoFA: askCode = true
+                case .mailbox: askMailbox = true
+                case nil: break
+                }
+            } catch {
+                working = false
+                code = ""
+                self.error = error.localizedDescription
+            }
+        }
     }
 }
 

@@ -32,6 +32,10 @@ struct CoreStatus: Decodable, Equatable {
         var error: String?
         var synced: String?
         var version: Int? // the index version a synced secondary matches
+        /// Sync matches this secondary's paths ignoring case.
+        var caseBlind: Bool?
+        /// Why this secondary can't be made the primary, if it can't.
+        var cantPromote: String?
 
         var name: String { (folder as NSString).lastPathComponent }
     }
@@ -46,10 +50,18 @@ struct CoreStatus: Decodable, Equatable {
     var job = Job()
     var sources: [Source]? = []
     var accounts: [String]? = []
+    var protonAccounts: [ProtonAccount]? = []
     var notice: String?
     var error: String?
     /// The background audio-hash pass's progress.
     var audioHashes: AudioHashes?
+
+    /// A connected Proton account: at most one.
+    struct ProtonAccount: Decodable, Equatable, Hashable {
+        var remote: String
+        var user: String
+        var signedIn = false // false once Proton ended the session
+    }
 
     struct AudioHashes: Decodable, Equatable {
         var running = false
@@ -110,7 +122,41 @@ enum Core {
         }.value
     }
 
-    /// Lists folders on a Google account ("" for the primary's).
+    /// What a Proton sign-in asks for next, besides the username and
+    /// password.
+    enum ProtonNeed: String { case twoFA = "2fa", mailbox }
+
+    struct ProtonSignInError: LocalizedError {
+        let message: String
+        let need: ProtonNeed?
+        var errorDescription: String? { message }
+    }
+
+    /// Signs in to Proton Drive; returns the remote's name. Throws
+    /// ProtonSignInError, whose `need` says when a 2FA code or the
+    /// mailbox password is needed too.
+    static func connectProton(user: String, password: String, mailbox: String, code: String) async throws -> String {
+        struct Reply: Decodable { var remote: String?; var error: String?; var need: String? }
+        return try await Task.detached {
+            let json = user.withCString { u in
+                password.withCString { p in
+                    mailbox.withCString { m in
+                        code.withCString { c in
+                            take(MLConnectProton(UnsafeMutablePointer(mutating: u), UnsafeMutablePointer(mutating: p),
+                                                 UnsafeMutablePointer(mutating: m), UnsafeMutablePointer(mutating: c)))
+                        }
+                    }
+                }
+            } ?? "{}"
+            let reply = try JSONDecoder().decode(Reply.self, from: Data(json.utf8))
+            if let error = reply.error {
+                throw ProtonSignInError(message: error, need: reply.need.flatMap(ProtonNeed.init(rawValue:)))
+            }
+            return reply.remote ?? ""
+        }.value
+    }
+
+    /// Lists folders on a connected account ("" for the primary's).
     static func listFolders(remote: String = "", in dir: String) async throws -> [String] {
         struct Reply: Decodable { var folders: [String]?; var error: String? }
         return try await Task.detached {
@@ -129,7 +175,7 @@ enum Core {
         try check(folder.withCString { MLSetFolder(UnsafeMutablePointer(mutating: $0)) })
     }
 
-    /// Adds a secondary: a folder on a Google account, or with an empty
+    /// Adds a secondary: a folder on a connected account, or with an empty
     /// remote, a local folder.
     static func addSecondary(remote: String, folder: String) throws {
         try check(remote.withCString { r in

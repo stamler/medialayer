@@ -15,7 +15,8 @@ import SwiftUI
 //   files have changed since: a playlist edit alone changes no file) in
 //   the same transaction as the tracks. When they match, the secondary holds every listed track, except the paths that
 //   sync leaves alone (docs/sync.md, Known gaps): paths that collide in
-//   Unicode NFC, and on local folders also ignoring case. CloudIndex finds
+//   Unicode NFC, and on local folders and Proton also ignoring case
+//   (the source's caseBlind). CloudIndex finds
 //   those among the indexed paths.
 // - Any other secondary (copying, paused, failed, synced to an older
 //   version, or not yet synced since the app opened) may lack some
@@ -80,7 +81,7 @@ struct CloudState: Equatable {
             let current = s.state == "synced" && index.version.version > 0
                 && s.version == index.version.version && index.version.filesMatchVersion
             if current {
-                let clash = (s.remote.isEmpty ? index.foldedClashes : index.clashes).contains(track.id)
+                let clash = ((s.caseBlind ?? s.remote.isEmpty) ? index.foldedClashes : index.clashes).contains(track.id)
                 if !clash { return TrackCloud(source: s, holds: true, help: "On \(place), up to date") }
                 return TrackCloud(source: s, holds: false,
                                   help: "Not kept on \(place): its path can't be told apart there from another track's")
