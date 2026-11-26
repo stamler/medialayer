@@ -111,7 +111,7 @@ struct SongsTable: View {
             ForEach(tracks) { t in
                 TableRow(t).draggable(TrackDrag(ids: dragged(t), playlist: model.selectedPlaylistID))
             }
-            .dropDestination(for: TrackDrag.self) { drops, offset in
+            .dropDestination(for: TrackDrag.self) { offset, drops in
                 model.dropOnTable(drops, at: offset, rows: tracks)
             }
         }

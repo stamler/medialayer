@@ -97,13 +97,11 @@ final class NowPlaying {
 
     private func loadArtwork(_ track: Track) {
         guard let sha = track.artSHA else { return }
-        // ArtCache calls back on the main thread, at once when it has the image.
-        art.load(sha, size: Self.artSize) { [weak self] image in
-            MainActor.assumeIsolated {
-                guard let self, let image, self.trackID == track.id else { return }
-                self.info[MPMediaItemPropertyArtwork] = Self.artwork(image)
-                self.publish(elapsed: self.player.position)
-            }
+        Task { [weak self, art] in
+            let image = await art.image(sha, size: Self.artSize)
+            guard let self, let image, self.trackID == track.id else { return }
+            self.info[MPMediaItemPropertyArtwork] = Self.artwork(image)
+            self.publish(elapsed: self.player.position)
         }
     }
 
