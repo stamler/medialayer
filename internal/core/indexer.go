@@ -51,6 +51,8 @@ func mediaFormat(p string) string {
 		return "m4a" // ALAC or AAC in MP4
 	case ".caf":
 		return "caf" // ALAC in Apple's Core Audio Format
+	case ".oga", ".ogg":
+		return "oga" // FLAC in Ogg; Vorbis and Opus are skipped
 	}
 	return ""
 }
@@ -540,6 +542,8 @@ func indexFile(ctx context.Context, db *index.DB, pack *artPack, o fs.Object) er
 		info, err = media.ParseMP4(fetch, o.Size())
 	case "caf":
 		info, err = media.ParseCAF(fetch, o.Size())
+	case "oga":
+		info, err = media.ParseOggFLAC(fetch, o.Size(), maxHeader)
 	}
 	if err != nil {
 		return err

@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"image"
 	"image/color"
@@ -14,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	_ "github.com/rclone/rclone/backend/local"
@@ -605,5 +607,75 @@ func TestSquarish(t *testing.T) {
 		if got := squarish(tc.w, tc.h); got != tc.want {
 			t.Errorf("squarish(%d, %d) = %v", tc.w, tc.h, got)
 		}
+	}
+}
+
+func TestStreamServesDecodedFLAC(t *testing.T) {
+	ctx := context.Background()
+	lib := writeLibrary(t, nil)
+	hashes := map[string]string{}
+	list, err := os.ReadFile(filepath.Join("..", "media", "testdata", "audio-hashes.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(list)), "\n") {
+		name, sum, _ := strings.Cut(line, " ")
+		hashes[name] = sum
+	}
+	for _, name := range []string{"flac32.flac", "flac16.oga", "flac24-51.ogg"} {
+		b, err := os.ReadFile(filepath.Join("..", "media", "testdata", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		write(t, filepath.Join(lib, "D", name), b)
+	}
+	c := newTestCore(t, lib)
+	if err := c.index(ctx, c.fsys); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"flac32.flac", "flac16.oga", "flac24-51.ogg"} {
+		t.Run(name, func(t *testing.T) {
+			var id string
+			if err := c.currentDB().SQL().QueryRow(`SELECT id FROM file WHERE path = ?`, "D/"+name).Scan(&id); err != nil {
+				t.Fatal(err)
+			}
+			url := c.Status().StreamBase + id + ".wav"
+			get := func(rng string) (*http.Response, []byte) {
+				req, _ := http.NewRequest("GET", url, nil)
+				if rng != "" {
+					req.Header.Set("Range", rng)
+				}
+				resp, err := http.DefaultClient.Do(req)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer resp.Body.Close()
+				b, _ := io.ReadAll(resp.Body)
+				return resp, b
+			}
+			resp, wav := get("")
+			if resp.StatusCode != 200 || resp.Header.Get("Content-Type") != "audio/wav" || len(wav) < wavHeaderLen ||
+				string(wav[:4]) != "RIFF" || string(wav[60:64]) != "data" {
+				t.Fatalf("status %d, type %q, %d bytes", resp.StatusCode, resp.Header.Get("Content-Type"), len(wav))
+			}
+			rate, chans := binary.LittleEndian.Uint32(wav[24:]), wav[22]
+			width := int(binary.LittleEndian.Uint16(wav[34:])) / 8
+			if int(binary.LittleEndian.Uint32(wav[64:])) != len(wav)-wavHeaderLen {
+				t.Fatalf("data chunk of %d bytes in %d", binary.LittleEndian.Uint32(wav[64:]), len(wav))
+			}
+			// The samples are the audio hash's, shifted to fill their bytes.
+			data, bits := wav[wavHeaderLen:], byte(width*8) // whole-byte depths: no shift
+			head := append([]byte("pcm\x00"), 0, 0, 0, 0, chans, bits)
+			binary.LittleEndian.PutUint32(head[4:], rate)
+			if sum := sha256.Sum256(append(head, data...)); hex.EncodeToString(sum[:]) != hashes[name] {
+				t.Errorf("decoded audio hashes %x, want %s", sum, hashes[name])
+			}
+			for _, rng := range [][2]int{{0, 1}, {0, 99}, {50, 200}, {68, 68 + 4095}, {1001, 50000}, {len(wav) / 2, len(wav) - 1}, {len(wav) - 7, len(wav) - 1}} {
+				resp, body := get(fmt.Sprintf("bytes=%d-%d", rng[0], rng[1]))
+				if resp.StatusCode != 206 || !bytes.Equal(body, wav[rng[0]:rng[1]+1]) {
+					t.Errorf("bytes=%d-%d: status %d, %d bytes", rng[0], rng[1], resp.StatusCode, len(body))
+				}
+			}
+		})
 	}
 }

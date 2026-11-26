@@ -22,7 +22,8 @@ import (
 // cloud, streamed straight through: the player asks for the rest of the
 // file once, and the cloud sends it as it plays.
 //
-// URLs are http://127.0.0.1:<port>/<token>/<file id>.<format>. The random
+// URLs are http://127.0.0.1:<port>/<token>/<file id>.<format>, or
+// <file id>.wav for FLAC decoded (see pcmstream.go). The random
 // token and the Host check keep other local processes and web pages (DNS
 // rebinding) from reading the library.
 type streamServer struct {
@@ -35,6 +36,7 @@ type streamServer struct {
 	mu     sync.Mutex
 	objs   map[string]fs.Object   // by file id: avoids a lookup per request
 	heads  map[string]*headStream // parked streams by file id
+	pcm    map[string]*pcmSource  // FLAC headers for decoded streams, by file id
 	closed bool
 
 	// prepares bounds background lookups; preparing holds the ids in flight.
@@ -62,6 +64,7 @@ func startStreamServer(c *Core) (*streamServer, error) {
 		host:      ln.Addr().String(),
 		objs:      map[string]fs.Object{},
 		heads:     map[string]*headStream{},
+		pcm:       map[string]*pcmSource{},
 		prepares:  make(chan struct{}, 2),
 		preparing: map[string]bool{},
 	}
@@ -122,7 +125,7 @@ func (s *streamServer) prepare(id string) {
 }
 
 // contentTypes maps index formats to MIME types.
-var contentTypes = map[string]string{"flac": "audio/flac", "mp3": "audio/mpeg", "m4a": "audio/mp4", "caf": "audio/x-caf"}
+var contentTypes = map[string]string{"flac": "audio/flac", "mp3": "audio/mpeg", "m4a": "audio/mp4", "caf": "audio/x-caf", "oga": "audio/ogg"}
 
 func (s *streamServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Host != s.host {
@@ -138,11 +141,15 @@ func (s *streamServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	id, _, _ := strings.Cut(name, ".")
+	id, ext, _ := strings.Cut(name, ".")
 	o, format, err := s.object(r.Context(), id)
 	if err != nil {
 		fs.Errorf(nil, "stream %s: %v", id, err)
 		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	if ext == "wav" {
+		s.servePCM(w, r, id, o, format)
 		return
 	}
 	size := o.Size()

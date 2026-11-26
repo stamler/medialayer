@@ -50,7 +50,10 @@ type FLACDecoder struct {
 	// Samples holds the last frame's decoded samples, by channel; it is
 	// reused by the next frame.
 	Samples [][]int64
-	resid   []int64
+	// First is the number of the last frame's first sample, as its header
+	// gives it.
+	First uint64
+	resid []int64
 }
 
 // NewFLACDecoder reads a native FLAC stream's start: any ID3v2 tags, the
@@ -193,35 +196,48 @@ func (d *FLACDecoder) Next() (int, error) {
 }
 
 func (d *FLACDecoder) frame() (int, error) {
+	blockSize, chCode, bps, err := d.header()
+	if err != nil {
+		return 0, err
+	}
+	return d.body(blockSize, chCode, bps)
+}
+
+// header reads a frame header after its sync code, through its CRC-8,
+// and checks it against the stream.
+func (d *FLACDecoder) header() (blockSize int, chCode uint64, bps uint8, err error) {
 	br, info := d.br, d.Info
 	h, err := br.bits(17) // blocking strategy, block size, rate, channels, sample size, reserved
 	if err != nil {
-		return 0, err
+		return 0, 0, 0, err
 	}
 	bsCode, rateCode, chCode, sizeCode := h>>12&15, h>>8&15, h>>4&15, h>>1&7
 	if h&1 != 0 || sizeCode == 3 || rateCode == 15 || chCode > 10 || bsCode == 0 {
-		return 0, errCorrupt
+		return 0, 0, 0, errCorrupt
 	}
-	// The frame or sample number, UTF-8 coded; only its length matters.
+	// The frame number (fixed block size) or sample number (variable),
+	// coded like UTF-8.
 	first, err := br.bits(8)
 	if err != nil {
-		return 0, err
+		return 0, 0, 0, err
 	}
 	extra := 0
 	for m := uint64(0x80); first&m != 0 && extra < 7; m >>= 1 {
 		extra++
 	}
 	if extra == 1 || extra == 7 && first != 0xfe {
-		return 0, errCorrupt
+		return 0, 0, 0, errCorrupt
 	}
+	num := first & (0x7f >> extra)
 	for i := 1; i < extra; i++ {
 		if c, err := br.bits(8); err != nil {
-			return 0, err
+			return 0, 0, 0, err
 		} else if c>>6 != 2 {
-			return 0, errCorrupt
+			return 0, 0, 0, errCorrupt
+		} else {
+			num = num<<6 | c&0x3f
 		}
 	}
-	var blockSize int
 	switch {
 	case bsCode == 1:
 		blockSize = 192
@@ -230,13 +246,13 @@ func (d *FLACDecoder) frame() (int, error) {
 	case bsCode == 6:
 		v, err := br.bits(8)
 		if err != nil {
-			return 0, err
+			return 0, 0, 0, err
 		}
 		blockSize = int(v) + 1
 	case bsCode == 7:
 		v, err := br.bits(16)
 		if err != nil {
-			return 0, err
+			return 0, 0, 0, err
 		}
 		blockSize = int(v) + 1
 	default:
@@ -250,20 +266,20 @@ func (d *FLACDecoder) frame() (int, error) {
 	case 12:
 		v, err := br.bits(8)
 		if err != nil {
-			return 0, err
+			return 0, 0, 0, err
 		}
 		rate = uint32(v) * 1000
 	default:
 		v, err := br.bits(16)
 		if err != nil {
-			return 0, err
+			return 0, 0, 0, err
 		}
 		rate = uint32(v)
 		if rateCode == 14 {
 			rate *= 10
 		}
 	}
-	bps := info.BitsPerSample
+	bps = info.BitsPerSample
 	if sizeCode != 0 {
 		bps = [...]uint8{0, 8, 12, 0, 16, 20, 24, 32}[sizeCode]
 	}
@@ -273,18 +289,36 @@ func (d *FLACDecoder) frame() (int, error) {
 	}
 	headerCRC := br.crc8
 	if c, err := br.bits(8); err != nil {
-		return 0, err
+		return 0, 0, 0, err
 	} else if byte(c) != headerCRC {
-		return 0, errors.New("frame header CRC-8 mismatch")
+		return 0, 0, 0, errors.New("frame header CRC-8 mismatch")
 	}
 	if rate != info.SampleRate || bps != info.BitsPerSample || channels != int(info.Channels) {
-		return 0, fmt.Errorf("frame of %d channels, %d bits at %d Hz in a stream of %d, %d at %d: %w",
+		return 0, 0, 0, fmt.Errorf("frame of %d channels, %d bits at %d Hz in a stream of %d, %d at %d: %w",
 			channels, bps, rate, info.Channels, info.BitsPerSample, info.SampleRate, ErrAudioMismatch)
 	}
 	if blockSize > 65535 {
-		return 0, errCorrupt
+		return 0, 0, 0, errCorrupt
 	}
 
+	d.First = num
+	if h>>16 == 0 { // a frame number: times the fixed block size
+		fixed := uint64(blockSize)
+		if info.MinBlock == info.MaxBlock && info.MaxBlock > 0 {
+			fixed = uint64(info.MaxBlock)
+		}
+		d.First = num * fixed
+	}
+	return blockSize, chCode, bps, nil
+}
+
+// body decodes a frame's subframes and checks its CRC-16.
+func (d *FLACDecoder) body(blockSize int, chCode uint64, bps uint8) (int, error) {
+	br := d.br
+	channels := int(chCode) + 1
+	if chCode >= 8 {
+		channels = 2
+	}
 	for len(d.Samples) < channels {
 		d.Samples = append(d.Samples, nil)
 	}

@@ -4,7 +4,7 @@ import "errors"
 
 // Info is what MediaLayer indexes about one audio file.
 type Info struct {
-	Format     string // "flac", "mp3", "m4a" or "caf"
+	Format     string // "flac", "mp3", "m4a", "caf" or "oga"
 	DurationMS int64  // 0 if unknown
 	SampleRate int    // 0 if unknown
 	BitDepth   int    // 0 if unknown or not meaningful (lossy formats)

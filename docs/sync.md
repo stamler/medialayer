@@ -208,8 +208,10 @@ leaves it as it was:
   FLAC's own MD5 uses). So a FLAC file and an ALAC file of the same audio
   hash the same. Every sample must fit the bits per sample; a file that
   fails to decode is damaged and gets no hash.
-  - **FLAC** (`internal/media/flacdec.go`, hash in `flacpcm.go`):
-    MediaLayer's own decoder, for every bit depth FLAC allows (4 to 32).
+  - **FLAC**, native or in Ogg (`internal/media/flacdec.go`, hash in
+    `flacpcm.go`, Ogg in `ogg.go`): MediaLayer's own decoder, for every
+    bit depth FLAC allows (4 to 32), so FLAC in Ogg hashes the same as
+    the native file. Ogg pages' CRCs and sequence numbers are checked too.
     It keeps samples as 64-bit integers, which also hold the 33-bit side
     channel of 32-bit stereo. Each frame's CRC-8 and CRC-16 are checked,
     and the samples are checked against the STREAMINFO block's MD5 and

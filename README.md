@@ -19,11 +19,11 @@ The macOS app ([apps/macos](apps/macos/README.md)):
   Google account.
 - **Indexing.** You pick a music folder on Drive. The core reads only the
   file headers into a SQLite index. It resumes if interrupted, and later
-  syncs index only new and changed files. It reads FLAC (`.flac`), MP3,
-  ALAC or AAC in MP4 (`.m4a`, `.mp4`, `.m4b`), and ALAC in CAF (`.caf`).
-  Files with those extensions holding other audio (PCM in CAF, say) or
-  none (a video) are skipped, not counted as failures. CAF has no cover
-  art of its own.
+  syncs index only new and changed files. It reads FLAC (`.flac`), FLAC
+  in Ogg (`.oga`, `.ogg`), MP3, ALAC or AAC in MP4 (`.m4a`, `.mp4`,
+  `.m4b`), and ALAC in CAF (`.caf`). Files with those extensions holding
+  other audio (Vorbis or Opus in Ogg, PCM in CAF) or none (a video) are
+  skipped, not counted as failures. CAF has no cover art of its own.
 - **The `.medialayer` folder.** The core saves the index (as numbered
   versions), the cover art packs and the library record (`repo.json`) in
   the music folder. A new device restores the library from it in seconds.
@@ -31,7 +31,10 @@ The macOS app ([apps/macos](apps/macos/README.md)):
   album folder (for example `cover.jpg` or `folder.jpg`).
 - **Browsing and playback.** A column browser (Genres, Composers, Artists,
   Albums) sits above the Songs table. Tracks stream from Drive through a
-  localhost endpoint, one ranged request per play or seek.
+  localhost endpoint, one ranged request per play or seek. FLAC in Ogg
+  and FLAC at depths other than 16 and 24 bits, which Apple's decoders
+  don't play, are decoded by the core and streamed as WAVE; a seek finds
+  its frame by bisecting the file, a few small reads.
 - **Search** from the toolbar (⌘F), across titles, artists, albums,
   composers and genres, ignoring case and accents.
 - **Sidebar and playlists.** A collapsible sidebar (⌃⌘S) with playlists:

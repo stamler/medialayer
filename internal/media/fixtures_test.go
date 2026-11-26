@@ -270,6 +270,9 @@ func TestDamagedFilesDontPanic(t *testing.T) {
 			case ".flac":
 				_, _ = HashFLACAudio(bytes.NewReader(b))
 				_, _, _ = FLACHeader(fetch, int64(len(b)), 1<<20)
+			case ".oga", ".ogg":
+				_, _ = HashOggFLAC(bytes.NewReader(b))
+				_, _ = ParseOggFLAC(fetch, int64(len(b)), 1<<20)
 			case ".caf":
 				_, _ = HashCAFAudio(fetch, open, int64(len(b)))
 				_, _ = ParseCAF(fetch, int64(len(b)))
@@ -343,5 +346,60 @@ func TestParseCAF(t *testing.T) {
 	fetch, _, size = fileFuncs(t, "alac16.m4a")
 	if _, err := ParseCAF(fetch, size); !errors.Is(err, ErrNotCAF) || errors.Is(err, ErrUnsupported) {
 		t.Fatalf("an MP4 file read as CAF: %v", err)
+	}
+}
+
+func TestOggFLAC(t *testing.T) {
+	n := 0
+	for name, want := range fixtureHashes(t) {
+		if ext := filepath.Ext(name); ext != ".oga" && ext != ".ogg" {
+			continue
+		}
+		n++
+		b, err := os.ReadFile(filepath.Join("testdata", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := HashOggFLAC(bytes.NewReader(b))
+		if err != nil || hex.EncodeToString(got) != want {
+			t.Errorf("%s: hash %x, %v; ffmpeg's audio gives %s", name, got, err, want)
+		}
+	}
+	if n < 2 {
+		t.Fatalf("only %d Ogg FLAC fixtures", n)
+	}
+	fetch, _, size := fileFuncs(t, "flac16.oga")
+	info, err := ParseOggFLAC(fetch, size, 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tags := map[string]string{}
+	for _, tag := range info.Tags {
+		tags[tag.Key] = tag.Value
+	}
+	// ffmpeg leaves STREAMINFO's sample count out; the last page has it.
+	if info.Format != "oga" || info.SampleRate != 44100 || info.BitDepth != 16 || info.DurationMS != 300 ||
+		tags["TITLE"] != "A Title" || tags["ARTIST"] != "An Artist" {
+		t.Errorf("flac16.oga: %+v", info)
+	}
+	b, err := os.ReadFile("testdata/flac16.oga")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A lost page is damage, not a shorter track.
+	pages := []int{}
+	for i := 0; i+4 <= len(b); i++ {
+		if string(b[i:i+4]) == "OggS" {
+			pages = append(pages, i)
+		}
+	}
+	cut := cat(b[:pages[len(pages)-3]], b[pages[len(pages)-2]:])
+	if _, err := HashOggFLAC(bytes.NewReader(cut)); err == nil {
+		t.Error("a file missing a page hashed")
+	}
+	// Opus in Ogg is not a track MediaLayer reads.
+	fetch, _, size = fileFuncs(t, "opus.ogg")
+	if _, err := ParseOggFLAC(fetch, size, 1<<20); !errors.Is(err, ErrUnsupported) {
+		t.Errorf("Opus: %v", err)
 	}
 }

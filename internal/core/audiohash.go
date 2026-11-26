@@ -156,6 +156,13 @@ func hashAudio(ctx context.Context, o fs.Object) ([]byte, error) {
 		return media.HashMP4Audio(objectFetch(ctx, o), objectOpen(ctx, o), o.Size())
 	case "caf":
 		return media.HashCAFAudio(objectFetch(ctx, o), objectOpen(ctx, o), o.Size())
+	case "oga":
+		rc, err := o.Open(ctx)
+		if err != nil {
+			return nil, err
+		}
+		defer func() { _ = rc.Close() }()
+		return media.HashOggFLAC(bufio.NewReaderSize(ctxReader{ctx, rc}, 1<<20))
 	}
 	return nil, fmt.Errorf("%s is not an audio file MediaLayer reads", path.Base(o.Remote()))
 }

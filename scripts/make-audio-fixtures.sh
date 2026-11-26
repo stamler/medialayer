@@ -29,14 +29,18 @@ ff -i src.wav -c:a alac -sample_fmt s16p -metadata title="A Title" -metadata art
 ff -i src.wav -c:a aac -b:a 96k aac.m4a
 ff -i src.wav -i cover.png -map 0 -map 1 -c:a aac -b:a 96k -c:v copy -disposition:v attached_pic \
 	-metadata title="A Title" -metadata artist="An Artist" aac-tagged.m4a
+# FLAC in Ogg, tagged, of the same audio as flac16.flac.
+ff -i src.wav -c:a flac -sample_fmt s16 -metadata title="A Title" -metadata artist="An Artist" flac16.oga
 # Remuxes, which must hash the same: AAC with its bit rates rewritten,
 # ALAC the way QuickTime stores it.
 ff -i aac.m4a -c copy -movflags faststart aac-remux.m4a
 ff -i alac16.m4a -c copy -f mov alac16-qt.m4a
-# A video, which is not a track.
+# A video and Opus in Ogg, which are not tracks.
+ff -i src.wav -c:a libopus -b:a 32k opus.ogg
 ff -f lavfi -i "color=c=blue:s=16x16:d=0.3" -i src.wav -c:v mjpeg -c:a aac -b:a 32k -shortest video.mp4
 src 0.2 96000 stereo; ff -i src.wav -c:a alac -sample_fmt s32p alac24.m4a
 src 0.1 48000 5.1; ff -i src.wav -c:a alac -sample_fmt s32p alac24-51.caf
+ff -i src.wav -c:a flac -sample_fmt s32 -bits_per_raw_sample 24 flac24-51.ogg
 src 0.2 48000 mono; ff -i src.wav -c:a alac -sample_fmt s16p alac16-mono.mp4
 # Stretches of silence, which ALAC codes as runs of zeros.
 ff -f lavfi -i "aevalsrc=if(lt(mod(t\\,0.1)\\,0.05)\\,0.2*sin(2*PI*440*t)\\,0)|0:s=44100:d=0.4" -c:a alac -sample_fmt s16p alac16-quiet.m4a
@@ -48,7 +52,7 @@ python3 -c "import struct,sys; n=2400; sys.stdout.buffer.write(b'RIFF'+struct.pa
 ff -i src.wav -c:a flac -strict experimental -ch_mode left_side -lpc_type none flac32-wrapped-side.flac
 rm -f src.wav cover.png
 : > audio-hashes.txt
-for f in *.flac *.m4a *.mp4 *.caf *.oga; do
+for f in *.flac *.m4a *.mp4 *.caf *.oga *.ogg; do
 	[ -e "$f" ] || continue
 	codec=$(ffprobe -v error -select_streams a:0 -show_entries stream=codec_name -of csv=p=0 "$f")
 	[ "$codec" = flac ] || [ "$codec" = alac ] || continue

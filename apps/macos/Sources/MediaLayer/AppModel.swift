@@ -558,6 +558,17 @@ final class PlaybackClock: ObservableObject {
 /// Plays a queue of tracks from the core's localhost stream with AVPlayer.
 @MainActor
 final class Player: ObservableObject {
+    /// The extension to ask the core's stream for. Apple's decoders play
+    /// FLAC at 16 and 24 bits but not FLAC in Ogg or at other depths, so
+    /// those come decoded, as WAVE.
+    static func streamExtension(_ t: Track) -> String {
+        switch t.format {
+        case "oga": return "wav"
+        case "flac" where t.bitDepth != 16 && t.bitDepth != 24: return "wav"
+        default: return t.format
+        }
+    }
+
     @Published private(set) var current: Track?
     /// Playing or about to: false only when paused.
     @Published private(set) var isPlaying = false
@@ -627,7 +638,7 @@ final class Player: ObservableObject {
         clock.position = 0
         started = Date()
         if queue.indices.contains(i + 1) { Core.prepare(queue[i + 1].fileID) }
-        let url = base.appendingPathComponent("\(track.fileID).\(track.format)")
+        let url = base.appendingPathComponent("\(track.fileID).\(Player.streamExtension(track))")
         let item = AVPlayerItem(url: url)
         itemObservation = item.observe(\.status) { [weak self] item, _ in
             guard item.status == .failed else { return }
