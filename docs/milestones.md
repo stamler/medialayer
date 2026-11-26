@@ -91,8 +91,9 @@ and work on it continues after the AppKit table.
    one-way sync, trash, pause, generation check and switching the primary
    (Make Primary), holds the sync lease, and counts the daily limit
    (the smaller of 5% and 30 files over a rolling 24 hours, with tag
-   edits told apart by audio hashes: decoded samples for FLAC, audio
-   bytes for MP3, made by a background pass over every track); Proton
+   edits told apart by audio hashes: decoded samples for FLAC and ALAC,
+   audio bytes for MP3 and AAC, made by a background pass over every
+   track); Proton
    and SMB sources come next. How it
    works now: [sync.md](sync.md).
 5. **macOS desktop features.** Menu bar control, cache cap with offline

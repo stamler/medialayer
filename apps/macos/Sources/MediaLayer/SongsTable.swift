@@ -928,12 +928,17 @@ enum SongColumn: String, CaseIterable, Identifiable {
     }()
 
     private static func kind(_ t: Track) -> String {
+        // Lossless files have a bit depth; an MP4 file without one is AAC.
+        let codec: String
         switch t.format {
-        case "flac" where t.bitDepth > 0 && t.sampleRate > 0:
-            return "FLAC \(t.bitDepth)/\(t.sampleRate / 1000)"
+        case "flac", "oga": codec = "FLAC"
+        case "m4a": codec = t.bitDepth > 0 ? "ALAC" : "AAC"
+        case "caf": codec = "ALAC"
         case "mp3": return "MP3"
         default: return t.format.uppercased()
         }
+        guard t.bitDepth > 0 && t.sampleRate > 0 else { return codec }
+        return "\(codec) \(t.bitDepth)/\(t.sampleRate / 1000)"
     }
 }
 

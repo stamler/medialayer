@@ -152,6 +152,8 @@ func hashAudio(ctx context.Context, o fs.Object) ([]byte, error) {
 		return media.HashFLACAudio(bufio.NewReaderSize(ctxReader{ctx, rc}, 1<<20))
 	case "mp3":
 		return hashAudioBytes(ctx, o, "mp3")
+	case "m4a":
+		return media.HashMP4Audio(objectFetch(ctx, o), objectOpen(ctx, o), o.Size())
 	}
 	return nil, fmt.Errorf("%s is not an audio file MediaLayer reads", path.Base(o.Remote()))
 }
@@ -170,10 +172,9 @@ func (r ctxReader) Read(p []byte) (int, error) {
 	return r.r.Read(p)
 }
 
-// hashAudioBytes returns the SHA-256 of o's audio bytes, for a lossy
-// format.
-func hashAudioBytes(ctx context.Context, o fs.Object, format string) ([]byte, error) {
-	fetch := func(offset, length int64) ([]byte, error) {
+// objectFetch reads small pieces of o with range requests.
+func objectFetch(ctx context.Context, o fs.Object) media.FetchFunc {
+	return func(offset, length int64) ([]byte, error) {
 		if length <= 0 {
 			return nil, nil
 		}
@@ -182,8 +183,28 @@ func hashAudioBytes(ctx context.Context, o fs.Object, format string) ([]byte, er
 			return nil, err
 		}
 		defer func() { _ = rc.Close() }()
-		return io.ReadAll(io.LimitReader(rc, length))
+		return io.ReadAll(io.LimitReader(ctxReader{ctx, rc}, length))
 	}
+}
+
+// objectOpen opens a stretch of o for a long read.
+func objectOpen(ctx context.Context, o fs.Object) media.OpenFunc {
+	return func(offset, length int64) (io.ReadCloser, error) {
+		rc, err := o.Open(ctx, &fs.RangeOption{Start: offset, End: offset + length - 1})
+		if err != nil {
+			return nil, err
+		}
+		return struct {
+			io.Reader
+			io.Closer
+		}{bufio.NewReaderSize(ctxReader{ctx, io.LimitReader(rc, length)}, 1<<20), rc}, nil
+	}
+}
+
+// hashAudioBytes returns the SHA-256 of o's audio bytes, for a lossy
+// format.
+func hashAudioBytes(ctx context.Context, o fs.Object, format string) ([]byte, error) {
+	fetch := objectFetch(ctx, o)
 	span, err := media.AudioSpan(fetch, o.Size(), format)
 	if err != nil {
 		return nil, err

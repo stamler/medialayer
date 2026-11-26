@@ -198,29 +198,42 @@ A file's audio hash (`audio_sha256` in the index) is a SHA-256 of its
 audio and nothing else, so retagging a file, or changing its cover,
 leaves it as it was:
 
-- **Lossless files (FLAC) hash their decoded samples.** The same audio
-  can be encoded in many ways (another compression level or block size,
-  a re-encode, another encoder or lossless codec), so the encoded bytes
-  can differ while the audio is identical. The hash covers `pcm` and a
-  zero byte, the sample rate, channel count and bits per sample, then
-  every sample, interleaved by channel in WAVE order, little-endian, in
-  the fewest whole bytes that hold the bits per sample (the layout
-  FLAC's own MD5 uses), so any lossless file of the same audio hashes
-  the same. While decoding, each frame's CRC-8 and CRC-16 are checked,
-  every sample must fit the bits per sample, and the samples are checked
-  against the STREAMINFO block's MD5 and sample count where the encoder
-  recorded them, with no audio frame after the count; a file that fails
-  is damaged and gets no hash. Every bit depth FLAC allows (4 to 32) is
-  decoded, by MediaLayer's own decoder (`internal/media/flacdec.go`,
-  with the hash in `flacpcm.go`); it keeps samples as 64-bit integers,
-  which also hold the 33-bit side channel of 32-bit stereo. Its tests
-  check the hash of ffmpeg-encoded files (`internal/media/testdata`,
-  made by `scripts/make-audio-fixtures.sh`) against ffmpeg's own
-  decoding.
-- **Lossy files (MP3) hash their audio bytes.** Decoding them gives no
-  truer audio, so the hash is of the file without its tags: at the start
-  any ID3v2 tags, at the end an ID3v1, APEv2 or Lyrics3 v2 tag. Built in
-  `internal/media/audiospan.go`.
+- **Lossless files (FLAC, ALAC) hash their decoded samples.** The same
+  audio can be encoded in many ways (another compression level or block
+  size, a re-encode, another encoder or lossless codec), so the encoded
+  bytes can differ while the audio is identical. The hash covers `pcm`
+  and a zero byte, the sample rate, channel count and bits per sample,
+  then every sample, interleaved by channel in WAVE order, little-endian,
+  in the fewest whole bytes that hold the bits per sample (the layout
+  FLAC's own MD5 uses). So a FLAC file and an ALAC file of the same audio
+  hash the same. Every sample must fit the bits per sample; a file that
+  fails to decode is damaged and gets no hash.
+  - **FLAC** (`internal/media/flacdec.go`, hash in `flacpcm.go`):
+    MediaLayer's own decoder, for every bit depth FLAC allows (4 to 32).
+    It keeps samples as 64-bit integers, which also hold the 33-bit side
+    channel of 32-bit stereo. Each frame's CRC-8 and CRC-16 are checked,
+    and the samples are checked against the STREAMINFO block's MD5 and
+    sample count where the encoder recorded them, with no audio frame
+    after the count.
+  - **ALAC** in MP4 (`internal/media/alac.go`, container in `mp4.go`):
+    MediaLayer's own decoder, after Apple's reference decoder and
+    ffmpeg's, for 4 to 32 bits and up to 8 channels, which it puts in
+    WAVE order. ALAC has no checksum of its own, so a damaged file is
+    caught only when it fails to decode. The packets are read in the
+    order the sample table gives, in one pass over the audio after the
+    `moov` box (read first, wherever it is).
+  - Both decoders' tests check ffmpeg-encoded files
+    (`internal/media/testdata`, made by `scripts/make-audio-fixtures.sh`)
+    against ffmpeg's own decoding, and FLAC and ALAC copies of the same
+    audio against each other. ffmpeg's ALAC encoder never uses ALAC's
+    "extra bits" (which Apple's encoder uses for 24-bit audio), so that
+    path is checked only against the reference decoders' code.
+- **Lossy files hash their audio bytes.** Decoding them gives no truer
+  audio, so the hash is of the file without its tags. For MP3, that is
+  the file less any ID3v2 tags at the start and an ID3v1, APEv2 or
+  Lyrics3 v2 tag at the end (`internal/media/audiospan.go`). For AAC in
+  MP4, it is the decoder configuration (`esds`) and every packet, in
+  order, wherever they sit in the file (`internal/media/mp4.go`).
 
 `meta.audio_hash_version` in the index names this way of hashing (`3`).
 An index opened with another version has its hashes cleared, so they are
@@ -229,8 +242,8 @@ devices running different versions would each clear the other's hashes:
 change the version only with a release every device takes.
 
 **The hash pass.** Indexing never reads audio. Instead, once a sync ends
-well, a background pass (`internal/core/hashpass.go`) hashes every FLAC
-and MP3 on the primary that has no hash yet, one file at a time, reading
+well, a background pass (`internal/core/hashpass.go`) hashes every
+track on the primary that has no hash yet, one file at a time, reading
 each in full: the first pass downloads the library once. It stops when
 the next job (a sync, Make Primary) starts, as jobs rewrite the index,
 and carries on after it (a write it had begun ends before the job does
@@ -242,7 +255,7 @@ the apps, the core's status reports the pass as `audio_hashes`:
 `running`, `hashed`, `total` and `failed`.
 
 **In sync.** When a sync would pass the limit, its removals alone would
-not, and some of its changes are replacements of FLAC or MP3 files, both
+not, and some of its changes are replacements of tracks, both
 copies of each (the primary's and the secondary's) are hashed, from the
 device's store where known and otherwise by reading them in full. Where
 the two match, the replacement is a tag edit: it is still made, but
@@ -492,8 +505,8 @@ become synced, and you can't switch back until it has space.
   move the library off a full primary from the app.
 - The daily limit's count is kept on the secondary, so a change made
   there outside MediaLayer to `member.json` resets it.
-- Tag edits are told apart only for FLAC and MP3 files; other files that
-  differ always count.
+- Tag edits are told apart only for the formats MediaLayer reads (FLAC,
+  MP3, ALAC and AAC in MP4); other files that differ always count.
 - The hash pass runs wherever the core runs, so on an iPhone it would
   download the whole library over the phone's connection; the iOS app
   needs to limit it (Wi-Fi only, say) or turn it off.

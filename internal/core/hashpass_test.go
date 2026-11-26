@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -168,5 +169,54 @@ func TestOldAudioHashesAreCleared(t *testing.T) {
 	}
 	if v, _ := db.Meta("audio_hash_version"); v != index.AudioHashVersion {
 		t.Fatalf("audio_hash_version = %q", v)
+	}
+}
+
+func TestIndexAndHashALAC(t *testing.T) {
+	quietLease(t)
+	c, lib, _ := newMirrorCore(t)
+	c.mu.Lock()
+	c.settings.Secondaries = nil
+	c.mu.Unlock()
+	for name, to := range map[string]string{
+		"alac16-tagged.m4a": "M4A/01.m4a", "flac16.flac": "M4A/same.flac", "aac-tagged.m4a": "M4A/02.m4a",
+		"alac16-mono.mp4": "M4A/03.mp4",
+	} {
+		b, err := os.ReadFile(filepath.Join("..", "media", "testdata", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		write(t, filepath.Join(lib, to), b)
+	}
+	if st := runSync(t, c); st.Job.Phase != PhaseDone {
+		t.Fatalf("job = %+v", st.Job)
+	}
+	c.waitHashPass()
+	db := c.currentDB().SQL()
+	var format, title string
+	var bits int
+	if err := db.QueryRow(`SELECT f.format, f.bit_depth, t.value FROM file f JOIN tag t ON t.file_id = f.id AND t.key = 'TITLE'
+		WHERE f.path = 'M4A/01.m4a'`).Scan(&format, &bits, &title); err != nil || format != "m4a" || bits != 16 || title != "A Title" {
+		t.Fatalf("01.m4a indexed as %q, %d bits, %q (%v)", format, bits, title, err)
+	}
+	var art int
+	_ = db.QueryRow(`SELECT count(*) FROM file_art a JOIN file f ON f.id = a.file_id WHERE f.path = 'M4A/01.m4a'`).Scan(&art)
+	if art != 1 {
+		t.Errorf("01.m4a has %d covers", art)
+	}
+	hashes := map[string]string{}
+	rows, err := db.Query(`SELECT path, hex(audio_sha256) FROM file WHERE path LIKE 'M4A/%'`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rows.Next() {
+		var p, h string
+		_ = rows.Scan(&p, &h)
+		hashes[p] = h
+	}
+	_ = rows.Close()
+	if len(hashes) != 4 || hashes["M4A/01.m4a"] == "" || hashes["M4A/01.m4a"] != hashes["M4A/same.flac"] ||
+		hashes["M4A/02.m4a"] == "" || hashes["M4A/03.mp4"] == "" {
+		t.Fatalf("hashes = %v, want ALAC and FLAC of the same audio to match", hashes)
 	}
 }

@@ -47,6 +47,8 @@ func mediaFormat(p string) string {
 		return "flac"
 	case ".mp3":
 		return "mp3"
+	case ".m4a", ".mp4", ".m4b":
+		return "m4a" // ALAC or AAC in MP4
 	}
 	return ""
 }
@@ -526,6 +528,8 @@ func indexFile(ctx context.Context, db *index.DB, pack *artPack, o fs.Object) er
 		}
 	case "mp3":
 		info, err = media.ParseMP3(fetch, o.Size())
+	case "m4a":
+		info, err = media.ParseMP4(fetch, o.Size())
 	}
 	if err != nil {
 		return err

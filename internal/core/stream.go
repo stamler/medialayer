@@ -122,7 +122,7 @@ func (s *streamServer) prepare(id string) {
 }
 
 // contentTypes maps index formats to MIME types.
-var contentTypes = map[string]string{"flac": "audio/flac", "mp3": "audio/mpeg"}
+var contentTypes = map[string]string{"flac": "audio/flac", "mp3": "audio/mpeg", "m4a": "audio/mp4"}
 
 func (s *streamServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Host != s.host {

@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/hex"
+	"io"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"strings"
@@ -79,5 +81,121 @@ func TestFLACDecoderChecksAndTags(t *testing.T) {
 	bad[len(bad)-2000] ^= 0x10
 	if _, err := HashFLACAudio(bytes.NewReader(bad)); err == nil {
 		t.Fatal("a damaged frame hashed")
+	}
+}
+
+func fileFuncs(t *testing.T, name string) (FetchFunc, OpenFunc, int64) {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join("testdata", name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	open := func(off, n int64) (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader(b[off : off+n])), nil
+	}
+	return fetchAll(b), open, int64(len(b))
+}
+
+func TestALACFixturesMatchFFmpeg(t *testing.T) {
+	n := 0
+	for name, want := range fixtureHashes(t) {
+		if ext := filepath.Ext(name); ext != ".m4a" && ext != ".mp4" {
+			continue
+		}
+		n++
+		t.Run(name, func(t *testing.T) {
+			fetch, open, size := fileFuncs(t, name)
+			got, err := HashMP4Audio(fetch, open, size)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if hex.EncodeToString(got) != want {
+				t.Fatalf("hash %x, ffmpeg's audio gives %s", got, want)
+			}
+		})
+	}
+	if n < 5 {
+		t.Fatalf("only %d ALAC fixtures", n)
+	}
+}
+
+func TestParseMP4(t *testing.T) {
+	fetch, _, size := fileFuncs(t, "alac16-tagged.m4a")
+	info, err := ParseMP4(fetch, size)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tags := map[string]string{}
+	for _, tg := range info.Tags {
+		tags[tg.Key] = tg.Value
+	}
+	for k, v := range map[string]string{"TITLE": "A Title", "ARTIST": "An Artist", "ALBUM": "An Album",
+		"ALBUMARTIST": "Various", "TRACKNUMBER": "3", "TRACKTOTAL": "12", "DISCNUMBER": "1", "DISCTOTAL": "2",
+		"GENRE": "Rock", "DATE": "2024"} {
+		if tags[k] != v {
+			t.Errorf("%s = %q, want %q (all: %v)", k, tags[k], v, tags)
+		}
+	}
+	if info.Format != "m4a" || info.SampleRate != 44100 || info.BitDepth != 16 || info.Channels != 2 ||
+		info.DurationMS < 290 || info.DurationMS > 310 {
+		t.Errorf("info = %+v", info)
+	}
+	if len(info.Pictures) != 1 || info.Pictures[0].MIME != "image/png" {
+		t.Errorf("pictures = %d", len(info.Pictures))
+	}
+	fetch, _, size = fileFuncs(t, "aac-tagged.m4a")
+	if info, err = ParseMP4(fetch, size); err != nil || info.BitDepth != 0 || info.SampleRate != 44100 || len(info.Pictures) != 1 {
+		t.Fatalf("AAC info = %+v, %v", info, err)
+	}
+}
+
+func TestAACHashIgnoresTags(t *testing.T) {
+	h := func(name string) []byte {
+		fetch, open, size := fileFuncs(t, name)
+		sum, err := HashMP4Audio(fetch, open, size)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return sum
+	}
+	if !bytes.Equal(h("aac.m4a"), h("aac-tagged.m4a")) {
+		t.Fatal("tags and a cover changed an AAC file's hash")
+	}
+	if bytes.Equal(h("aac.m4a"), h("alac16.m4a")) {
+		t.Fatal("AAC and ALAC hash the same")
+	}
+}
+
+// TestDamagedFilesDontPanic flips bytes all over the fixtures: decoding
+// and parsing may fail, but must not panic or hang.
+func TestDamagedFilesDontPanic(t *testing.T) {
+	r := rand.New(rand.NewSource(1))
+	for name := range fixtureHashes(t) {
+		orig, err := os.ReadFile(filepath.Join("testdata", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for range 150 {
+			b := bytes.Clone(orig)
+			for range 1 + r.Intn(4) {
+				i := r.Intn(len(b))
+				if r.Intn(3) == 0 {
+					i = r.Intn(min(len(b), 4096)) // headers and boxes
+				}
+				b[i] ^= byte(1 << r.Intn(8))
+			}
+			fetch := fetchAll(b)
+			open := func(off, n int64) (io.ReadCloser, error) {
+				return io.NopCloser(bytes.NewReader(b[off : off+n])), nil
+			}
+			switch filepath.Ext(name) {
+			case ".flac":
+				_, _ = HashFLACAudio(bytes.NewReader(b))
+				_, _, _ = FLACHeader(fetch, int64(len(b)), 1<<20)
+			default:
+				_, _ = HashMP4Audio(fetch, open, int64(len(b)))
+				_, _ = ParseMP4(fetch, int64(len(b)))
+			}
+		}
 	}
 }
