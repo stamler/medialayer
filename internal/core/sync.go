@@ -205,7 +205,8 @@ func (c *Core) sync(ctx context.Context) error {
 		if errors.Is(err, errPublishedElsewhere) {
 			continue
 		}
-		if isFull(err) {
+		full := isFull(err)
+		if full {
 			// Sync only writes to the secondaries, so they still get the
 			// primary's last saved snapshot and every file.
 			fs.Errorf(f, "publish: %v", err)
@@ -213,6 +214,11 @@ func (c *Core) sync(ctx context.Context) error {
 			c.notice = "The primary's cloud is full, so the library's latest changes couldn't be saved there. Copies still sync from it."
 			c.mu.Unlock()
 			err = nil
+		}
+		if err == nil {
+			c.mu.Lock()
+			c.primaryFull = full
+			c.mu.Unlock()
 		}
 		if err != nil {
 			return fmt.Errorf("write the library's .medialayer: %w", err)

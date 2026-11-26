@@ -52,7 +52,10 @@ type Core struct {
 	badCovers map[string]bool
 	mirrors   map[string]*mirrorState // by secondary id
 	notice    string                  // something the user should know, until the next sync
-	stream    *streamServer
+	// primaryFull is set when the last publish found the primary's cloud
+	// full, so a sync can't save changes there until space is freed.
+	primaryFull bool
+	stream      *streamServer
 }
 
 // settings are kept in settings.json in the data directory.

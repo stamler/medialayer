@@ -160,6 +160,9 @@ func (c *Core) SetFolder(folder string) error {
 	if folder == "" {
 		return errors.New("pick a folder, not the top of the drive")
 	}
+	// No playlist change may land between the check below and the reset.
+	c.playlistMu.Lock()
+	defer c.playlistMu.Unlock()
 	c.mu.Lock()
 	if c.jobDone != nil {
 		c.mu.Unlock()
@@ -167,20 +170,10 @@ func (c *Core) SetFolder(folder string) error {
 	}
 	if folder != c.settings.Folder {
 		// The local index goes, so playlist changes only it holds would be
-		// lost. (Waiting carried playlists belong to it too.)
-		if c.db != nil {
-			unsaved, err := unsavedPlaylists(c.db)
-			if err == nil && !unsaved {
-				carried, cerr := c.readCarried()
-				unsaved, err = len(carried) > 0, cerr
-			}
-			if err != nil || unsaved {
-				c.mu.Unlock()
-				if err != nil {
-					return fmt.Errorf("check the playlists: %w", err)
-				}
-				return errUnsavedPlaylists
-			}
+		// lost.
+		if err := c.folderChangeBlocked(c.db, c.primaryFull); err != nil {
+			c.mu.Unlock()
+			return err
 		}
 		if c.db != nil {
 			_ = c.db.Close()
