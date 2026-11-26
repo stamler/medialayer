@@ -50,6 +50,11 @@ extension UTType {
     static let mediaLayerTracks = UTType(exportedAs: "org.medialayer.tracks")
 }
 
+extension NSPasteboard.PasteboardType {
+    /// TrackDrag's type, for the Songs table's NSTableView drags.
+    static let mediaLayerTracks = NSPasteboard.PasteboardType(UTType.mediaLayerTracks.identifier)
+}
+
 extension AppModel {
     var selectedPlaylistID: String? {
         if case .playlist(let id) = sidebarSelection { return id }

@@ -66,16 +66,21 @@ struct TrackCloud: Identifiable {
     var id: String { source.id }
 }
 
-extension AppModel {
+/// Everything the Clouds column shows besides the track: the sources'
+/// state and what the index says.
+struct CloudState: Equatable {
+    var sources: [CoreStatus.Source] = []
+    var index = CloudIndex()
+
     /// The sources for a track's Clouds cell, primary first.
     func clouds(for track: Track) -> [TrackCloud] {
-        (status.sources ?? []).map { (s) -> TrackCloud in
+        sources.map { (s) -> TrackCloud in
             let place = "“\(s.name)” (\(SourceIcon.label(s.type)))"
             if s.primary { return TrackCloud(source: s, holds: true, help: "On the primary, \(place)") }
-            let current = s.state == "synced" && cloudIndex.version.version > 0
-                && s.version == cloudIndex.version.version && cloudIndex.version.filesMatchVersion
+            let current = s.state == "synced" && index.version.version > 0
+                && s.version == index.version.version && index.version.filesMatchVersion
             if current {
-                let clash = (s.remote.isEmpty ? cloudIndex.foldedClashes : cloudIndex.clashes).contains(track.id)
+                let clash = (s.remote.isEmpty ? index.foldedClashes : index.clashes).contains(track.id)
                 if !clash { return TrackCloud(source: s, holds: true, help: "On \(place), up to date") }
                 return TrackCloud(source: s, holds: false,
                                   help: "Not kept on \(place): its path can't be told apart there from another track's")
@@ -89,22 +94,5 @@ extension AppModel {
             }
             return TrackCloud(source: s, holds: false, help: "May not be on \(place) yet: \(why)")
         }
-    }
-}
-
-/// The icons in a Clouds cell: one per source, dimmed where the source
-/// may not hold the track.
-struct CloudsCell: View {
-    let clouds: [TrackCloud]
-
-    var body: some View {
-        HStack(spacing: 4) {
-            ForEach(clouds) { c in
-                SourceIcon(type: c.source.type, size: 11)
-                    .opacity(c.holds ? 1 : 0.3)
-                    .help(c.help)
-            }
-        }
-        .foregroundStyle(.secondary)
     }
 }

@@ -1,5 +1,6 @@
 import AppKit
 import AVFoundation
+import Combine
 import Foundation
 import SwiftUI
 
@@ -132,6 +133,12 @@ final class AppModel: ObservableObject {
     @Published var playlistError: String?
 
     let art = ArtCache()
+    /// The Songs table's columns, kept in the user's defaults.
+    let columns = SongColumns()
+    /// What the Songs table shows (see SongsTable.swift and updateFeed).
+    let tableFeed = SongsTableFeed()
+    private var feedScheduled = false
+    private var feedSubscriptions: Set<AnyCancellable> = []
     private let search = TrackSearch()
     let player = Player()
     /// Control Centre's Now Playing and the media keys.
@@ -147,6 +154,7 @@ final class AppModel: ObservableObject {
 
     init() {
         nowPlaying = NowPlaying(player: player, art: art)
+        followForTable()
         let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("MediaLayer", isDirectory: true)
         do {
@@ -185,6 +193,48 @@ final class AppModel: ObservableObject {
             MainActor.assumeIsolated { self.player.toggle() }
             return nil
         }
+    }
+
+    // MARK: The Songs table's feed
+
+    /// Any change of this model, the search, the status or the playing
+    /// track schedules one updateFeed for the end of the run loop turn,
+    /// however many changes there were.
+    private func followForTable() {
+        let changes: [ObservableObjectPublisher] = [objectWillChange, browse.objectWillChange,
+                                                    statusModel.objectWillChange]
+        for publisher in changes {
+            publisher
+                .sink { [weak self] _ in self?.scheduleFeed() }
+                .store(in: &feedSubscriptions)
+        }
+        player.$current
+            .sink { [weak self] _ in self?.scheduleFeed() }
+            .store(in: &feedSubscriptions)
+        scheduleFeed()
+    }
+
+    private func scheduleFeed() {
+        guard !feedScheduled else { return }
+        feedScheduled = true
+        // After the change: objectWillChange is sent before it is stored.
+        DispatchQueue.main.async { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.feedScheduled = false
+                self.updateFeed()
+            }
+        }
+    }
+
+    /// Gives the table what it shows. visibleTracks is cached, so this is
+    /// cheap when nothing the table shows changed, and the feed publishes
+    /// nothing then.
+    private func updateFeed() {
+        let visible = visibleTracks
+        tableFeed.update(SongsTableState(
+            tracks: visible, version: visibleVersion, sortOrder: sortOrder, playlistID: selectedPlaylistID,
+            currentID: player.current?.id, clouds: CloudState(sources: status.sources ?? [], index: cloudIndex)))
     }
 
     /// Polls the core and reloads the library when the index changed.

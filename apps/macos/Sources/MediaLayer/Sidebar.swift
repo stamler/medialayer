@@ -119,28 +119,6 @@ struct PlaylistRow: View {
     }
 }
 
-/// The Songs table's context menu items for playlists. `ids` are the
-/// clicked rows' file ids in table order.
-struct PlaylistMenuItems: View {
-    @EnvironmentObject var model: AppModel
-    let ids: [String]
-
-    var body: some View {
-        Menu("Add to Playlist") {
-            Button("New Playlist") { model.newPlaylist(with: ids) }
-            if !model.playlists.isEmpty { Divider() }
-            ForEach(model.playlists) { p in
-                Button(p.name) { model.add(ids, to: p.id) }
-            }
-        }
-        .disabled(ids.isEmpty)
-        if let p = model.selectedPlaylist {
-            Button("Remove from Playlist") { model.remove(ids, from: p.id) }
-                .disabled(ids.isEmpty)
-        }
-    }
-}
-
 /// File > New Playlist (⌘N) and View > Sort by Playlist Order. The
 /// sidebar's Show/Hide Sidebar (⌃⌘S) comes from SidebarCommands.
 struct PlaylistCommands: Commands {

@@ -7,7 +7,6 @@ struct MediaLayerApp: App {
     // change to it doesn't rebuild the scene and its menus. The menus
     // that show the model's state observe it themselves.
     @State private var model = AppModel()
-    @State private var songColumns = SongColumns()
 
     var body: some Scene {
         WindowGroup("MediaLayer") {
@@ -17,14 +16,13 @@ struct MediaLayerApp: App {
                 .environmentObject(model.browse)
                 .environmentObject(model.player)
                 .environmentObject(model.player.clock)
-                .environmentObject(songColumns)
                 .frame(minWidth: 900, minHeight: 560)
         }
         .commands {
             SidebarCommands()
             PlaylistCommands(model: model, core: model.statusModel)
             LibraryCommands(model: model, core: model.statusModel)
-            CommandGroup(after: .toolbar) { ColumnsMenu(columns: songColumns) }
+            CommandGroup(after: .toolbar) { ColumnsMenu(columns: model.columns) }
             CommandMenu("Controls") {
                 // Space is handled by AppModel's key monitor; a bare-Space
                 // menu shortcut could take spaces from text fields.
@@ -212,13 +210,15 @@ struct DriveFolderPicker: View {
 
 // MARK: - Library
 
+/// The library window. It observes AppModel only, which changes on user
+/// actions and library reloads: the search, the status poll and the
+/// playback clock redraw only the views that show them, and the table
+/// follows the model by itself (SongsTable.swift).
 struct LibraryView: View {
     @EnvironmentObject var model: AppModel
-    @EnvironmentObject var browse: BrowseSignal // the table shows the search's tracks
     @State private var selection = Set<Track.ID>()
 
     var body: some View {
-        let visible = model.visibleTracks
         NavigationSplitView(columnVisibility: $model.sidebarVisibility) {
             SidebarView()
                 .navigationSplitViewColumnWidth(min: 150, ideal: 190, max: 320)
@@ -228,14 +228,15 @@ struct LibraryView: View {
                     ColumnBrowser()
                         .frame(minHeight: 120, idealHeight: 190, maxHeight: 400)
                 }
-                SongsTable(tracks: visible, selection: $selection)
+                // Return plays and Delete removes from a playlist: the
+                // table handles both keys.
+                SongsTable(model: model, selection: $selection)
                     .frame(minHeight: 200)
                     .onChange(of: selection) { _, ids in
                         // Look up the selected track's cloud file now, so pressing
                         // play doesn't wait for it.
                         if ids.count == 1, let id = ids.first { Core.prepare(id) }
                     }
-                    .onDeleteCommand(perform: removeFromPlaylist)
             }
             .safeAreaInset(edge: .bottom, spacing: 0) { StatusBar() }
             // On the detail column, so the items sit in its part of the
@@ -252,15 +253,6 @@ struct LibraryView: View {
         .alert("Couldn't change the playlist",
                isPresented: Binding(get: { model.playlistError != nil }, set: { if !$0 { model.playlistError = nil } })) {
         } message: { Text(model.playlistError ?? "") }
-    }
-
-    /// Delete in a playlist removes the selected rows from it; Songs has no
-    /// Delete.
-    private var removeFromPlaylist: (() -> Void)? {
-        guard let p = model.selectedPlaylist else { return nil }
-        return { [selection] in
-            model.remove(model.visibleTracks.filter { selection.contains($0.id) }.map(\.id), from: p.id)
-        }
     }
 }
 
