@@ -36,6 +36,8 @@ final class AppModel: ObservableObject {
     let art = ArtCache()
     private let search = TrackSearch()
     let player = Player()
+    /// Control Centre's Now Playing and the media keys.
+    private var nowPlaying: NowPlaying?
 
     private var db: LibraryDB?
     private var loadedEpoch: Int64 = -1
@@ -46,6 +48,7 @@ final class AppModel: ObservableObject {
     private var keyMonitor: Any?
 
     init() {
+        nowPlaying = NowPlaying(player: player, art: art)
         let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("MediaLayer", isDirectory: true)
         do {
