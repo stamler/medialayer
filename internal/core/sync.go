@@ -54,6 +54,9 @@ type Status struct {
 	// primary's first.
 	Accounts []string `json:"accounts"`
 	Notice   string   `json:"notice,omitempty"`
+	// AudioHashes is the background pass that hashes every track's audio,
+	// once it has counted them.
+	AudioHashes *AudioHashStatus `json:"audio_hashes,omitempty"`
 }
 
 // Status returns the current state.
@@ -71,6 +74,10 @@ func (c *Core) Status() Status {
 	s.Sources = c.sourcesLocked()
 	s.Accounts = driveAccounts(c.primaryRemote())
 	s.Notice = c.notice
+	if c.hash.known {
+		h := c.hash.status
+		s.AudioHashes = &h
+	}
 	if s.Job.Phase == "" {
 		s.Job.Phase = PhaseIdle
 	}
@@ -112,10 +119,14 @@ func (c *Core) startJobLocked(work func(context.Context) error) error {
 	done := make(chan struct{})
 	ctx, cancel := context.WithCancel(context.Background())
 	c.jobDone, c.cancel = done, cancel
+	c.stopHashPassLocked() // jobs rewrite the index; the pass starts again after
 	c.job = jobStatus{Phase: PhaseOpening, Started: time.Now()}
 	c.notice = ""
 	go func() {
 		defer close(done)
+		// A write the stopped hash pass had begun ends first.
+		c.hashWrite.Lock()
+		c.hashWrite.Unlock() //nolint:staticcheck // a barrier
 		err := work(ctx)
 		if db := c.currentDB(); db != nil {
 			c.countTracks(db)
@@ -140,6 +151,7 @@ func (c *Core) startJobLocked(work func(context.Context) error) error {
 			c.job.Error = err.Error()
 		default:
 			c.job.Phase = PhaseDone
+			c.startHashPassLocked()
 		}
 	}()
 	return nil

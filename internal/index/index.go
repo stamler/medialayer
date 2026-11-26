@@ -27,6 +27,12 @@ import (
 // SchemaVersion is stored in meta as "schema_version".
 const SchemaVersion = "1"
 
+// AudioHashVersion names how file.audio_sha256 is made, stored in meta as
+// "audio_hash_version": "2" hashes FLAC's decoded samples and MP3's audio
+// bytes. An index opened with another version has its audio hashes
+// cleared, so they are made again.
+const AudioHashVersion = "2"
+
 const schema = `
 CREATE TABLE IF NOT EXISTS meta (
   key   TEXT PRIMARY KEY,
@@ -136,7 +142,65 @@ func Open(path string) (*DB, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("index schema version %s, want %s", v, SchemaVersion)
 	}
+	if v, err := d.Meta("audio_hash_version"); err != nil || v != AudioHashVersion {
+		if err == nil {
+			_, err = db.Exec(`UPDATE file SET audio_sha256 = NULL WHERE audio_sha256 IS NOT NULL`)
+		}
+		if err == nil {
+			err = d.SetMeta("audio_hash_version", AudioHashVersion)
+		}
+		if err != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("reset audio hashes: %w", err)
+		}
+	}
 	return d, nil
+}
+
+// FileToHash is an indexed file the background pass should hash.
+type FileToHash struct {
+	Path        string
+	Size, MTime int64
+}
+
+// FilesWithoutAudioSHA lists the present files of these formats that
+// have no audio_sha256 yet, by path.
+func (d *DB) FilesWithoutAudioSHA(formats ...string) ([]FileToHash, error) {
+	var out []FileToHash
+	for _, format := range formats {
+		rows, err := d.db.Query(`SELECT path, size, mtime FROM file
+			WHERE audio_sha256 IS NULL AND missing = 0 AND format = ? ORDER BY path`, format)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var f FileToHash
+			if err := rows.Scan(&f.Path, &f.Size, &f.MTime); err != nil {
+				_ = rows.Close()
+				return nil, err
+			}
+			out = append(out, f)
+		}
+		_ = rows.Close()
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
+// AudioHashCounts returns how many present files of these formats the
+// index has, and how many of them have an audio_sha256.
+func (d *DB) AudioHashCounts(formats ...string) (total, hashed int64, err error) {
+	for _, format := range formats {
+		var t, h int64
+		if err := d.db.QueryRow(`SELECT count(*), count(audio_sha256) FROM file WHERE missing = 0 AND format = ?`,
+			format).Scan(&t, &h); err != nil {
+			return 0, 0, err
+		}
+		total, hashed = total+t, hashed+h
+	}
+	return total, hashed, nil
 }
 
 // Close closes the database.
@@ -416,12 +480,17 @@ func (d *DB) Locate(id, replica string) (FileLocation, error) {
 }
 
 // SetAudioSHA records the audio_sha256 of the file at path, if the index
-// holds it at this size and modification time. It doesn't make a new
-// version: the hash goes out with the next one.
-func (d *DB) SetAudioSHA(path string, size, mtime int64, sha []byte) error {
-	_, err := d.db.Exec(`UPDATE file SET audio_sha256 = ? WHERE path = ? AND size = ? AND mtime = ?`,
+// holds it at this size and modification time, and reports whether it
+// did. It doesn't make a new version: the hash goes out with the next
+// one.
+func (d *DB) SetAudioSHA(path string, size, mtime int64, sha []byte) (bool, error) {
+	res, err := d.db.Exec(`UPDATE file SET audio_sha256 = ? WHERE path = ? AND size = ? AND mtime = ?`,
 		sha, path, size, mtime)
-	return err
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
 }
 
 // TrackCount is the number of files that are not missing.

@@ -175,6 +175,10 @@ func (c *Core) SetFolder(folder string) error {
 			c.mu.Unlock()
 			return err
 		}
+		// The pass writes only to the index it started with, which closes
+		// here, so nothing of the old library reaches the new one.
+		c.stopHashPassLocked()
+		c.hash.status, c.hash.known, c.hash.failed = AudioHashStatus{}, false, nil
 		if c.db != nil {
 			_ = c.db.Close()
 			c.db = nil

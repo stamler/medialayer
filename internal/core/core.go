@@ -56,7 +56,16 @@ type Core struct {
 	// loaded from audio-hashes.json on first use.
 	audioHashes      map[string]string
 	audioHashesDirty bool
-	notice           string // something the user should know, until the next sync
+	hash             hashState // the background hash pass
+	// hashWrite is held by the hash pass while it writes the index; a job
+	// takes it once after stopping the pass, so no write lands after.
+	hashWrite sync.Mutex
+	// audioFileMu serialises writes of audio-hashes.json.
+	audioFileMu sync.Mutex
+	// hashFileHook, if set (by tests), runs before the pass reads each
+	// file.
+	hashFileHook func()
+	notice       string // something the user should know, until the next sync
 	// primaryFull is set when the last publish found the primary's cloud
 	// full, so a sync can't save changes there until space is freed.
 	primaryFull bool
@@ -245,10 +254,12 @@ func (c *Core) Close() error {
 	if c.cancel != nil {
 		c.cancel()
 	}
+	c.stopHashPassLocked()
 	c.mu.Unlock()
 	if done != nil {
 		<-done
 	}
+	c.waitHashPass()
 	c.stream.close()
 	c.mu.Lock()
 	defer c.mu.Unlock()

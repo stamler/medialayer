@@ -18,35 +18,7 @@ func span(t *testing.T, file []byte, format string) []byte {
 	if calls > 4 {
 		t.Errorf("%d reads, want at most 4", calls)
 	}
-	if format == "flac" && len(s.StreamInfo) != 34 {
-		t.Errorf("STREAMINFO is %d bytes, want 34", len(s.StreamInfo))
-	}
 	return file[s.Start:s.End]
-}
-
-func TestAudioSpanFLACIgnoresRetagging(t *testing.T) {
-	audio := randomBytes(300_000, 7)
-	before, at := makeFLAC(t, 0, typicalBlocks(1000), audio)
-	got := span(t, before, "flac")
-	if !bytes.Equal(got, audio) {
-		t.Fatalf("span is %d bytes from %d, want the %d audio bytes from %d", len(got), bytes.Index(before, got), len(audio), at)
-	}
-	// New tags, a much larger picture behind an ID3v2 tag, and an ID3v1
-	// tag at the end: the same audio.
-	blocks := typicalBlocks(500_000)
-	blocks[1].data = []byte("\x0d\x00\x00\x00reference lib\x01\x00\x00\x00\x0e\x00\x00\x00TITLE=Retagged")
-	after, _ := makeFLAC(t, 2000, blocks, audio)
-	after = append(after, id3v1()...)
-	if got := span(t, after, "flac"); !bytes.Equal(got, audio) {
-		t.Fatalf("retagged span is %d bytes, want the %d audio bytes", len(got), len(audio))
-	}
-	// One changed audio byte is a different span.
-	changed := bytes.Clone(audio)
-	changed[1000] ^= 1
-	other, _ := makeFLAC(t, 0, typicalBlocks(1000), changed)
-	if bytes.Equal(span(t, other, "flac"), audio) {
-		t.Fatal("a change to the audio left the span the same")
-	}
 }
 
 func id3v1() []byte {
@@ -117,11 +89,8 @@ func TestAudioSpanErrors(t *testing.T) {
 		format string
 		want   error
 	}{
-		"not FLAC":           {[]byte("RIFF....WAVEfmt more bytes"), "flac", ErrNotFLAC},
-		"FLAC cut in block":  {[]byte("fLaC\x00\x00\x00\x22abc"), "flac", ErrNotFLAC},
 		"only tags":          {cat(id3Tag(3), id3v1()), "mp3", ErrNoAudio},
-		"FLAC no audio":      {[]byte("fLaC\x80\x00\x00\x01x"), "flac", ErrNoAudio},
-		"FLAC no STREAMINFO": {[]byte("fLaC\x84\x00\x00\x01xaudio"), "flac", ErrNotFLAC},
+		"ID3v2 past the end": {[]byte("ID3\x03\x00\x00\x00\x00\x7f\x7fshort"), "mp3", ErrNoAudio},
 	} {
 		t.Run(name, func(t *testing.T) {
 			_, err := AudioSpan(fetcherFor(c.file, &calls), int64(len(c.file)), c.format)
@@ -130,7 +99,7 @@ func TestAudioSpanErrors(t *testing.T) {
 			}
 		})
 	}
-	if _, err := AudioSpan(fetcherFor(nil, &calls), 0, "ogg"); err == nil {
-		t.Fatal("an unknown format gave a span")
+	if _, err := AudioSpan(fetcherFor(nil, &calls), 0, "flac"); err == nil {
+		t.Fatal("a lossless format gave a span")
 	}
 }

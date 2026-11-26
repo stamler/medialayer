@@ -1,6 +1,7 @@
 package core
 
 import (
+	"bufio"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -15,23 +16,30 @@ import (
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/hash"
 
+	"github.com/stamler/medialayer/internal/index"
 	"github.com/stamler/medialayer/internal/media"
 )
 
-// Audio hashes tell a tag edit from a change to the audio. A file's
-// audio_sha256 is the SHA-256 of its audio bytes, the part left once the
-// tags at both ends are skipped (see media.AudioSpan), so retagging a file
-// leaves it as it was.
+// Audio hashes tell a tag edit from a change to the audio, and later
+// the same track in two places. A file's audio_sha256 never covers its
+// tags, so retagging a file leaves it as it was:
 //
-// Indexing never reads audio, so hashes are made only when sync needs
-// one: a secondary's file would be replaced and the day's changes would
-// pass the limit (see mirror). Both copies are then read in full, once:
-// the results are kept on this device in audio-hashes.json, by the file's
-// MD5 where the cloud lists one (so a copy on another cloud, or the
-// primary's file once it is on a secondary, is known too) and otherwise
-// by folder, path, size and modification time. The primary's hash also
-// goes into the index's audio_sha256, which reaches other devices with
-// the next index version.
+//   - Lossless files (FLAC) hash their decoded samples (see
+//     media.HashFLACAudio), as the same audio can be encoded in several
+//     ways.
+//   - Lossy files (MP3) hash their audio bytes, the part left once the
+//     tags at both ends are skipped (see media.AudioSpan): decoding them
+//     again would not give back other audio.
+//
+// Indexing never reads audio. A background pass (hashpass.go) hashes
+// every track of the primary after a sync, and sync hashes the two
+// copies of a replaced file when it needs to (see mirror). Each file is
+// read in full, once: the results are kept on this device in
+// audio-hashes.json, by the file's MD5 where the cloud lists one (so a
+// copy on another cloud, or the primary's file once it is on a
+// secondary, is known too) and otherwise by folder, path, size and
+// modification time. The primary's hash also goes into the index's
+// audio_sha256, which reaches other devices with the next index version.
 
 const (
 	audioHashFile = "audio-hashes.json"
@@ -39,14 +47,15 @@ const (
 	maxAudioHashes = 50_000
 )
 
-// audioKey is the key a file's audio hash is kept under.
+// audioKey is the key a file's audio hash is kept under. It starts with
+// index.AudioHashVersion, so hashes made another way are never reused.
 func audioKey(ctx context.Context, f fs.Fs, o fs.Object) string {
 	if !f.Features().SlowHash {
 		if md5, _ := o.Hash(ctx, hash.MD5); md5 != "" {
-			return fmt.Sprintf("md5:%s:%d", md5, o.Size())
+			return fmt.Sprintf("v%s:md5:%s:%d", index.AudioHashVersion, md5, o.Size())
 		}
 	}
-	return fmt.Sprintf("at:%s\x00%s:%d:%d", fs.ConfigString(f), o.Remote(), o.Size(), o.ModTime(ctx).UnixNano())
+	return fmt.Sprintf("v%s:at:%s\x00%s:%d:%d", index.AudioHashVersion, fs.ConfigString(f), o.Remote(), o.Size(), o.ModTime(ctx).UnixNano())
 }
 
 // loadAudioHashes reads audio-hashes.json once. The caller holds c.mu.
@@ -85,7 +94,10 @@ func (c *Core) saveAudioHashes(keep map[string]bool) error {
 	c.audioHashesDirty = false
 	c.mu.Unlock()
 	if err == nil {
+		// A job's save and a stopping pass's can overlap.
+		c.audioFileMu.Lock()
 		err = writeFileAtomic(filepath.Join(c.dataDir, audioHashFile), b)
+		c.audioFileMu.Unlock()
 	}
 	if err != nil {
 		c.mu.Lock()
@@ -96,9 +108,8 @@ func (c *Core) saveAudioHashes(keep map[string]bool) error {
 }
 
 // audioSHA returns the audio hash of o, a file in f, reading it in full
-// unless the hash is known. primary is set when f is the library's
-// primary, whose hashes also go into the index.
-func (c *Core) audioSHA(ctx context.Context, f fs.Fs, o fs.Object, primary bool) ([]byte, error) {
+// unless the hash is known.
+func (c *Core) audioSHA(ctx context.Context, f fs.Fs, o fs.Object) ([]byte, error) {
 	key := audioKey(ctx, f, o)
 	c.mu.Lock()
 	c.loadAudioHashes()
@@ -113,14 +124,13 @@ func (c *Core) audioSHA(ctx context.Context, f fs.Fs, o fs.Object, primary bool)
 		}
 		c.rememberAudioSHA(key, sha)
 	}
-	db := c.currentDB()
-	mtime := o.ModTime(ctx).UnixMilli()
-	if primary && db != nil {
-		if err := db.SetAudioSHA(o.Remote(), o.Size(), mtime, sha); err != nil {
-			fs.Errorf(o, "store audio hash: %v", err)
-		}
-	}
 	return sha, nil
+}
+
+// storeAudioSHA records the primary file o's hash in db, reporting
+// whether a row took it.
+func storeAudioSHA(ctx context.Context, db *index.DB, o fs.Object, sha []byte) (bool, error) {
+	return db.SetAudioSHA(o.Remote(), o.Size(), o.ModTime(ctx).UnixMilli(), sha)
 }
 
 func (c *Core) rememberAudioSHA(key string, sha []byte) {
@@ -130,12 +140,39 @@ func (c *Core) rememberAudioSHA(key string, sha []byte) {
 	c.audioHashesDirty = true
 }
 
-// hashAudio reads o's audio bytes and returns their SHA-256.
+// hashAudio reads o in full and returns its audio hash.
 func hashAudio(ctx context.Context, o fs.Object) ([]byte, error) {
-	format := mediaFormat(o.Remote())
-	if format == "" {
-		return nil, fmt.Errorf("%s is not an audio file MediaLayer reads", path.Base(o.Remote()))
+	switch mediaFormat(o.Remote()) {
+	case "flac":
+		rc, err := o.Open(ctx)
+		if err != nil {
+			return nil, err
+		}
+		defer func() { _ = rc.Close() }()
+		return media.HashFLACAudio(bufio.NewReaderSize(ctxReader{ctx, rc}, 1<<20))
+	case "mp3":
+		return hashAudioBytes(ctx, o, "mp3")
 	}
+	return nil, fmt.Errorf("%s is not an audio file MediaLayer reads", path.Base(o.Remote()))
+}
+
+// ctxReader stops reading once ctx is done, as some backends' reads
+// (a local disk's) don't watch it.
+type ctxReader struct {
+	ctx context.Context
+	r   io.Reader
+}
+
+func (r ctxReader) Read(p []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return r.r.Read(p)
+}
+
+// hashAudioBytes returns the SHA-256 of o's audio bytes, for a lossy
+// format.
+func hashAudioBytes(ctx context.Context, o fs.Object, format string) ([]byte, error) {
 	fetch := func(offset, length int64) ([]byte, error) {
 		if length <= 0 {
 			return nil, nil
@@ -158,8 +195,7 @@ func hashAudio(ctx context.Context, o fs.Object) ([]byte, error) {
 	}
 	defer func() { _ = rc.Close() }()
 	h := sha256.New()
-	h.Write(span.StreamInfo)
-	n, err := io.Copy(h, io.LimitReader(rc, end-start))
+	n, err := io.Copy(h, io.LimitReader(ctxReader{ctx, rc}, end-start))
 	if err != nil {
 		return nil, err
 	}
@@ -191,10 +227,17 @@ func (c *Core) tagOnly(ctx context.Context, f, dst fs.Fs, src *listing, replaces
 		}
 		c.setJob(func(j *jobStatus) { j.Current = "Comparing audio: " + path.Base(p) })
 		keep[audioKey(ctx, f, src.files[p])], keep[audioKey(ctx, dst, old)] = true, true
-		a, err := c.audioSHA(ctx, f, src.files[p], true)
+		a, err := c.audioSHA(ctx, f, src.files[p])
+		if err == nil {
+			if db := c.currentDB(); db != nil { // a job: nothing else writes the index
+				if _, err := storeAudioSHA(ctx, db, src.files[p], a); err != nil {
+					fs.Errorf(src.files[p], "store audio hash: %v", err)
+				}
+			}
+		}
 		var b []byte
 		if err == nil {
-			b, err = c.audioSHA(ctx, dst, old, false)
+			b, err = c.audioSHA(ctx, dst, old)
 		}
 		if ctx.Err() != nil {
 			return nil, ctx.Err()

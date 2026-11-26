@@ -181,7 +181,7 @@ a 20,000-track library can't lose 1,000 files in one go.
   short still counts.
 - **What counts.** Removals (including extra Drive duplicates) and
   replacements. New copies don't count. A replacement that only changed
-  tags doesn't count either (see "Tag edits" below).
+  tags doesn't count either (see "Tag edits and audio hashes" below).
 - **The pause.** If this sync's counted changes plus the day's would pass
   the limit, the sync of that secondary pauses before changing anything.
   Its chip shows a pause badge; clicking it shows what this sync would
@@ -192,37 +192,74 @@ a 20,000-track library can't lose 1,000 files in one go.
 - **A demoted primary** still asks before any removal or replacement,
   tag edits included (see "Sync after the switch").
 
-### Tag edits
+### Tag edits and audio hashes
 
-A file's audio hash (`audio_sha256` in the index) is the SHA-256 of its
-audio bytes: the file without the tags at either end (for FLAC, the
-STREAMINFO block is hashed too, as audio frames can rely on it). At the start that
-is any ID3v2 tags and, for FLAC, the `fLaC` marker and every metadata
-block (tags, pictures, padding); at the end an ID3v1, APEv2 or Lyrics3 v2
-tag. Retagging a file, or changing its cover, leaves the hash as it was.
-It is built in `internal/media/audiospan.go` and
-`internal/core/audiohash.go`.
+A file's audio hash (`audio_sha256` in the index) is a SHA-256 of its
+audio and nothing else, so retagging a file, or changing its cover,
+leaves it as it was:
 
-Indexing never reads audio, so hashes are made only when sync needs
-them: when a sync would pass the limit, its removals alone would not,
-and some of its changes are replacements of FLAC or MP3 files. For each, both copies (the primary's
-and the secondary's) are read in full and hashed. Where the two match,
-the replacement is a tag edit: it is still made, but doesn't count. A
-file that can't be read or parsed counts as a real change. This costs a
-download of both copies of each replaced file, paid only near the limit.
+- **Lossless files (FLAC) hash their decoded samples.** The same audio
+  can be encoded in many ways (another compression level or block size,
+  a re-encode, another encoder), so the encoded bytes can differ while
+  the audio is identical. The hash covers `flac-pcm`, the sample rate,
+  channel count and bits per sample, then every sample, interleaved by
+  channel, little-endian, in the fewest whole bytes that hold the bits
+  per sample (the layout FLAC's own MD5 uses). While decoding, each
+  frame's CRC is checked, every sample must fit the bits per sample, and
+  the samples are checked against the STREAMINFO block's MD5 and sample
+  count where the encoder recorded them, with no audio frame after the
+  count; a file that fails is damaged and gets no hash. Streams of 4 to
+  24 bits per sample are hashed; the decoder can't read 32-bit FLAC, so
+  such files get no hash and always count as changed. Built in
+  `internal/media/flacpcm.go`, with the public-domain decoder
+  `github.com/mewkiz/flac`. Any lossless format added later (ALAC, WAV,
+  AIFF) must hash its decoded samples the same way.
+- **Lossy files (MP3) hash their audio bytes.** Decoding them gives no
+  truer audio, so the hash is of the file without its tags: at the start
+  any ID3v2 tags, at the end an ID3v1, APEv2 or Lyrics3 v2 tag. Built in
+  `internal/media/audiospan.go`.
+
+`meta.audio_hash_version` in the index names this way of hashing (`2`).
+An index opened with another version has its hashes cleared, so they are
+made again. That includes an index restored from the primary, so two
+devices running different versions would each clear the other's hashes:
+change the version only with a release every device takes.
+
+**The hash pass.** Indexing never reads audio. Instead, once a sync ends
+well, a background pass (`internal/core/hashpass.go`) hashes every FLAC
+and MP3 on the primary that has no hash yet, one file at a time, reading
+each in full: the first pass downloads the library once. It stops when
+the next job (a sync, Make Primary) starts, as jobs rewrite the index,
+and carries on after it (a write it had begun ends before the job does
+anything). Each hash goes into the index at once, and the
+index is marked changed, so the next sync publishes a new version that
+carries the hashes to the secondaries and other devices. A file that
+can't be hashed is logged and tried again only in a later session. For
+the apps, the core's status reports the pass as `audio_hashes`:
+`running`, `hashed`, `total` and `failed`.
+
+**In sync.** When a sync would pass the limit, its removals alone would
+not, and some of its changes are replacements of FLAC or MP3 files, both
+copies of each (the primary's and the secondary's) are hashed, from the
+device's store where known and otherwise by reading them in full. Where
+the two match, the replacement is a tag edit: it is still made, but
+doesn't count. A file that can't be read, decoded or parsed counts as a
+real change. Once the pass has run, the secondary's copy is usually known
+(it was the primary's file before), so only the primary's new file is
+read.
 
 Hashes are kept so a file is read once:
 
 - On the device, in `audio-hashes.json` in the app's data folder, by the
   file's MD5 where the cloud lists one (Drive), so the primary's file is
   known again once it is on a secondary; on a local disk by folder, path,
-  size and modification time. Up to 50,000 are kept.
-- In the index, for the primary's file, as `audio_sha256`. This doesn't
-  make a new index version: the hash goes out with the next one. A file
-  indexed again because it changed loses its hash until sync makes it
-  again. Sync doesn't read these back, as a file rewritten with its size
-  and time kept would still match its row; they are for later features
-  such as tag editing and merging.
+  size and modification time. Keys carry the hash version. Up to 50,000
+  are kept.
+- In the index, for the primary's file, as `audio_sha256`. A file
+  indexed again because it changed loses its hash until the pass or a
+  sync makes it again. Sync doesn't read these back, as a file rewritten
+  with its size and time kept would still match its row; they are for
+  later features such as tag editing and merging.
 
 ## Applying changes, and the write order
 
@@ -454,6 +491,14 @@ become synced, and you can't switch back until it has space.
   there outside MediaLayer to `member.json` resets it.
 - Tag edits are told apart only for FLAC and MP3 files; other files that
   differ always count.
+- A FLAC file with two ID3v2 tags before its `fLaC` marker, or one with
+  a footer, can't be decoded, so it gets no hash and always counts as
+  changed.
+- The hash pass runs wherever the core runs, so on an iPhone it would
+  download the whole library over the phone's connection; the iOS app
+  needs to limit it (Wi-Fi only, say) or turn it off.
+- The hash pass doesn't yet slow down while a track streams, so on a slow
+  connection the first pass competes with playback.
 - Each device lists its own secondaries in the primary's `repo.json`, so
   two devices with different secondaries overwrite each other's list.
 - Other members' `repo.json` is rewritten only by their next sync.

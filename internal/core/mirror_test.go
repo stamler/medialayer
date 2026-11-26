@@ -6,12 +6,17 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/mewkiz/flac"
+	"github.com/mewkiz/flac/frame"
+	"github.com/mewkiz/flac/meta"
 
 	"github.com/stamler/medialayer/internal/index"
 )
@@ -808,15 +813,15 @@ func TestMirrorDoesNotCountTagEdits(t *testing.T) {
 	ctx := context.Background()
 	c, lib, sec := newMirrorCore(t)
 	for i := range 8 {
-		write(t, filepath.Join(lib, fmt.Sprintf("Rip/%02d.flac", i)), testFLAC([]string{"TITLE=Old"}, nil, 20_000))
+		write(t, filepath.Join(lib, fmt.Sprintf("Rip/%02d.flac", i)), encodedFLAC(t, "Old", int64(i), 4096))
 	}
 	if err := c.sync(ctx); err != nil {
 		t.Fatal(err)
 	}
-	// Retagging all eight, with a cover, changes no audio.
+	// Retagging all eight changes no audio, and neither does encoding
+	// the same audio another way, as a re-encode at another level would.
 	for i := range 8 {
-		write(t, filepath.Join(lib, fmt.Sprintf("Rip/%02d.flac", i)),
-			testFLAC([]string{"TITLE=New title", "ARTIST=Someone"}, []byte("a cover"), 20_000))
+		write(t, filepath.Join(lib, fmt.Sprintf("Rip/%02d.flac", i)), encodedFLAC(t, "A new, longer title", int64(i), 1024))
 	}
 	if err := c.sync(ctx); err != nil {
 		t.Fatal(err)
@@ -843,16 +848,53 @@ func TestMirrorDoesNotCountTagEdits(t *testing.T) {
 
 	// New audio in four files is a real change: past the limit, it pauses.
 	for i := range 4 {
-		write(t, filepath.Join(lib, fmt.Sprintf("Rip/%02d.flac", i)),
-			testFLAC([]string{"TITLE=New title", "ARTIST=Someone"}, []byte("a cover"), 30_000))
+		write(t, filepath.Join(lib, fmt.Sprintf("Rip/%02d.flac", i)), encodedFLAC(t, "A new, longer title", int64(100+i), 1024))
 	}
 	// And a tag edit in another, which is counted as one only for the
 	// pause's review.
-	write(t, filepath.Join(lib, "Rip/07.flac"), testFLAC([]string{"TITLE=Again"}, nil, 20_000))
+	write(t, filepath.Join(lib, "Rip/07.flac"), encodedFLAC(t, "Again", 7, 1024))
 	if err := c.sync(ctx); err != nil {
 		t.Fatal(err)
 	}
 	if s := mirrorOf(t, c, "sec1"); s.State != MirrorPaused || s.Replaces != 5 || s.TagOnly != 1 {
 		t.Fatalf("secondary = %+v, want paused with 5 replaces, 1 of them tag-only", s)
 	}
+}
+
+// encodedFLAC is a real FLAC file, 16-bit stereo at 44.1 kHz, of 5,000
+// samples of noise from seed, with a TITLE tag; blockSize changes how
+// the same audio is encoded.
+func encodedFLAC(t *testing.T, title string, seed int64, blockSize int) []byte {
+	t.Helper()
+	const n = 5000
+	r := rand.New(rand.NewSource(seed))
+	audio := [2][]int32{make([]int32, n), make([]int32, n)}
+	for i := range n {
+		audio[0][i], audio[1][i] = int32(r.Intn(1<<16)-1<<15), int32(r.Intn(1<<16)-1<<15)
+	}
+	info := &meta.StreamInfo{BlockSizeMin: uint16(blockSize), BlockSizeMax: uint16(blockSize),
+		SampleRate: 44100, NChannels: 2, BitsPerSample: 16, NSamples: n}
+	tags := &meta.Block{Header: meta.Header{Type: meta.TypeVorbisComment, Length: 1}, // any length: the encoder works it out
+		Body: &meta.VorbisComment{Vendor: "test", Tags: [][2]string{{"TITLE", title}}}}
+	var b bytes.Buffer
+	enc, err := flac.NewEncoder(&b, info, tags)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for off := 0; off < n; off += blockSize {
+		size := min(blockSize, n-off)
+		f := &frame.Frame{Header: frame.Header{HasFixedBlockSize: true, BlockSize: uint16(size),
+			SampleRate: 44100, Channels: frame.ChannelsLR, BitsPerSample: 16}}
+		for c := range 2 {
+			f.Subframes = append(f.Subframes, &frame.Subframe{SubHeader: frame.SubHeader{Pred: frame.PredVerbatim},
+				Samples: append([]int32(nil), audio[c][off:off+size]...), NSamples: size})
+		}
+		if err := enc.WriteFrame(f); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := enc.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return b.Bytes()
 }

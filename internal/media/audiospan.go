@@ -15,25 +15,21 @@ var ErrNoAudio = errors.New("no audio past the tags")
 // spanWindow is how much is read at a time while finding the audio.
 const spanWindow = 64 * 1024
 
-// Span is where a file's audio is: bytes [Start, End), and for FLAC the
-// STREAMINFO block's body, which audio frames may rely on for their
-// sample rate and bit depth.
+// Span is where a file's audio is: bytes [Start, End).
 type Span struct {
 	Start, End int64
-	StreamInfo []byte
 }
 
-// AudioSpan finds the bytes of a file that hold its audio: the range
-// left once the tags at both ends are skipped. format is "flac" or
-// "mp3". Retagging a file (new tags, pictures or padding) leaves these
-// bytes as they were, so a hash of them and of the STREAMINFO block,
-// audio_sha256 in the index, tells a tag edit from a change to the audio.
+// AudioSpan finds the bytes of a lossy file that hold its audio: the
+// range left once the tags at both ends are skipped. format is "mp3".
+// Retagging a file (new tags, pictures or padding) leaves these bytes as
+// they were, so a hash of them, audio_sha256 in the index, tells a tag
+// edit from a change to the audio. Lossless files hash their decoded
+// samples instead (see HashFLACAudio).
 //
-// At the start it skips ID3v2 tags and, for FLAC, the "fLaC" marker and
-// every metadata block. At the end it skips an ID3v1 tag, an APEv2 tag
+// At the start it skips ID3v2 tags; at the end an ID3v1 tag, an APEv2 tag
 // and a Lyrics3 v2 tag, in any order. Only a few small reads are made,
-// whatever the size of the tags: a large picture block is stepped over,
-// not read.
+// whatever the size of the tags: a large tag is stepped over, not read.
 func AudioSpan(fetch FetchFunc, size int64, format string) (Span, error) {
 	r := &spanReader{fetch: fetch, size: size}
 	var s Span
@@ -42,10 +38,6 @@ func AudioSpan(fetch FetchFunc, size int64, format string) (Span, error) {
 		return Span{}, err
 	}
 	switch format {
-	case "flac":
-		if s.Start, s.StreamInfo, err = r.skipFLACMetadata(s.Start); err != nil {
-			return Span{}, err
-		}
 	case "mp3":
 	default:
 		return Span{}, fmt.Errorf("no audio span for format %q", format)
@@ -134,53 +126,6 @@ func (r *spanReader) skipID3v2(pos int64) (int64, error) {
 		pos += n
 	}
 	return 0, fmt.Errorf("more than %d ID3v2 tags", maxBlocks)
-}
-
-// skipFLACMetadata steps over the "fLaC" marker at pos and every metadata
-// block after it, and returns where the first audio frame starts and the
-// STREAMINFO block's body.
-func (r *spanReader) skipFLACMetadata(pos int64) (int64, []byte, error) {
-	b, err := r.bytes(pos, 4)
-	if err != nil || !bytes.Equal(b, []byte("fLaC")) {
-		if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) {
-			return 0, nil, err
-		}
-		return 0, nil, ErrNotFLAC
-	}
-	pos += 4
-	var info []byte
-	for range maxBlocks {
-		b, err := r.bytes(pos, 4)
-		if errors.Is(err, io.ErrUnexpectedEOF) {
-			return 0, nil, fmt.Errorf("file ends inside FLAC metadata: %w", ErrNotFLAC)
-		}
-		if err != nil {
-			return 0, nil, err
-		}
-		typ, last := b[0]&0x7f, b[0]&0x80 != 0
-		if typ == 127 {
-			return 0, nil, fmt.Errorf("invalid FLAC metadata block type: %w", ErrNotFLAC)
-		}
-		n := int64(b[1])<<16 | int64(b[2])<<8 | int64(b[3])
-		if pos+4+n > r.size {
-			return 0, nil, fmt.Errorf("FLAC metadata block runs past end of file: %w", ErrNotFLAC)
-		}
-		if typ == 0 && info == nil {
-			body, err := r.bytes(pos+4, n)
-			if err != nil {
-				return 0, nil, err
-			}
-			info = append([]byte{}, body...)
-		}
-		pos += 4 + n
-		if last {
-			if info == nil {
-				return 0, nil, fmt.Errorf("no STREAMINFO block: %w", ErrNotFLAC)
-			}
-			return pos, info, nil
-		}
-	}
-	return 0, nil, fmt.Errorf("more than %d FLAC metadata blocks: %w", maxBlocks, ErrNotFLAC)
 }
 
 // skipTrailers steps back over the tags at the end of the file, from end,
