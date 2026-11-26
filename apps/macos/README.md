@@ -1,6 +1,6 @@
 # MediaLayer for Mac (proof of concept)
 
-A SwiftUI player on the Go core in `internal/core`: sign in to Google
+A SwiftUI and AppKit player on the Go core in `internal/core`: sign in to Google
 Drive, pick the music folder, and the library indexes itself (only file
 headers are read) into SQLite, with the index, cover art and the primary
 record kept in a `.medialayer` folder on Drive. Browse with the column
@@ -53,10 +53,16 @@ on Drive.
 ## Songs table
 
 - To show or hide a column, right-click the table header or choose
-  View > Columns. To move a column, drag its header. The app keeps your
-  choice. Restore Default Columns in View > Columns resets it.
+  View > Columns. To move a column, drag its header. To resize a column,
+  drag the edge of its header. The app keeps your choices. Restore
+  Default Columns resets the columns, their order and their widths.
 - Album Artist, Composer, Disc, Bit Rate, Size and Date Modified are
   hidden at first. Name always shows.
+- Click a column header to sort by it. Click it again to reverse the
+  sort. The previous sort breaks ties.
+- Double-click a song or press Return to play it. Type the first letters
+  of the sorted column's text to jump to a song.
+- Songs and each playlist keep their own scroll position.
 - The Art column loads each cover when its row comes into view, and keeps
   at most 32 MB of thumbnails in memory.
 - The Clouds column shows an icon for each source of the track:
@@ -133,8 +139,6 @@ Known limits:
 - Each burst of playlist edits starts a full sync, which lists the
   library and every source. A job that only publishes the index is
   needed.
-- Switching between Songs and a playlist resets the table's scroll
-  position.
 - After a restore, a carried playlist that you edit before indexing
   ends keeps your version: songs the restored index didn't list yet
   aren't added back to it.
@@ -161,9 +165,63 @@ MediaPlayer framework:
 Media keys go to the app that played audio last, so press play in the
 app once before you use them.
 
+## How the window stays fluid
+
+The window is SwiftUI, except for the Songs table and the column
+browser's four lists. Those are AppKit table views (`NSTableView`) with
+plain, reused cells. SwiftUI's own table and lists made a view per cell
+and rebuilt them on each change, which made resizing, searching and the
+sidebar animation stutter.
+
+The app keeps each change local:
+
+1. The core's status, polled every half second, is in `StatusModel`.
+   Only the status bar, the source chips, the + under the sidebar and the
+   menus redraw when it changes.
+2. The search text and the browser choices announce changes through
+   `BrowseSignal`. Only the search field, the column browser and the
+   status bar redraw on a keystroke.
+3. The playback position is in `PlaybackClock`. Only the now-playing
+   display and the "started in" text redraw as it ticks.
+4. The Songs table gets its data from `AppModel.tableFeed`, not from
+   SwiftUI. After any change, AppModel sends the feed one update at the
+   end of the run loop turn, and only if the shown tracks, the sort, the
+   playing track or the sources changed. The table then:
+   - redraws only the rows whose track changed, if the rows are the same;
+   - reloads, if the rows changed. A reload creates cells only for the
+     rows on screen.
+   - redraws the Art cells of the old and the new playing track;
+   - redraws the Clouds cells when the sources change.
+5. AppModel sorts the library once for each change of the tracks or the
+   sort. The search and the browser only filter that sorted list. Each
+   browser list is computed once for each change of the search or of a
+   choice to its left.
+
+## Testing with a large library
+
+To try the window with 10,000 tracks without a large library, start the
+app from Terminal with `MEDIALAYER_FAKE_TRACKS`:
+
+```sh
+MEDIALAYER_FAKE_TRACKS=10000 apps/macos/MediaLayer.app/Contents/MacOS/MediaLayer
+```
+
+1. The app reads the library from the index as usual.
+2. It repeats the tracks until there are 10,000. Each copy gets a
+   distinct id, and its artist, album artist and album get the copy's
+   number, so the column browser grows too.
+3. The copies exist only in the app's memory. The app writes nothing
+   about them to the index or the core.
+4. A copy plays its original's file. Adding a copy to a playlist adds its
+   original.
+
+Check that the table scrolls smoothly, that the window resizes smoothly,
+that typing in the search field doesn't lag, and that the sidebar shows
+and hides smoothly.
+
 ## Not yet
 
 A publish-only job for playlist changes (see Known limits above),
 merging playlist changes made on two devices, header packs, the change feed, Proton,
 iCloud and SMB sources, the sync lease, following a primary moved on
-another device, and testing with 10,000 tracks.
+another device, and testing with a real library of 10,000 tracks.

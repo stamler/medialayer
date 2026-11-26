@@ -125,7 +125,8 @@ extension AppModel {
     func newPlaylist(with fileIDs: [String] = []) {
         do {
             let id = try Core.createPlaylist(name: "Untitled Playlist")
-            if !fileIDs.isEmpty { try Core.addToPlaylist(id, fileIDs: fileIDs) }
+            let files = Self.coreIDs(fileIDs)
+            if !files.isEmpty { try Core.addToPlaylist(id, fileIDs: files) }
             try reloadPlaylists()
             sidebarVisibility = .all
             sidebarSelection = .playlist(id)
@@ -153,9 +154,16 @@ extension AppModel {
     func add(_ fileIDs: [String], to id: String, before: Int = -1) {
         guard let p = playlists.first(where: { $0.id == id }) else { return }
         var have = Set(p.items)
-        let new = fileIDs.filter { have.insert($0).inserted }
+        let new = Self.coreIDs(fileIDs).filter { have.insert($0).inserted }
         guard !new.isEmpty else { return NSSound.beep() }
         change { try Core.addToPlaylist(id, fileIDs: new, before: before) }
+    }
+
+    /// The file ids to give the core: a debug copy's (MEDIALAYER_FAKE_TRACKS)
+    /// is its original's, and each id comes once.
+    private static func coreIDs(_ ids: [String]) -> [String] {
+        var seen = Set<String>()
+        return ids.map { Track.fileID(of: $0) }.filter { seen.insert($0).inserted }
     }
 
     func remove(_ fileIDs: [String], from id: String) {

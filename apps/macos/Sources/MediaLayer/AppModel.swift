@@ -259,12 +259,13 @@ final class AppModel: ObservableObject {
                 art.artDir = status.artDir
             }
             let read = try db?.tracksWithVersion()
-            let newTracks = read?.tracks ?? []
+            let realTracks = read?.tracks ?? []
+            let newTracks = Self.withFakeTracks(realTracks)
             let version = read?.version ?? IndexVersion()
             // Rebuild what derives from the tracks only when they changed:
             // a sync that publishes changes the version, not the tracks.
             if newTracks != tracks {
-                cloudIndex = CloudIndex(tracks: newTracks, version: version)
+                cloudIndex = CloudIndex(tracks: realTracks, version: version)
                 tracks = newTracks
             } else if cloudIndex.version != version {
                 cloudIndex.version = version
@@ -279,6 +280,24 @@ final class AppModel: ObservableObject {
             libraryError = error.localizedDescription
         }
         lastLoad = Date()
+    }
+
+    /// MEDIALAYER_FAKE_TRACKS=n: show n tracks, made by repeating the
+    /// library's (see Track.fakeCopy), to try the window with a large
+    /// library. The copies exist only here; nothing writes them anywhere.
+    private static let fakeTrackCount = Int(ProcessInfo.processInfo.environment["MEDIALAYER_FAKE_TRACKS"] ?? "") ?? 0
+
+    private static func withFakeTracks(_ real: [Track]) -> [Track] {
+        let n = fakeTrackCount
+        guard n > real.count, !real.isEmpty else { return real }
+        var out = real
+        out.reserveCapacity(n)
+        var copy = 1
+        while out.count < n {
+            for t in real where out.count < n { out.append(t.fakeCopy(copy)) }
+            copy += 1
+        }
+        return out
     }
 
     /// Rereads the playlists, after the core changed them or the index
@@ -607,8 +626,8 @@ final class Player: ObservableObject {
         clock.startLatency = nil
         clock.position = 0
         started = Date()
-        if queue.indices.contains(i + 1) { Core.prepare(queue[i + 1].id) }
-        let url = base.appendingPathComponent("\(track.id).\(track.format)")
+        if queue.indices.contains(i + 1) { Core.prepare(queue[i + 1].fileID) }
+        let url = base.appendingPathComponent("\(track.fileID).\(track.format)")
         let item = AVPlayerItem(url: url)
         itemObservation = item.observe(\.status) { [weak self] item, _ in
             guard item.status == .failed else { return }

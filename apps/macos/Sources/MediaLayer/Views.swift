@@ -235,7 +235,7 @@ struct LibraryView: View {
                     .onChange(of: selection) { _, ids in
                         // Look up the selected track's cloud file now, so pressing
                         // play doesn't wait for it.
-                        if ids.count == 1, let id = ids.first { Core.prepare(id) }
+                        if ids.count == 1, let id = ids.first { Core.prepare(Track.fileID(of: id)) }
                     }
             }
             .safeAreaInset(edge: .bottom, spacing: 0) { StatusBar() }

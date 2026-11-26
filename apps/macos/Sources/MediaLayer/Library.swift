@@ -33,6 +33,33 @@ struct Track: Identifiable, Hashable {
     var bitRate: Int64 { durationMS > 0 ? size * 8 / durationMS : 0 }
 }
 
+// Debug copies of tracks, for MEDIALAYER_FAKE_TRACKS (AppModel). A copy's
+// id is its original's, a mark and the copy's number, so every row is
+// distinct; anything that goes to the core uses fileID, the original's.
+extension Track {
+    static let fakeMark: Character = "\u{1F}" // never in a file id
+
+    /// The id the core knows this track's file by.
+    var fileID: String { Track.fileID(of: id) }
+
+    static func fileID(of id: String) -> String {
+        guard let i = id.firstIndex(of: fakeMark) else { return id }
+        return String(id[..<i])
+    }
+
+    /// Copy `n` of this track. Its artist, album artist and album get the
+    /// number too, so the column browser grows as a real library would.
+    func fakeCopy(_ n: Int) -> Track {
+        func numbered(_ s: String) -> String { s.isEmpty ? s : "\(s) \(n)" }
+        return Track(
+            id: "\(id)\(Track.fakeMark)\(n)", path: path, format: format, size: size, durationMS: durationMS,
+            sampleRate: sampleRate, bitDepth: bitDepth, title: title, artist: numbered(artist),
+            albumArtist: numbered(albumArtist), album: numbered(album), genre: genre, composer: composer,
+            trackNumber: trackNumber, discNumber: discNumber, year: year, artSHA: artSHA, mtimeMS: mtimeMS
+        )
+    }
+}
+
 /// The index's version, read with the tracks. `dirty` means the index has
 /// changed since that version was made.
 struct IndexVersion: Equatable {
