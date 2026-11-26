@@ -21,7 +21,7 @@ import (
 // a later session.
 
 // hashFormats are the formats the pass hashes.
-var hashFormats = []string{"flac", "mp3", "m4a"}
+var hashFormats = []string{"flac", "mp3", "m4a", "caf"}
 
 // AudioHashStatus is the hash pass's progress, as Status reports it.
 type AudioHashStatus struct {

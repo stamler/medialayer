@@ -215,13 +215,15 @@ leaves it as it was:
     and the samples are checked against the STREAMINFO block's MD5 and
     sample count where the encoder recorded them, with no audio frame
     after the count.
-  - **ALAC** in MP4 (`internal/media/alac.go`, container in `mp4.go`):
+  - **ALAC**, in MP4 or CAF (`internal/media/alac.go`, containers in
+    `mp4.go` and `caf.go`):
     MediaLayer's own decoder, after Apple's reference decoder and
     ffmpeg's, for 4 to 32 bits and up to 8 channels, which it puts in
     WAVE order. ALAC has no checksum of its own, so a damaged file is
     caught only when it fails to decode. The packets are read in the
-    order the sample table gives, in one pass over the audio after the
-    `moov` box (read first, wherever it is).
+    order the container's packet table gives, in one pass over the audio
+    after the tables (MP4's `moov` box, CAF's `pakt` chunk), which are
+    read first, wherever they are.
   - Both decoders' tests check ffmpeg-encoded files
     (`internal/media/testdata`, made by `scripts/make-audio-fixtures.sh`)
     against ffmpeg's own decoding, and FLAC and ALAC copies of the same
@@ -506,7 +508,7 @@ become synced, and you can't switch back until it has space.
 - The daily limit's count is kept on the secondary, so a change made
   there outside MediaLayer to `member.json` resets it.
 - Tag edits are told apart only for the formats MediaLayer reads (FLAC,
-  MP3, ALAC and AAC in MP4); other files that differ always count.
+  MP3, ALAC in MP4 or CAF, AAC in MP4); other files that differ always count.
 - The hash pass runs wherever the core runs, so on an iPhone it would
   download the whole library over the phone's connection; the iOS app
   needs to limit it (Wi-Fi only, say) or turn it off.

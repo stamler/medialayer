@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/hex"
+	"errors"
 	"io"
 	"math/rand"
 	"os"
@@ -99,13 +100,17 @@ func fileFuncs(t *testing.T, name string) (FetchFunc, OpenFunc, int64) {
 func TestALACFixturesMatchFFmpeg(t *testing.T) {
 	n := 0
 	for name, want := range fixtureHashes(t) {
-		if ext := filepath.Ext(name); ext != ".m4a" && ext != ".mp4" {
+		if ext := filepath.Ext(name); ext != ".m4a" && ext != ".mp4" && ext != ".caf" {
 			continue
 		}
 		n++
 		t.Run(name, func(t *testing.T) {
 			fetch, open, size := fileFuncs(t, name)
-			got, err := HashMP4Audio(fetch, open, size)
+			hash := HashMP4Audio
+			if filepath.Ext(name) == ".caf" {
+				hash = HashCAFAudio
+			}
+			got, err := hash(fetch, open, size)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -114,7 +119,7 @@ func TestALACFixturesMatchFFmpeg(t *testing.T) {
 			}
 		})
 	}
-	if n < 5 {
+	if n < 7 {
 		t.Fatalf("only %d ALAC fixtures", n)
 	}
 }
@@ -192,10 +197,46 @@ func TestDamagedFilesDontPanic(t *testing.T) {
 			case ".flac":
 				_, _ = HashFLACAudio(bytes.NewReader(b))
 				_, _, _ = FLACHeader(fetch, int64(len(b)), 1<<20)
+			case ".caf":
+				_, _ = HashCAFAudio(fetch, open, int64(len(b)))
+				_, _ = ParseCAF(fetch, int64(len(b)))
 			default:
 				_, _ = HashMP4Audio(fetch, open, int64(len(b)))
 				_, _ = ParseMP4(fetch, int64(len(b)))
 			}
 		}
+	}
+}
+
+func TestParseCAF(t *testing.T) {
+	fetch, _, size := fileFuncs(t, "alac16.caf")
+	info, err := ParseCAF(fetch, size)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Format != "caf" || info.SampleRate != 44100 || info.BitDepth != 16 || info.Channels != 2 {
+		t.Fatalf("stream %+v", info)
+	}
+	// ffmpeg counts whole packets, so its duration can run a packet long.
+	if info.DurationMS < 300 || info.DurationMS > 300+4096*1000/44100 {
+		t.Fatalf("duration %d ms", info.DurationMS)
+	}
+	tags := map[string]string{}
+	for _, tag := range info.Tags {
+		tags[tag.Key] = tag.Value
+	}
+	for k, v := range map[string]string{"TITLE": "A Title", "ARTIST": "An Artist", "ALBUM": "An Album",
+		"TRACKNUMBER": "3", "TRACKTOTAL": "12", "DATE": "2024"} {
+		if tags[k] != v {
+			t.Errorf("%s = %q, want %q (tags %v)", k, tags[k], v, info.Tags)
+		}
+	}
+	fetch, _, size = fileFuncs(t, "alac24-51.caf")
+	if info, err = ParseCAF(fetch, size); err != nil || info.BitDepth != 24 || info.Channels != 6 || info.SampleRate != 48000 {
+		t.Fatalf("24-bit 5.1: %+v, %v", info, err)
+	}
+	fetch, _, size = fileFuncs(t, "alac16.m4a")
+	if _, err := ParseCAF(fetch, size); !errors.Is(err, ErrNotCAF) {
+		t.Fatalf("an MP4 file read as CAF: %v", err)
 	}
 }

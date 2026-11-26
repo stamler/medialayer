@@ -180,7 +180,7 @@ func TestIndexAndHashALAC(t *testing.T) {
 	c.mu.Unlock()
 	for name, to := range map[string]string{
 		"alac16-tagged.m4a": "M4A/01.m4a", "flac16.flac": "M4A/same.flac", "aac-tagged.m4a": "M4A/02.m4a",
-		"alac16-mono.mp4": "M4A/03.mp4",
+		"alac16-mono.mp4": "M4A/03.mp4", "alac16.caf": "M4A/04.caf",
 	} {
 		b, err := os.ReadFile(filepath.Join("..", "media", "testdata", name))
 		if err != nil {
@@ -215,7 +215,12 @@ func TestIndexAndHashALAC(t *testing.T) {
 		hashes[p] = h
 	}
 	_ = rows.Close()
-	if len(hashes) != 4 || hashes["M4A/01.m4a"] == "" || hashes["M4A/01.m4a"] != hashes["M4A/same.flac"] ||
+	if err := db.QueryRow(`SELECT f.format, f.bit_depth, t.value FROM file f JOIN tag t ON t.file_id = f.id AND t.key = 'TITLE'
+		WHERE f.path = 'M4A/04.caf'`).Scan(&format, &bits, &title); err != nil || format != "caf" || bits != 16 || title != "A Title" {
+		t.Fatalf("04.caf indexed as %q, %d bits, %q (%v)", format, bits, title, err)
+	}
+	if len(hashes) != 5 || hashes["M4A/01.m4a"] == "" || hashes["M4A/01.m4a"] != hashes["M4A/same.flac"] ||
+		hashes["M4A/04.caf"] != hashes["M4A/same.flac"] ||
 		hashes["M4A/02.m4a"] == "" || hashes["M4A/03.mp4"] == "" {
 		t.Fatalf("hashes = %v, want ALAC and FLAC of the same audio to match", hashes)
 	}

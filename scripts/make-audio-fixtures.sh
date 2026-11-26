@@ -24,10 +24,13 @@ ff -i src.wav -c:a alac -sample_fmt s16p alac16.m4a
 ff -i src.wav -i cover.png -map 0 -map 1 -c:a alac -sample_fmt s16p -c:v copy -disposition:v attached_pic \
 	-metadata title="A Title" -metadata artist="An Artist" -metadata album="An Album" -metadata track=3/12 \
 	-metadata disc=1/2 -metadata genre=Rock -metadata date=2024 -metadata album_artist="Various" alac16-tagged.m4a
+ff -i src.wav -c:a alac -sample_fmt s16p -metadata title="A Title" -metadata artist="An Artist" \
+	-metadata album="An Album" -metadata track=3/12 -metadata date=2024 alac16.caf
 ff -i src.wav -c:a aac -b:a 96k aac.m4a
 ff -i src.wav -i cover.png -map 0 -map 1 -c:a aac -b:a 96k -c:v copy -disposition:v attached_pic \
 	-metadata title="A Title" -metadata artist="An Artist" aac-tagged.m4a
 src 0.2 96000 stereo; ff -i src.wav -c:a alac -sample_fmt s32p alac24.m4a
+src 0.1 48000 5.1; ff -i src.wav -c:a alac -sample_fmt s32p alac24-51.caf
 src 0.2 48000 mono; ff -i src.wav -c:a alac -sample_fmt s16p alac16-mono.mp4
 # Stretches of silence, which ALAC codes as runs of zeros.
 ff -f lavfi -i "aevalsrc=if(lt(mod(t\\,0.1)\\,0.05)\\,0.2*sin(2*PI*440*t)\\,0)|0:s=44100:d=0.4" -c:a alac -sample_fmt s16p alac16-quiet.m4a

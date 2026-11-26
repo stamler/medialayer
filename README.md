@@ -20,7 +20,7 @@ The macOS app ([apps/macos](apps/macos/README.md)):
 - **Indexing.** You pick a music folder on Drive. The core reads only the
   file headers into a SQLite index. It resumes if interrupted, and later
   syncs index only new and changed files. It reads FLAC (`.flac`), MP3,
-  and ALAC or AAC in MP4 (`.m4a`, `.mp4`, `.m4b`).
+  ALAC or AAC in MP4 (`.m4a`, `.mp4`, `.m4b`), and ALAC in CAF (`.caf`).
 - **The `.medialayer` folder.** The core saves the index (as numbered
   versions), the cover art packs and the library record (`repo.json`) in
   the music folder. A new device restores the library from it in seconds.
