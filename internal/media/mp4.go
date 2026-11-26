@@ -174,12 +174,32 @@ func fullBox(b []byte) []byte {
 // is not a track: ErrUnsupported. So is one whose audio tracks are all in
 // codecs MediaLayer doesn't read.
 func MP4AudioTrack(moov []byte) (*MP4Track, error) {
+	// Chapter images (audiobooks, podcasts) are a video track that a
+	// track's "tref/chap" names: not a video.
+	chapters := map[uint32]bool{}
+	for _, trak := range boxes(moov) {
+		if chap := boxPath(trak.body, "tref", "chap"); trak.typ == "trak" {
+			for i := 0; i+4 <= len(chap); i += 4 {
+				chapters[binary.BigEndian.Uint32(chap[i:])] = true
+			}
+		}
+	}
 	for _, trak := range boxes(moov) {
 		mdia := child(trak.body, "mdia")
-		if hdlr := fullBox(child(mdia, "hdlr")); trak.typ == "trak" && len(hdlr) >= 8 && string(hdlr[4:8]) == "vide" {
-			if stsz := fullBox(boxPath(mdia, "minf", "stbl", "stsz")); len(stsz) < 8 || binary.BigEndian.Uint32(stsz[4:]) > 1 {
-				return nil, fmt.Errorf("a video: %w (%w)", ErrNotMP4, ErrUnsupported)
+		if hdlr := fullBox(child(mdia, "hdlr")); trak.typ != "trak" || len(hdlr) < 8 || string(hdlr[4:8]) != "vide" {
+			continue
+		}
+		if tkhd := child(trak.body, "tkhd"); len(tkhd) >= 24 {
+			id := binary.BigEndian.Uint32(tkhd[12:]) // version 0
+			if tkhd[0] == 1 {
+				id = binary.BigEndian.Uint32(tkhd[20:])
 			}
+			if chapters[id] {
+				continue
+			}
+		}
+		if stsz := fullBox(boxPath(mdia, "minf", "stbl", "stsz")); len(stsz) >= 8 && binary.BigEndian.Uint32(stsz[4:]) > 1 {
+			return nil, fmt.Errorf("a video: %w (%w)", ErrNotMP4, ErrUnsupported)
 		}
 	}
 	var unsupported error

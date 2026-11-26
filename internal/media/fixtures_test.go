@@ -3,6 +3,7 @@ package media
 import (
 	"bufio"
 	"bytes"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"io"
@@ -211,6 +212,32 @@ func TestAACHashIgnoresTags(t *testing.T) {
 	}
 	if _, err := HashMP4Audio(fetch, open, size); !errors.Is(err, ErrUnsupported) {
 		t.Errorf("a video's hash: %v", err)
+	}
+	// The same video track named as the audio's chapter images: not a
+	// video, so the audio is a track.
+	moov, err := ReadMP4Moov(fetch, size)
+	if err != nil {
+		t.Fatal(err)
+	}
+	box := func(typ string, body []byte) []byte {
+		return cat(binary.BigEndian.AppendUint32(nil, uint32(8+len(body))), []byte(typ), body)
+	}
+	var videoID uint32
+	for _, b := range boxes(moov) {
+		if hdlr := fullBox(boxPath(b.body, "mdia", "hdlr")); len(hdlr) >= 8 && string(hdlr[4:8]) == "vide" {
+			videoID = binary.BigEndian.Uint32(child(b.body, "tkhd")[12:])
+		}
+	}
+	var chaptered []byte
+	for _, b := range boxes(moov) {
+		body := b.body
+		if hdlr := fullBox(boxPath(b.body, "mdia", "hdlr")); len(hdlr) >= 8 && string(hdlr[4:8]) == "soun" {
+			body = cat(body, box("tref", box("chap", binary.BigEndian.AppendUint32(nil, videoID))))
+		}
+		chaptered = append(chaptered, box(b.typ, body)...)
+	}
+	if tr, err := MP4AudioTrack(chaptered); err != nil || tr.Codec != "aac" {
+		t.Errorf("chapter images: %+v, %v", tr, err)
 	}
 	if bytes.Equal(h("aac.m4a"), h("alac16.m4a")) {
 		t.Fatal("AAC and ALAC hash the same")
