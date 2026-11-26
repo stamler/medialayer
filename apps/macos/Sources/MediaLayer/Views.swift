@@ -425,9 +425,19 @@ struct BrowserColumn: View, Equatable {
     let title: String
     let values: [String]
     @Binding var selection: String?
+    /// The choice when this view was made. A Binding reads the live value,
+    /// so == compares this instead.
+    let selected: String?
+
+    init(title: String, values: [String], selection: Binding<String?>) {
+        self.title = title
+        self.values = values
+        _selection = selection
+        selected = selection.wrappedValue
+    }
 
     static func == (a: BrowserColumn, b: BrowserColumn) -> Bool {
-        a.title == b.title && a.selection == b.selection && a.values == b.values
+        a.title == b.title && a.selected == b.selected && a.values == b.values
     }
 
     var body: some View {

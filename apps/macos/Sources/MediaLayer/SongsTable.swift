@@ -540,7 +540,8 @@ final class SongsTableController: NSObject, NSTableViewDataSource, NSTableViewDe
     /// Only a playlist takes drops, between rows.
     func tableView(_ tableView: NSTableView, validateDrop info: NSDraggingInfo, proposedRow row: Int,
                    proposedDropOperation dropOperation: NSTableView.DropOperation) -> NSDragOperation {
-        guard state.playlistID != nil else { return [] }
+        // A sorted or searched playlist can't be reordered (dropOnTable refuses).
+        guard state.playlistID != nil, state.sortOrder.isEmpty, !model.isSearching else { return [] }
         if dropOperation == .on { tableView.setDropRow(row, dropOperation: .above) }
         return (info.draggingSource as? NSTableView) === tableView ? .move : .copy
     }
@@ -621,6 +622,8 @@ final class ArtCell: NSTableCellView {
     private let speaker = NSImageView(frame: .zero)
     private var sha: String?
     private var loading: Task<Void, Never>?
+    /// The cover `sha` has no readable image, so it isn't decoded again.
+    private var missing = false
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -650,9 +653,10 @@ final class ArtCell: NSTableCellView {
 
     func show(sha: String?, playing: Bool, art: ArtCache) {
         speaker.isHidden = !playing
-        if sha == self.sha, cover.image != nil || loading != nil { return } // showing or loading it
+        if sha == self.sha, cover.image != nil || loading != nil || missing { return } // showing, loading or none
         cancelLoad()
         self.sha = sha
+        missing = false
         guard let sha else {
             cover.image = nil
             return
@@ -666,6 +670,7 @@ final class ArtCell: NSTableCellView {
             let image = await art.image(sha, size: Self.pixels)
             guard let self, !Task.isCancelled, self.sha == sha else { return } // reused since
             self.cover.image = image
+            self.missing = image == nil
             self.loading = nil
         }
     }
@@ -871,17 +876,17 @@ enum SongColumn: String, CaseIterable, Identifiable {
     func comparator(_ order: SortOrder) -> KeyPathComparator<Track>? {
         switch self {
         case .art, .clouds: return nil
-        case .name: return KeyPathComparator(\Track.displayTitle, order: order)
+        case .name: return KeyPathComparator(\Track.displayTitle, comparator: String.StandardComparator.localizedStandard, order: order)
         case .time: return KeyPathComparator(\Track.durationMS, order: order)
-        case .artist: return KeyPathComparator(\Track.artist, order: order)
-        case .albumArtist: return KeyPathComparator(\Track.albumArtist, order: order)
-        case .album: return KeyPathComparator(\Track.album, order: order)
-        case .genre: return KeyPathComparator(\Track.genre, order: order)
-        case .composer: return KeyPathComparator(\Track.composer, order: order)
-        case .year: return KeyPathComparator(\Track.year, order: order)
+        case .artist: return KeyPathComparator(\Track.artist, comparator: String.StandardComparator.localizedStandard, order: order)
+        case .albumArtist: return KeyPathComparator(\Track.albumArtist, comparator: String.StandardComparator.localizedStandard, order: order)
+        case .album: return KeyPathComparator(\Track.album, comparator: String.StandardComparator.localizedStandard, order: order)
+        case .genre: return KeyPathComparator(\Track.genre, comparator: String.StandardComparator.localizedStandard, order: order)
+        case .composer: return KeyPathComparator(\Track.composer, comparator: String.StandardComparator.localizedStandard, order: order)
+        case .year: return KeyPathComparator(\Track.year, comparator: String.StandardComparator.localizedStandard, order: order)
         case .disc: return KeyPathComparator(\Track.discNumber, order: order)
         case .track: return KeyPathComparator(\Track.trackNumber, order: order)
-        case .kind: return KeyPathComparator(\Track.format, order: order)
+        case .kind: return KeyPathComparator(\Track.format, comparator: String.StandardComparator.localizedStandard, order: order)
         case .bitRate: return KeyPathComparator(\Track.bitRate, order: order)
         case .size: return KeyPathComparator(\Track.size, order: order)
         case .modified: return KeyPathComparator(\Track.mtimeMS, order: order)
