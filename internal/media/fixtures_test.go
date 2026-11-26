@@ -77,6 +77,42 @@ func TestFLACDecoderChecksAndTags(t *testing.T) {
 			t.Errorf("%s: %x, %v", name, got, err)
 		}
 	}
+	// FLACHeader and ParseFLAC find the stream after both tags too.
+	two := cat(tag, footer, file)
+	header, _, err := FLACHeader(fetchAll(two), int64(len(two)), 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info, err := ParseFLAC(header); err != nil || info.SampleRate != 44100 {
+		t.Fatalf("after two ID3v2 tags: %+v, %v", info, err)
+	}
+	// With no sample count in STREAMINFO, an ID3v1 tag still ends the
+	// audio, and other bytes there are damage.
+	unknown := bytes.Clone(file)
+	si := unknown[8:]
+	si[13] &= 0xf0
+	clear(si[14:18])
+	if got, err := HashFLACAudio(bytes.NewReader(cat(unknown, id3v1()))); err != nil || hex.EncodeToString(got) != want {
+		t.Errorf("no sample count, ID3v1 after: %x, %v", got, err)
+	}
+	if _, err := HashFLACAudio(bytes.NewReader(cat(unknown, id3v1()[:100]))); err == nil {
+		t.Error("no sample count, a cut ID3v1 tag after: hashed")
+	}
+	// STREAMINFO must come first, at 34 bytes.
+	long := cat(file[:5], []byte{0, 0, 35}, file[8:42], []byte{0}, file[42:])
+	if _, err := HashFLACAudio(bytes.NewReader(long)); !errors.Is(err, ErrNotFLAC) {
+		t.Errorf("STREAMINFO of 35 bytes: %v", err)
+	}
+	// Full-scale 32-bit stereo whose side channel ffmpeg wrapped at 32
+	// bits, which RFC 9639 doesn't allow: no hash, rather than wrapping
+	// the samples back as ffmpeg does.
+	wrapped, err := os.ReadFile("testdata/flac32-wrapped-side.flac")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := HashFLACAudio(bytes.NewReader(wrapped)); !errors.Is(err, ErrAudioMismatch) {
+		t.Errorf("wrapped side channel: %v", err)
+	}
 	// A flipped bit in the audio fails a frame's CRC.
 	bad := bytes.Clone(file)
 	bad[len(bad)-2000] ^= 0x10

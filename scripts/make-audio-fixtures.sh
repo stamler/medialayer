@@ -35,16 +35,23 @@ src 0.2 48000 mono; ff -i src.wav -c:a alac -sample_fmt s16p alac16-mono.mp4
 # Stretches of silence, which ALAC codes as runs of zeros.
 ff -f lavfi -i "aevalsrc=if(lt(mod(t\\,0.1)\\,0.05)\\,0.2*sin(2*PI*440*t)\\,0)|0:s=44100:d=0.4" -c:a alac -sample_fmt s16p alac16-quiet.m4a
 ff -f lavfi -i "aevalsrc=if(lt(mod(t\\,0.1)\\,0.05)\\,0.2*sin(2*PI*440*t)\\,0)|0:s=44100:d=0.4" -c:a flac -sample_fmt s16 flac16-quiet.flac
+# Left at the 32-bit maximum, right at the minimum: ffmpeg wraps the side
+# channel at 32 bits, which RFC 9639 doesn't allow, so it has no hash.
+python3 -c "import struct,sys; n=2400; sys.stdout.buffer.write(b'RIFF'+struct.pack('<I',36+8*n)+b'WAVEfmt '+
+	struct.pack('<IHHIIHH',16,1,2,48000,384000,8,32)+b'data'+struct.pack('<I',8*n)+b''.join(struct.pack('<ii',*((2**31-1,-2**31) if i%7<3 else (-2**31,2**31-1))) for i in range(n)))" > src.wav
+ff -i src.wav -c:a flac -strict experimental -ch_mode left_side -lpc_type none flac32-wrapped-side.flac
 rm -f src.wav cover.png
 : > audio-hashes.txt
 for f in *.flac *.m4a *.mp4 *.caf *.oga; do
 	[ -e "$f" ] || continue
 	codec=$(ffprobe -v error -select_streams a:0 -show_entries stream=codec_name -of csv=p=0 "$f")
 	[ "$codec" = flac ] || [ "$codec" = alac ] || continue
+	case $f in *-wrapped-side.*) continue;; esac
 	bits=$(ffprobe -v error -select_streams a:0 -show_entries stream=bits_per_raw_sample -of csv=p=0 "$f")
 	rate=$(ffprobe -v error -select_streams a:0 -show_entries stream=sample_rate -of csv=p=0 "$f")
 	chans=$(ffprobe -v error -select_streams a:0 -show_entries stream=channels -of csv=p=0 "$f")
-	case $bits in 8) fmt=s8;; 16) fmt=s16le;; 24) fmt=s24le;; *) fmt=s32le;; esac
+	# Only whole-byte depths: ffmpeg shifts others up to fill a byte.
+	case $bits in 8) fmt=s8;; 16) fmt=s16le;; 24) fmt=s24le;; 32) fmt=s32le;; *) echo "$f: $bits bits" >&2; exit 1;; esac
 	sum=$( (printf 'pcm\0'; python3 -c "import struct,sys; sys.stdout.buffer.write(struct.pack('<IBB',$rate,$chans,$bits))";
 		ffmpeg -v error -i "$f" -map 0:a -f "$fmt" -) | sha256sum | cut -d' ' -f1)
 	echo "$f $sum" >> audio-hashes.txt

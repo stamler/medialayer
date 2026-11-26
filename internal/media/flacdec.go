@@ -102,7 +102,10 @@ func NewFLACDecoder(r io.ByteReader) (*FLACDecoder, error) {
 		if typ == 127 {
 			return nil, fmt.Errorf("invalid FLAC metadata block type: %w", ErrNotFLAC)
 		}
-		if typ == 0 && !seen {
+		if seen == (typ == 0) || typ == 0 && n != 34 {
+			return nil, fmt.Errorf("STREAMINFO isn't the first metadata block, of 34 bytes: %w", ErrNotFLAC)
+		}
+		if typ == 0 {
 			body := make([]byte, n)
 			for i := range body {
 				v, err := br.bits(8)
@@ -142,20 +145,44 @@ func newFLACFrameDecoder(info StreamInfo, r io.ByteReader) *FLACDecoder {
 // stream, io.EOF).
 var ErrFLACFrame = errors.New("bad FLAC frame")
 
+// errMaybeID3v1 is a frame that starts with a "T": no frame, but maybe
+// an ID3v1 tag, which some taggers append ("TAG" and 125 more bytes).
+var errMaybeID3v1 = fmt.Errorf("%w: no frame sync code", ErrFLACFrame)
+
+// restIsID3v1 reports whether the rest of the stream, after a Next that
+// returned errMaybeID3v1, is the rest of an ID3v1 tag.
+func (d *FLACDecoder) restIsID3v1() bool {
+	for i := range 127 {
+		c, err := d.br.bits(8)
+		if err != nil || i == 0 && c != 'A' || i == 1 && c != 'G' {
+			return false
+		}
+	}
+	_, err := d.br.bits(8)
+	return errors.Is(err, io.ErrUnexpectedEOF)
+}
+
 // Next decodes the next frame into d.Samples and returns its sample
 // count per channel, or io.EOF at a clean end of the stream.
 func (d *FLACDecoder) Next() (int, error) {
 	br := d.br
 	br.crc, br.crc8, br.crc16 = true, 0, 0
 	start := br.taken
-	sync, err := br.bits(15)
+	b0, err := br.bits(8)
 	if err != nil {
 		if errors.Is(err, io.ErrUnexpectedEOF) && br.taken == start {
 			return 0, io.EOF
 		}
 		return 0, fmt.Errorf("%w: %v", ErrFLACFrame, err)
 	}
-	if sync != 0x7ffc { // 14-bit sync code and a reserved 0
+	if b0 == 'T' {
+		return 0, errMaybeID3v1
+	}
+	b1, err := br.bits(7)
+	if err != nil {
+		return 0, fmt.Errorf("%w: %v", ErrFLACFrame, err)
+	}
+	if b0 != 0xff || b1 != 0x7c { // 14-bit sync code and a reserved 0
 		return 0, fmt.Errorf("%w: no frame sync code", ErrFLACFrame)
 	}
 	n, err := d.frame()
@@ -254,7 +281,7 @@ func (d *FLACDecoder) frame() (int, error) {
 		return 0, fmt.Errorf("frame of %d channels, %d bits at %d Hz in a stream of %d, %d at %d: %w",
 			channels, bps, rate, info.Channels, info.BitsPerSample, info.SampleRate, ErrAudioMismatch)
 	}
-	if blockSize > 65536 {
+	if blockSize > 65535 {
 		return 0, errCorrupt
 	}
 

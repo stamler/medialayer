@@ -75,13 +75,20 @@ func FLACHeader(fetch FetchFunc, size, maxLen int64) (header []byte, complete bo
 
 	var pos int64
 
-	// Some taggers put an ID3v2 tag before the FLAC marker. Skip it.
-	if len(buf) >= 10 && bytes.Equal(buf[:3], []byte("ID3")) {
-		tagSize := int64(buf[6]&0x7f)<<21 | int64(buf[7]&0x7f)<<14 | int64(buf[8]&0x7f)<<7 | int64(buf[9]&0x7f)
-		pos = 10 + tagSize
-		if buf[5]&0x10 != 0 { // footer present
-			pos += 10
+	// Some taggers put ID3v2 tags before the FLAC marker. Skip them.
+	for range maxBlocks {
+		if err := ensure(pos + 10); err != nil {
+			return nil, false, err
 		}
+		if int64(len(buf)) < pos+10 || !bytes.Equal(buf[pos:pos+3], []byte("ID3")) {
+			break
+		}
+		h := buf[pos : pos+10]
+		next := pos + 10 + int64(syncsafe(h[6:10]))
+		if h[5]&0x10 != 0 { // footer present
+			next += 10
+		}
+		pos = next
 	}
 
 	if err := ensure(pos + 4); err != nil {

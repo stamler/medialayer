@@ -20,11 +20,15 @@ const (
 // parsed as far as it goes: blocks cut off at the end are skipped.
 func ParseFLAC(header []byte) (*Info, error) {
 	pos := 0
-	if len(header) >= 10 && bytes.Equal(header[:3], []byte("ID3")) {
-		pos = 10 + syncsafe(header[6:10])
-		if header[5]&0x10 != 0 {
-			pos += 10
+	for range maxBlocks { // ID3v2 tags some taggers put first
+		if len(header) < pos+10 || !bytes.Equal(header[pos:pos+3], []byte("ID3")) {
+			break
 		}
+		next := pos + 10 + syncsafe(header[pos+6:pos+10])
+		if header[pos+5]&0x10 != 0 {
+			next += 10
+		}
+		pos = next
 	}
 	if len(header) < pos+4 || !bytes.Equal(header[pos:pos+4], []byte("fLaC")) {
 		return nil, ErrNotFLAC

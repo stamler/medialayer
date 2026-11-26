@@ -77,10 +77,10 @@ func (h *pcmHash) add(chans [][]int64, n int, order []int) error {
 // HashFLACAudio decodes the native FLAC stream in r (a whole file, ID3v2
 // tags before it allowed) and returns its audio hash (see pcmHash). The
 // decoded audio is checked against STREAMINFO's MD5 and sample count
-// where the encoder recorded them; a mismatch is ErrAudioMismatch. Bytes
-// after the last sample STREAMINFO counts that aren't an audio frame (an
-// ID3v1 tag some taggers append) are ignored; another frame there is a
-// mismatch. Every bit depth FLAC allows, 4 to 32, is decoded.
+// where the encoder recorded them; a mismatch is ErrAudioMismatch. An
+// ID3v1 tag after the audio, which some taggers append, is ignored; so
+// are any other bytes after the last sample STREAMINFO counts, if they
+// aren't an audio frame. Another frame there is a mismatch. Every bit depth FLAC allows, 4 to 32, is decoded.
 func HashFLACAudio(r io.Reader) ([]byte, error) {
 	br, ok := r.(io.ByteReader)
 	if !ok {
@@ -102,7 +102,7 @@ func hashFLACFrames(d *FLACDecoder) ([]byte, error) {
 	}
 	for info.TotalSamples == 0 || h.samples < info.TotalSamples {
 		n, err := d.Next()
-		if errors.Is(err, io.EOF) {
+		if errors.Is(err, io.EOF) || errors.Is(err, errMaybeID3v1) && d.restIsID3v1() {
 			break
 		}
 		if err != nil {
