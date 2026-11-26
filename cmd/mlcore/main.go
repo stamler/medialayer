@@ -214,6 +214,93 @@ func MLPrepare(fileID *C.char) {
 	}
 }
 
+// MLCreatePlaylist makes an empty playlist and returns {"id": "..."} or
+// {"error": "..."}.
+//
+//export MLCreatePlaylist
+func MLCreatePlaylist(name *C.char) *C.char {
+	c, err := get()
+	if err == nil {
+		var id string
+		if id, err = c.CreatePlaylist(C.GoString(name)); err == nil {
+			return jsonStr(map[string]string{"id": id})
+		}
+	}
+	return jsonStr(map[string]string{"error": err.Error()})
+}
+
+// MLRenamePlaylist renames a playlist.
+//
+//export MLRenamePlaylist
+func MLRenamePlaylist(id, name *C.char) *C.char {
+	c, err := get()
+	if err != nil {
+		return errStr(err)
+	}
+	return errStr(c.RenamePlaylist(C.GoString(id), C.GoString(name)))
+}
+
+// MLDeletePlaylist deletes a playlist; its tracks stay in the library.
+//
+//export MLDeletePlaylist
+func MLDeletePlaylist(id *C.char) *C.char {
+	c, err := get()
+	if err != nil {
+		return errStr(err)
+	}
+	return errStr(c.DeletePlaylist(C.GoString(id)))
+}
+
+// MLAddToPlaylist inserts files, given as a JSON array of file ids,
+// before the item at position before, or at the end when before is
+// negative.
+//
+//export MLAddToPlaylist
+func MLAddToPlaylist(id, fileIDsJSON *C.char, before C.int) *C.char {
+	c, err := get()
+	if err != nil {
+		return errStr(err)
+	}
+	var ids []string
+	if err := json.Unmarshal([]byte(C.GoString(fileIDsJSON)), &ids); err != nil {
+		return errStr(err)
+	}
+	return errStr(c.AddToPlaylist(C.GoString(id), ids, int(before)))
+}
+
+// MLRemoveFromPlaylist removes the items at the positions given as a
+// JSON array of numbers.
+//
+//export MLRemoveFromPlaylist
+func MLRemoveFromPlaylist(id, positionsJSON *C.char) *C.char {
+	c, err := get()
+	if err != nil {
+		return errStr(err)
+	}
+	var positions []int
+	if err := json.Unmarshal([]byte(C.GoString(positionsJSON)), &positions); err != nil {
+		return errStr(err)
+	}
+	return errStr(c.RemoveFromPlaylist(C.GoString(id), positions))
+}
+
+// MLMovePlaylistItems moves the items at the positions given as a JSON
+// array of numbers to just before the item now at position before, or
+// to the end when before is negative.
+//
+//export MLMovePlaylistItems
+func MLMovePlaylistItems(id, positionsJSON *C.char, before C.int) *C.char {
+	c, err := get()
+	if err != nil {
+		return errStr(err)
+	}
+	var positions []int
+	if err := json.Unmarshal([]byte(C.GoString(positionsJSON)), &positions); err != nil {
+		return errStr(err)
+	}
+	return errStr(c.MovePlaylistItems(C.GoString(id), positions, int(before)))
+}
+
 // MLFree frees a string returned by any ML function.
 //
 //export MLFree
