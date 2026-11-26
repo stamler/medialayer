@@ -100,13 +100,17 @@ func (c *Core) index(ctx context.Context, f fs.Fs) error {
 		}
 		todo = append(todo, o)
 	}
+	moved, err := matchMoves(ctx, db, known, listed, todo)
+	if err != nil {
+		return err
+	}
 	for p, k := range known {
-		if !listed[p] && !k.Missing {
+		if !listed[p] && !k.Missing && !moved[p] {
 			gone = append(gone, k.ID)
 		}
 	}
 	if len(found)+len(gone) > 0 {
-		if err := db.SetMeta("dirty", "1"); err != nil {
+		if err := db.MarkFilesChanged(); err != nil {
 			return err
 		}
 		if err := db.SetMissing(found, false); err != nil {
@@ -133,9 +137,88 @@ func (c *Core) index(ctx context.Context, f fs.Fs) error {
 	return ctx.Err()
 }
 
+// matchMoves finds files that were moved or renamed: a new path in todo
+// whose file matches exactly one indexed file that is gone (from this
+// listing or an earlier one), and that no other new path matches. That
+// file's row takes the new path and keeps its id, so playlists keep it;
+// indexing the new path then updates the row. Files match by size and
+// SHA-256 when the index and the cloud both have one, otherwise by size,
+// modification time and file name (a move to another folder). It returns
+// the old paths that moved.
+func matchMoves(ctx context.Context, db *index.DB, known map[string]index.Known, listed map[string]bool,
+	todo []fs.Object) (map[string]bool, error) {
+	bySize := map[int64][]string{} // gone paths
+	for p, k := range known {
+		if !listed[p] {
+			bySize[k.Size] = append(bySize[k.Size], p)
+		}
+	}
+	if len(bySize) == 0 {
+		return nil, nil
+	}
+	claims := map[string][]fs.Object{} // gone path: new paths that match it
+	for _, o := range todo {
+		if _, ok := known[o.Remote()]; ok {
+			continue // a changed file, not a new path
+		}
+		candidates := bySize[o.Size()]
+		if len(candidates) == 0 {
+			continue
+		}
+		var sha []byte
+		if hasSHA(known, candidates) {
+			s, _ := o.Hash(ctx, hash.SHA256) // "" where the cloud has none
+			sha = index.HexSHA(s)
+		}
+		var match string
+		n := 0
+		for _, p := range candidates {
+			k := known[p]
+			same := false
+			if sha != nil && k.SHA256 != nil {
+				same = bytes.Equal(sha, k.SHA256)
+			} else {
+				same = k.MTime == o.ModTime(ctx).UnixMilli() && path.Base(p) == path.Base(o.Remote())
+			}
+			if same {
+				match, n = p, n+1
+			}
+		}
+		if n == 1 {
+			claims[match] = append(claims[match], o)
+		}
+	}
+	moved := map[string]bool{}
+	for p, objs := range claims {
+		if len(objs) != 1 {
+			continue // two copies of the file: neither is known to be the move
+		}
+		if err := db.MoveFile(known[p].ID, objs[0].Remote()); err != nil {
+			return nil, fmt.Errorf("move %s to %s in the index: %w", p, objs[0].Remote(), err)
+		}
+		moved[p] = true
+	}
+	if len(moved) > 0 {
+		if err := db.MarkFilesChanged(); err != nil {
+			return nil, err
+		}
+	}
+	return moved, ctx.Err()
+}
+
+// hasSHA reports whether any of the known paths has a SHA-256.
+func hasSHA(known map[string]index.Known, paths []string) bool {
+	for _, p := range paths {
+		if known[p].SHA256 != nil {
+			return true
+		}
+	}
+	return false
+}
+
 // indexFiles reads and indexes the given files, several at a time.
 func (c *Core) indexFiles(ctx context.Context, db *index.DB, pack *artPack, todo []fs.Object) error {
-	if err := db.SetMeta("dirty", "1"); err != nil {
+	if err := db.MarkFilesChanged(); err != nil {
 		return err
 	}
 	c.setJob(func(j *jobStatus) { j.Phase, j.Done, j.Total = PhaseIndexing, 0, int64(len(todo)) })
@@ -352,7 +435,7 @@ func (c *Core) folderArt(ctx context.Context, db *index.DB, pack *artPack, image
 			if err := pack.store(sum[:], media.Picture{Type: 3, MIME: mime, Data: data}); err != nil {
 				return err
 			}
-			if err := db.SetMeta("dirty", "1"); err != nil {
+			if err := db.MarkFilesChanged(); err != nil {
 				return err
 			}
 			return db.AddFileArt(ids, sum[:], 3)

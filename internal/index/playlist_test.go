@@ -2,6 +2,8 @@ package index
 
 import (
 	"errors"
+	"fmt"
+	"math/rand"
 	"path/filepath"
 	"slices"
 	"testing"
@@ -191,10 +193,17 @@ func TestPlaylistSurvivesReindexing(t *testing.T) {
 	}
 }
 
-func TestCopyPlaylists(t *testing.T) {
+func TestCarryPlaylistsByPath(t *testing.T) {
 	src, sf := testDB(t, "a.flac", "b.flac", "c.flac")
 	dst, df := testDB(t, "c.flac", "a.flac") // other ids; no b.flac
-	if n, err := src.CopyPlaylists(dst); n != 0 || err != nil {
+	copyPlaylists := func() (int, error) {
+		lists, err := src.PlaylistsByPath()
+		if err != nil {
+			return 0, err
+		}
+		return dst.AddPlaylistsByPath(lists)
+	}
+	if n, err := copyPlaylists(); n != 0 || err != nil {
 		t.Fatalf("copied %d (%v) with no playlists", n, err)
 	}
 	p1, _ := src.CreatePlaylist("One")
@@ -210,7 +219,7 @@ func TestCopyPlaylists(t *testing.T) {
 		t.Fatal(err)
 	}
 	clearDirty(t, dst)
-	n, err := src.CopyPlaylists(dst)
+	n, err := copyPlaylists()
 	if err != nil || n != 1 {
 		t.Fatalf("copied %d (%v), want 1", n, err)
 	}
@@ -224,5 +233,105 @@ func TestCopyPlaylists(t *testing.T) {
 	lists, _ := dst.Playlists()
 	if len(lists) != 2 {
 		t.Errorf("dst playlists = %+v", lists)
+	}
+}
+
+// Edits write only the part that changed; random edits must still leave
+// exactly the items a plain slice model has, at dense positions.
+func TestPlaylistEditsMatchModel(t *testing.T) {
+	names := make([]string, 12)
+	for i := range names {
+		names[i] = fmt.Sprintf("%02d.flac", i)
+	}
+	d, f := testDB(t, names...)
+	id, err := d.CreatePlaylist("Model")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var model []string
+	r := rand.New(rand.NewSource(7))
+	for step := range 300 {
+		var err error
+		switch op := r.Intn(3); {
+		case op == 0 || len(model) < 3:
+			add := []string{f[r.Intn(len(f))], f[r.Intn(len(f))]}
+			before := r.Intn(len(model)+2) - 1 // -1 is the end
+			err = d.AddToPlaylist(id, add, before)
+			if before < 0 {
+				before = len(model)
+			}
+			model = slices.Insert(model, before, add...)
+		case op == 1:
+			pos := []int{r.Intn(len(model)), r.Intn(len(model))}
+			err = d.RemoveFromPlaylist(id, pos)
+			var next []string
+			for i, x := range model {
+				if i != pos[0] && i != pos[1] {
+					next = append(next, x)
+				}
+			}
+			model = next
+		default:
+			pos := []int{r.Intn(len(model)), r.Intn(len(model))}
+			before := r.Intn(len(model)+1) - 1
+			err = d.MovePlaylistItems(id, pos, before)
+			if before < 0 {
+				before = len(model)
+			}
+			var moved, rest []string
+			at := 0
+			for i, x := range model {
+				if i == pos[0] || i == pos[1] {
+					moved = append(moved, x)
+					continue
+				}
+				if i < before {
+					at++
+				}
+				rest = append(rest, x)
+			}
+			model = slices.Insert(rest, at, moved...)
+		}
+		if err != nil {
+			t.Fatalf("step %d: %v", step, err)
+		}
+		if got := items(t, d, id); !slices.Equal(got, model) {
+			t.Fatalf("step %d: items = %v, want %v", step, got, model)
+		}
+	}
+	var n, maxPos int
+	if err := d.SQL().QueryRow(`SELECT count(*), coalesce(max(pos), -1) FROM playlist_item WHERE playlist_id = ?`,
+		id).Scan(&n, &maxPos); err != nil || maxPos != n-1 || n != len(model) {
+		t.Errorf("%d rows, max pos %d (%v), want %d dense", n, maxPos, err, len(model))
+	}
+}
+
+func TestDirtyFlags(t *testing.T) {
+	d, f := testDB(t, "a.flac")
+	for _, k := range []string{"dirty", "files_dirty", "playlists_dirty"} {
+		if err := d.SetMeta(k, "0"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	id, _ := d.CreatePlaylist("P")
+	if err := d.AddToPlaylist(id, f, -1); err != nil {
+		t.Fatal(err)
+	}
+	flags := func() string {
+		var out string
+		for _, k := range []string{"dirty", "files_dirty", "playlists_dirty"} {
+			v, _ := d.Meta(k)
+			out += v
+		}
+		return out
+	}
+	if got := flags(); got != "101" {
+		t.Errorf("after playlist edits: dirty, files_dirty, playlists_dirty = %s, want 101", got)
+	}
+	if err := d.MarkFilesChanged(); err != nil {
+		t.Fatal(err)
+	}
+	if got := flags(); got != "111" {
+		t.Errorf("after a file change: flags = %s, want 111", got)
 	}
 }

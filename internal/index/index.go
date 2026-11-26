@@ -297,6 +297,23 @@ func (d *DB) PutFile(f File) (string, error) {
 	return id, tx.Commit()
 }
 
+// MarkFilesChanged records that file rows changed: meta "dirty" (a new
+// version is due) and "files_dirty" (the files differ from the last
+// version, as a playlist-only change does not).
+func (d *DB) MarkFilesChanged() error {
+	_, err := d.db.Exec(`INSERT INTO meta (key, value) VALUES ('dirty', '1'), ('files_dirty', '1')
+		ON CONFLICT (key) DO UPDATE SET value = excluded.value`)
+	return err
+}
+
+// MoveFile gives a file row a new path, for a file that was moved or
+// renamed: it keeps its id, so playlists keep it. The path must not be
+// indexed already.
+func (d *DB) MoveFile(id, path string) error {
+	_, err := d.db.Exec(`UPDATE file SET path = ?, missing = 0 WHERE id = ?`, path, id)
+	return err
+}
+
 // SetMissing marks files as missing (true) or present (false) by id.
 func (d *DB) SetMissing(ids []string, missing bool) error {
 	tx, err := d.db.Begin()

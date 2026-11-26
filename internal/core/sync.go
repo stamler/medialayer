@@ -198,6 +198,9 @@ func (c *Core) sync(ctx context.Context) error {
 		if err := c.index(ctx, f); err != nil {
 			return err
 		}
+		if err := c.applyCarried(); err != nil {
+			return fmt.Errorf("carry over playlists: %w", err)
+		}
 		err := c.publish(ctx, f)
 		if errors.Is(err, errPublishedElsewhere) {
 			continue

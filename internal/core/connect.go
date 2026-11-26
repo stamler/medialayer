@@ -166,6 +166,22 @@ func (c *Core) SetFolder(folder string) error {
 		return errors.New("the library is being indexed; wait for it to finish")
 	}
 	if folder != c.settings.Folder {
+		// The local index goes, so playlist changes only it holds would be
+		// lost. (Waiting carried playlists belong to it too.)
+		if c.db != nil {
+			unsaved, err := unsavedPlaylists(c.db)
+			if err == nil && !unsaved {
+				carried, cerr := c.readCarried()
+				unsaved, err = len(carried) > 0, cerr
+			}
+			if err != nil || unsaved {
+				c.mu.Unlock()
+				if err != nil {
+					return fmt.Errorf("check the playlists: %w", err)
+				}
+				return errUnsavedPlaylists
+			}
+		}
 		if c.db != nil {
 			_ = c.db.Close()
 			c.db = nil
@@ -202,7 +218,7 @@ func (c *Core) folder() string {
 }
 
 // resetLocal deletes every local index file (including ones left by
-// restores) and the art packs.
+// restores), playlists waiting to be carried over, and the art packs.
 func resetLocal(dataDir, artDir string) error {
 	files, err := filepath.Glob(filepath.Join(dataDir, "library*.sqlite*"))
 	if err != nil {
@@ -212,6 +228,9 @@ func resetLocal(dataDir, artDir string) error {
 		if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
+	}
+	if err := os.Remove(filepath.Join(dataDir, carriedName)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
 	}
 	if err := os.RemoveAll(filepath.Join(dataDir, "snapshots")); err != nil {
 		return err

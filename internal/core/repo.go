@@ -239,13 +239,17 @@ func (c *Core) restore(ctx context.Context, f fs.Fs) error {
 	}
 
 	// Playlists made in the index being replaced (one indexed from
-	// scratch while another device published first) carry over, matched
-	// by path. They make the restored index a newer version than the
-	// snapshot, which the next publish saves.
+	// scratch while another device published first) carry over by path.
+	// The snapshot may not list every file they name yet, so they are
+	// added after this sync's index pass (see applyCarried).
 	c.playlistMu.Lock()
 	defer c.playlistMu.Unlock()
 	if old := c.currentDB(); old != nil {
-		if _, err := old.CopyPlaylists(sdb); err != nil {
+		lists, err := old.PlaylistsByPath()
+		if err == nil {
+			err = c.carryPlaylists(lists)
+		}
+		if err != nil {
 			_ = sdb.Close()
 			return fmt.Errorf("carry over playlists: %w", err)
 		}
@@ -286,6 +290,15 @@ func (c *Core) localSnapshot(version int) string {
 
 func snapshotName(version int) string { return fmt.Sprintf("%06d.sqlite", version) }
 
+// markAllDirty marks the index as changed in every way, for a version
+// that was made but not saved: so the next sync makes one again, and the
+// app treats its files and playlists as unsaved.
+func markAllDirty(db *index.DB) {
+	for _, k := range []string{"dirty", "files_dirty", "playlists_dirty"} {
+		_ = db.SetMeta(k, "1")
+	}
+}
+
 // metaInt reads a numeric meta value; missing is 0.
 func metaInt(db *index.DB, key string) (int, error) {
 	v, err := db.Meta(key)
@@ -314,7 +327,8 @@ func (c *Core) currentVersion(db *index.DB, newest int, generation int64) (int, 
 	}
 	version = max(version, newest) + 1
 	for k, v := range map[string]string{
-		"version": strconv.Itoa(version), "generation": strconv.FormatInt(generation, 10), "dirty": "0",
+		"version": strconv.Itoa(version), "generation": strconv.FormatInt(generation, 10),
+		"dirty": "0", "files_dirty": "0", "playlists_dirty": "0",
 	} {
 		if err := db.SetMeta(k, v); err != nil {
 			return 0, "", err
@@ -326,7 +340,7 @@ func (c *Core) currentVersion(db *index.DB, newest int, generation int64) (int, 
 	}
 	_ = os.Remove(local)
 	if err := db.Snapshot(local); err != nil {
-		_ = db.SetMeta("dirty", "1")
+		markAllDirty(db)
 		return 0, "", err
 	}
 	// Older versions are no longer needed: every copy gets the newest.
@@ -422,7 +436,7 @@ func (c *Core) publish(ctx context.Context, f fs.Fs) error {
 		defer func() {
 			if !published {
 				_ = db.SetMeta("library_id", prevID)
-				_ = db.SetMeta("dirty", "1")
+				markAllDirty(db) // nothing of this version is saved anywhere
 			}
 		}()
 	}
