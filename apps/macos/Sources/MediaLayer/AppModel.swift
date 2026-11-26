@@ -29,8 +29,14 @@ final class AppModel: ObservableObject {
     @Published private(set) var searchFocusRequest = 0
     /// The tracks the search leaves: all of them when it is empty.
     @Published private(set) var searched: [Track] = [] {
-        didSet { searchedIDs = isSearching ? Set(searched.map(\.id)) : nil }
+        didSet {
+            searchedIDs = isSearching ? Set(searched.map(\.id)) : nil
+            searchedGeneration += 1
+        }
     }
+    /// Raised each time `searched` is set, which every change to the tracks
+    /// or the search does: part of visibleTracks's cache key.
+    private var searchedGeneration = 0
     /// The ids of `searched` while a search is on, for playlists; nil when
     /// the search is empty.
     private(set) var searchedIDs: Set<String>?
@@ -59,9 +65,21 @@ final class AppModel: ObservableObject {
     // Sidebar and playlists (see Playlists.swift).
     @Published var sidebarVisibility = NavigationSplitViewVisibility.all
     @Published var sidebarSelection = SidebarItem.songs {
-        didSet { if sidebarSelection != oldValue { playlistSortOrder = [] } }
+        didSet {
+            guard sidebarSelection != oldValue else { return }
+            playlistSortOrder = []
+            // A rename left open on another playlist ends, unsaved.
+            if let r = renamingPlaylist, sidebarSelection != .playlist(r) { renamingPlaylist = nil }
+        }
     }
-    @Published var playlists: [Playlist] = []
+    @Published var playlists: [Playlist] = [] {
+        didSet { playlistsGeneration += 1 }
+    }
+    private var playlistsGeneration = 0
+    /// visibleTracks's last result, and what it was computed from.
+    private var visibleCache: (key: VisibleKey, tracks: [Track])?
+    /// Debounces the sync that publishes playlist changes (Playlists.swift).
+    var publishTask: Task<Void, Never>?
     /// The playlist whose name is being edited in the sidebar.
     @Published var renamingPlaylist: String?
     @Published var playlistError: String?
@@ -144,8 +162,16 @@ final class AppModel: ObservableObject {
                 art.artDir = status.artDir
             }
             let read = try db?.tracksWithVersion()
-            cloudIndex = CloudIndex(tracks: read?.tracks ?? [], version: read?.version ?? IndexVersion())
-            tracks = read?.tracks ?? []
+            let newTracks = read?.tracks ?? []
+            let version = read?.version ?? IndexVersion()
+            // Rebuild what derives from the tracks only when they changed:
+            // a sync that publishes changes the version, not the tracks.
+            if newTracks != tracks {
+                cloudIndex = CloudIndex(tracks: newTracks, version: version)
+                tracks = newTracks
+            } else if cloudIndex.version != version {
+                cloudIndex.version = version
+            }
             try reloadPlaylists()
             loadedEpoch = status.dbEpoch
             loadedCount = status.tracks
@@ -161,7 +187,8 @@ final class AppModel: ObservableObject {
     /// Rereads the playlists, after the core changed them or the index
     /// changed. A playlist shown that no longer exists goes back to Songs.
     func reloadPlaylists() throws {
-        playlists = try db?.playlists() ?? []
+        let read = try db?.playlists() ?? []
+        if read != playlists { playlists = read }
         if let id = selectedPlaylistID, !playlists.contains(where: { $0.id == id }) {
             sidebarSelection = .songs
         }
@@ -183,7 +210,13 @@ final class AppModel: ObservableObject {
         playlists = []
         sidebarSelection = .songs
         loadedEpoch = -1
-        try Core.setFolder(folder)
+        do {
+            try Core.setFolder(folder)
+        } catch {
+            // Refused (unsaved playlist changes, say): the library stays.
+            reload()
+            throw error
+        }
         refresh()
     }
 
@@ -245,8 +278,30 @@ final class AppModel: ObservableObject {
     private var byArtist: [Track] { artist.map { a in byComposer.filter { $0.browseArtist == a } } ?? byComposer }
     var albums: [String] { values(byArtist, \.album) }
 
-    /// The tracks the browser selects, in the table's order.
+    /// What visibleTracks depends on. The model publishes on every status
+    /// poll, so the views ask for it far more often than it changes.
+    private struct VisibleKey: Equatable {
+        var searched: Int
+        var playlists: Int
+        var sidebar: SidebarItem
+        var genre, composer, artist, album: String?
+        var librarySort: [KeyPathComparator<Track>]
+        var playlistSort: [KeyPathComparator<Track>]
+    }
+
+    /// The tracks the browser or the playlist shows, in the table's order,
+    /// kept until something they depend on changes.
     var visibleTracks: [Track] {
+        let key = VisibleKey(searched: searchedGeneration, playlists: playlistsGeneration, sidebar: sidebarSelection,
+                             genre: genre, composer: composer, artist: artist, album: album,
+                             librarySort: librarySortOrder, playlistSort: playlistSortOrder)
+        if let cache = visibleCache, cache.key == key { return cache.tracks }
+        let result = computeVisibleTracks()
+        visibleCache = (key, result)
+        return result
+    }
+
+    private func computeVisibleTracks() -> [Track] {
         if let id = selectedPlaylistID {
             // The search filters a playlist too; matches keep playlist order.
             var list = playlistTracks(id)
