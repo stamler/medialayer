@@ -44,7 +44,7 @@ func OpenFLACSource(fetch FetchFunc, size, maxHeader int64, ogg bool) (*FLACSour
 			return nil, err
 		}
 		s.Info, s.serial, s.audioStart = h.Info, h.Serial, start
-		s.base = firstFrameNumber(fetch, start, h.Info, true, h.Serial)
+		s.base = firstFrameNumber(fetch, start, size, h.Info, true, h.Serial)
 		s.Total = h.Info.TotalSamples
 		if s.Total == 0 {
 			s.Total = oggLength(fetch, size, h.Serial, s.base)
@@ -62,7 +62,7 @@ func OpenFLACSource(fetch FetchFunc, size, maxHeader int64, ogg bool) (*FLACSour
 			return nil, err
 		}
 		s.Info, s.Total, s.audioStart = d.Info, d.Info.TotalSamples, int64(len(header))
-		s.base = firstFrameNumber(fetch, s.audioStart, d.Info, false, 0)
+		s.base = firstFrameNumber(fetch, s.audioStart, size, d.Info, false, 0)
 	}
 	if s.Total == 0 {
 		return nil, fmt.Errorf("a FLAC stream of unknown length: %w", ErrNotFLAC)
@@ -74,12 +74,12 @@ func OpenFLACSource(fetch FetchFunc, size, maxHeader int64, ogg bool) (*FLACSour
 // firstFrameNumber reads the number of the frame header exactly at off,
 // the stream's first sample: 0, unless the stream was cut from a longer
 // one without renumbering. A damaged header there gives 0, the usual.
-func firstFrameNumber(fetch FetchFunc, off int64, info StreamInfo, ogg bool, serial uint32) uint64 {
+func firstFrameNumber(fetch FetchFunc, off, size int64, info StreamInfo, ogg bool, serial uint32) uint64 {
 	n := int64(16)
 	if ogg {
 		n = oggMaxPage
 	}
-	b, err := fetch(off, n)
+	b, err := fetch(off, min(n, size-off))
 	if err != nil {
 		return 0
 	}

@@ -316,7 +316,7 @@ func ParseOggFLAC(fetch FetchFunc, size, max int64) (*Info, error) {
 	}
 	info.Format = "oga"
 	if h.Info.TotalSamples == 0 {
-		base := firstFrameNumber(fetch, start, h.Info, true, h.Serial)
+		base := firstFrameNumber(fetch, start, size, h.Info, true, h.Serial)
 		if n := oggLength(fetch, size, h.Serial, base); n > 0 {
 			info.DurationMS = int64(n) * 1000 / int64(h.Info.SampleRate)
 		}
