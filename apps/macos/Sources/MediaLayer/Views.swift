@@ -16,7 +16,7 @@ struct MediaLayerApp: App {
                 .environmentObject(model.browse)
                 .environmentObject(model.player)
                 .environmentObject(model.player.clock)
-                .frame(minWidth: 760, minHeight: 480)
+                .frame(minWidth: ToolbarLayout.windowMinWidth, minHeight: 480)
         }
         .commands {
             SidebarCommands()
@@ -217,31 +217,52 @@ struct DriveFolderPicker: View {
 struct LibraryView: View {
     @EnvironmentObject var model: AppModel
     @State private var selection = Set<Track.ID>()
+    /// The detail column's width, which sizes the toolbar items above it.
+    /// Seeded with the narrowest case, so the first toolbar pass fits.
+    @State private var toolbar = ToolbarLayout(detailWidth: ToolbarLayout.windowMinWidth - ToolbarLayout.sidebarMaxWidth - 12,
+                                               sidebarHidden: false)
 
     var body: some View {
         NavigationSplitView(columnVisibility: $model.sidebarVisibility) {
             SidebarView()
-                // Window minimum (760) ≥ sidebar max + the detail's minimum (the
-                // browser's 4 × 90 plus dividers) + slack, or the split view
-                // can't fit both and the sidebar's contents shift off its left.
-                .navigationSplitViewColumnWidth(min: 160, ideal: 200, max: 300)
+                // ToolbarLayout.windowMinWidth leaves the detail room for the
+                // toolbar items with the sidebar at its widest.
+                .navigationSplitViewColumnWidth(min: 160, ideal: 200, max: ToolbarLayout.sidebarMaxWidth)
         } detail: {
             VSplitView {
                 if model.selectedPlaylistID == nil { // playlists show without the browser, as in iTunes
                     ColumnBrowser()
                         .frame(minHeight: 120, idealHeight: 190, maxHeight: 400)
+                        .modifier(NoMinimumWidth())
                 }
                 // Return plays and Delete removes from a playlist: the
                 // table handles both keys.
                 SongsTable(model: model, selection: $selection)
                     .frame(minHeight: 200)
+                    .modifier(NoMinimumWidth())
                     .onChange(of: selection) { _, ids in
                         // Look up the selected track's cloud file now, so pressing
                         // play doesn't wait for it.
                         if ids.count == 1, let id = ids.first { Core.prepare(Track.fileID(of: id)) }
                     }
             }
-            .safeAreaInset(edge: .bottom, spacing: 0) { StatusBar() }
+            // Nothing wraps the VSplitView itself: a frame around it kept the
+            // floating sidebar's safe-area inset from reaching its panes, which
+            // then drew under the sidebar.
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                // The status bar spans the detail's visible width, beside the
+                // sidebar, which is the room the toolbar items share. It
+                // starts at the window's edge when the sidebar is hidden,
+                // however it was hidden. (Measured on macOS 26. Should an
+                // older macOS report the detail's own space here, the items
+                // only come out narrower, never into the overflow menu.)
+                StatusBar().modifier(NoMinimumWidth())
+                    .background(GeometryReader { g in
+                        let layout = ToolbarLayout(detailWidth: g.size.width,
+                                                   sidebarHidden: g.frame(in: .global).minX < 20)
+                        Color.clear.onChange(of: layout, initial: true) { _, t in toolbar = t }
+                    })
+            }
             // On the detail column, so the items sit in its part of the
             // toolbar, after the sidebar's toggle.
             // The window title would take toolbar room from the transport,
@@ -249,11 +270,16 @@ struct LibraryView: View {
             .modifier(HiddenWindowTitle())
             .toolbar {
                 ToolbarItemGroup(placement: .navigation) { TransportControls() }
-                NowPlayingItem()
-                SearchToolbarItem()
+                NowPlayingItem(width: toolbar.nowPlayingWidth)
+                SearchToolbarItem(width: toolbar.searchWidth)
             }
         }
         .onChange(of: model.sidebarSelection) { selection = [] }
+        .onAppear {
+            LayoutProbe.startIfRequested {
+                model.sidebarVisibility = model.sidebarVisibility == .detailOnly ? .all : .detailOnly
+            }
+        }
         .sheet(isPresented: $model.addingSource) { AddSourceSheet() }
         // Here, not in the sidebar, so it shows with the sidebar collapsed.
         .alert("Couldn't change the playlist",
@@ -391,6 +417,7 @@ struct TransportBackground<S: InsettableShape>: ViewModifier {
 /// The toolbar item for NowPlayingDisplay. On macOS 26 the toolbar would wrap it
 /// in its own capsule; hide that, since NowPlayingDisplay draws its own shape.
 struct NowPlayingItem: ToolbarContent {
+    let width: CGFloat
     var body: some ToolbarContent {
         if #available(macOS 26.0, *) {
             ToolbarItem(placement: .principal) { item }.sharedBackgroundVisibility(.hidden)
@@ -399,9 +426,54 @@ struct NowPlayingItem: ToolbarContent {
         }
     }
 
-    // Narrow enough that a small window keeps the transport and search;
-    // text that doesn't fit scrolls (MarqueeText).
-    private var item: some View { NowPlayingDisplay().frame(minWidth: 200, idealWidth: 460) }
+    // A fixed width from ToolbarLayout: the toolbar sizes an item by its
+    // ideal width and hides items that don't fit, so a flexible frame here
+    // pushed the transport and search into the overflow menu. Text that
+    // doesn't fit scrolls (MarqueeText).
+    private var item: some View { NowPlayingDisplay().frame(width: width) }
+}
+
+/// Widths for the toolbar items over the detail column. The toolbar
+/// doesn't shrink SwiftUI items; it hides items that don't fit in its
+/// overflow menu, search first, then the transport. So the now-playing
+/// display and search take fixed widths that leave room for all of them
+/// at every window width.
+struct ToolbarLayout: Equatable {
+    /// The sidebar's widest. The split view draws it a few points wider.
+    static let sidebarMaxWidth: CGFloat = 260
+    /// Room for the transport (3 × ~40), the narrowest search and now
+    /// playing, and the toolbar's spacing, beside the widest sidebar.
+    static let windowMinWidth: CGFloat = 840
+    static let transportWidth: CGFloat = 125
+    static let spacing: CGFloat = 100 // item spacing and the toolbar's margins
+    /// With the sidebar hidden, the window buttons and the sidebar toggle
+    /// move into the detail's part of the toolbar.
+    static let chromeWidth: CGFloat = 130
+
+    let nowPlayingWidth: CGFloat
+    let searchWidth: CGFloat
+
+    init(detailWidth: CGFloat, sidebarHidden: Bool) {
+        // Steps of 8 points, so a window resize redraws the toolbar now
+        // and then, not every frame.
+        let d = (detailWidth / 8).rounded(.down) * 8
+        let room = d - Self.transportWidth - Self.spacing - (sidebarHidden ? Self.chromeWidth : 0)
+        // Now playing grows first; search widens only once it is full width.
+        searchWidth = min(200, max(150, room - 460))
+        nowPlayingWidth = min(460, max(180, room - searchWidth))
+    }
+}
+
+/// Lets a view's frame be narrower than its contents' minimum. Without it
+/// the split view takes the contents' minimum, plus the floating sidebar's
+/// inset counted at each level, as its own: narrower than that, it laid
+/// out wider than the window and centred itself, cutting off the sidebar on
+/// the left and the table on the right. The window's minimum leaves the
+/// contents their own minimum width, so nothing needs clipping.
+struct NoMinimumWidth: ViewModifier {
+    func body(content: Content) -> some View {
+        content.frame(minWidth: 0, maxWidth: .infinity)
+    }
 }
 
 struct ColumnBrowser: View {
@@ -600,7 +672,9 @@ struct StatusBar: View {
     var body: some View {
         let s = model.visibleSummary
         HStack(spacing: 10) {
-            SourcesBar()
+            // Chips keep their names on one line and the job text gives way. Many
+            // sources could still crowd out the rest of a narrow bar.
+            SourcesBar().fixedSize()
             jobText.foregroundStyle(.secondary).lineLimit(1)
             if let n = core.status.notice, !core.status.isBusy {
                 Image(systemName: "exclamationmark.circle").foregroundStyle(.orange).help(n)
@@ -608,6 +682,7 @@ struct StatusBar: View {
             Spacer()
             Text("\(s.count) \(s.count == 1 ? "song" : "songs"), \(formatLong(s.durationMS)), \(ByteCountFormatter.string(fromByteCount: s.bytes, countStyle: .file))")
                 .lineLimit(1).truncationMode(.middle)
+                .layoutPriority(1) // over the job text, so a narrow bar keeps the counts
             Spacer()
             StartLatency()
         }

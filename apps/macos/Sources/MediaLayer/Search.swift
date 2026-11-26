@@ -72,8 +72,9 @@ final class TrackSearch {
 
 /// The search field in the toolbar.
 struct SearchToolbarItem: ToolbarContent {
+    let width: CGFloat
     var body: some ToolbarContent {
-        ToolbarItem(placement: .primaryAction) { SearchBox() }
+        ToolbarItem(placement: .primaryAction) { SearchBox().frame(width: width) }
     }
 }
 
@@ -83,7 +84,6 @@ private struct SearchBox: View {
 
     var body: some View {
         SearchField(text: $model.searchText, focusRequest: model.searchFocusRequest)
-            .frame(minWidth: 140, idealWidth: 200, maxWidth: 260)
             .help("Search name, artist, album, composer and genre")
     }
 }
