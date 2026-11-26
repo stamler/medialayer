@@ -180,6 +180,11 @@ enum Core {
         try check(id.withCString { MLDeletePlaylist(UnsafeMutablePointer(mutating: $0)) })
     }
 
+    /// Removes the items whose file is missing from the library.
+    static func removeMissingFromPlaylist(_ id: String) throws {
+        try check(id.withCString { MLRemoveMissingFromPlaylist(UnsafeMutablePointer(mutating: $0)) })
+    }
+
     static func addToPlaylist(_ id: String, fileIDs: [String], before: Int = -1) throws {
         let ids = json(fileIDs)
         try check(id.withCString { i in

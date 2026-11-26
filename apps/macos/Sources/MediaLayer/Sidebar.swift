@@ -29,6 +29,13 @@ struct SidebarView: View {
                         .contextMenu {
                             Button("Rename") { model.renamingPlaylist = p.id }
                             Button("Delete Playlist…") { deleting = p }
+                            let missing = model.missingCount(p)
+                            if missing > 0 {
+                                Divider()
+                                Button("Remove \(missing) Missing \(missing == 1 ? "Song" : "Songs")") {
+                                    model.removeMissing(from: p.id)
+                                }
+                            }
                         }
                         .tag(SidebarItem.playlist(p.id))
                 }
@@ -41,7 +48,7 @@ struct SidebarView: View {
                 Button { model.newPlaylist() } label: { Image(systemName: "plus") }
                     .buttonStyle(.borderless)
                     .help("New Playlist")
-                    .disabled(model.status.dbPath.isEmpty)
+                    .disabled(!model.showsLibrary)
                 Spacer()
             }
             .padding(.horizontal, 10)
@@ -54,9 +61,6 @@ struct SidebarView: View {
         } message: { _ in
             Text("Its songs stay in the library.")
         }
-        .alert("Couldn't change the playlist",
-               isPresented: Binding(get: { model.playlistError != nil }, set: { if !$0 { model.playlistError = nil } })) {
-        } message: { Text(model.playlistError ?? "") }
     }
 }
 
@@ -134,7 +138,7 @@ struct PlaylistCommands: Commands {
         CommandGroup(replacing: .newItem) {
             Button("New Playlist") { model.newPlaylist() }
                 .keyboardShortcut("n")
-                .disabled(model.status.dbPath.isEmpty || model.startError != nil)
+                .disabled(!model.showsLibrary)
         }
         CommandGroup(after: .sidebar) {
             Button("Sort by Playlist Order") { model.playlistSortOrder = [] }

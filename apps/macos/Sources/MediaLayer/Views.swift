@@ -231,6 +231,10 @@ struct LibraryView: View {
         }
         .onChange(of: model.sidebarSelection) { selection = [] }
         .sheet(isPresented: $model.addingSource) { AddSourceSheet() }
+        // Here, not in the sidebar, so it shows with the sidebar collapsed.
+        .alert("Couldn't change the playlist",
+               isPresented: Binding(get: { model.playlistError != nil }, set: { if !$0 { model.playlistError = nil } })) {
+        } message: { Text(model.playlistError ?? "") }
     }
 
     /// Delete in a playlist removes the selected rows from it; Songs has no

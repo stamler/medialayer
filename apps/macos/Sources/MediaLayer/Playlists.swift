@@ -56,6 +56,12 @@ extension AppModel {
         return nil
     }
 
+    /// Whether the window shows the library (ContentView's last case), so
+    /// playlist commands apply.
+    var showsLibrary: Bool {
+        startError == nil && status.connected && !status.folder.isEmpty && !choosingFolder && !status.dbPath.isEmpty
+    }
+
     var selectedPlaylist: Playlist? {
         guard let id = selectedPlaylistID else { return nil }
         return playlists.first { $0.id == id }
@@ -72,10 +78,41 @@ extension AppModel {
         }
     }
 
-    /// Runs a playlist change in the core, then rereads the playlists.
+    /// How many of a playlist's items are hidden because their file is
+    /// missing from the library.
+    func missingCount(_ p: Playlist) -> Int {
+        p.items.reduce(0) { $0 + (trackByID[$1] == nil ? 1 : 0) }
+    }
+
+    /// Runs a playlist change in the core, then rereads the playlists and
+    /// schedules the sync that saves the change.
     private func change(_ action: () throws -> Void) {
         do { try action() } catch { playlistError = error.localizedDescription }
         do { try reloadPlaylists() } catch { playlistError = error.localizedDescription }
+        schedulePublish()
+    }
+
+    /// Starts a sync a few seconds after the last playlist change, so the
+    /// changes reach the primary and the secondaries soon. A sync that is
+    /// running then is waited for: it may have saved the index before the
+    /// change.
+    func schedulePublish() {
+        publishTask?.cancel()
+        publishTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 5_000_000_000)
+            while !Task.isCancelled {
+                guard let self else { return }
+                if !self.status.isBusy {
+                    try? Core.startSync()
+                    return
+                }
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+            }
+        }
+    }
+
+    func removeMissing(from id: String) {
+        change { try Core.removeMissingFromPlaylist(id) }
     }
 
     /// Makes a playlist, optionally with tracks, shows it and starts
@@ -92,6 +129,7 @@ extension AppModel {
             playlistError = error.localizedDescription
             try? reloadPlaylists()
         }
+        schedulePublish()
     }
 
     func renamePlaylist(_ id: String, to name: String) {
