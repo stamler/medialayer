@@ -52,9 +52,38 @@ the library: another Drive folder, a folder in another Google account, or
 a local folder. Right-click a chip to review a paused sync, stop syncing
 to it, or make it the primary. See [docs/sync.md](../../docs/sync.md).
 
+## Sidebar and playlists
+
+The sidebar (View > Show/Hide Sidebar, ⌃⌘S, or the toolbar button)
+lists Songs and the playlists. To use playlists:
+
+1. Choose File > New Playlist (⌘N) or click + under the sidebar. Type a
+   name and press Return.
+2. Add songs. Right-click rows in the table and choose Add to Playlist,
+   or drag the rows onto a playlist in the sidebar. A song that is in the
+   playlist already is not added again.
+3. Select the playlist. The table shows its songs in playlist order.
+   Drag rows to reorder them. Press Delete, or right-click and choose
+   Remove from Playlist, to remove songs.
+4. Double-click a song to play it. Playback continues through the
+   playlist.
+5. Right-click a playlist to rename or delete it. Deleting a playlist
+   keeps its songs in the library.
+
+Click a column header to sort a playlist; dragging to reorder then
+stops until you choose View > Sort by Playlist Order.
+
+Playlists are stored in the library's index, and the Go core makes every
+change to them. A change marks the index as changed, so the next sync
+(at start-up, or Library > Update Library) publishes a new index version
+to the primary and every secondary. A song whose file leaves the library
+keeps its place in the playlist but is hidden, and comes back if the file
+returns.
+
 ## Not yet
 
-Search, playlists, the sidebar, the system Now Playing controls
-(Control Centre) and media keys, header packs, the change feed, Proton,
-iCloud and SMB sources, the sync lease, following a primary moved on
-another device, and testing with 10,000 tracks.
+Search, the system Now Playing controls (Control Centre) and media keys,
+publishing playlist changes without a full sync, merging playlist changes
+made on two devices, header packs, the change feed, Proton, iCloud and
+SMB sources, the sync lease, following a primary moved on another device,
+and testing with 10,000 tracks.
