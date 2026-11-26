@@ -12,23 +12,40 @@ struct SongsTable: View {
     @Binding var selection: Set<Track.ID>
 
     var body: some View {
-        Table(of: Track.self, selection: $selection, sortOrder: $model.sortOrder,
-              columnCustomization: $columns.customization) {
-            // A column builder takes at most ten columns, so they come in two
-            // builder properties. (A Group would infer its sort type from the
-            // unsortable art column and reject the sortable ones.)
-            leadingColumns
-            trailingColumns
-        } rows: {
-            // Rows drag to a sidebar playlist, or within a playlist to reorder.
-            ForEach(tracks) { t in
-                TableRow(t).draggable(TrackDrag(ids: dragged(t), playlist: model.selectedPlaylistID))
-            }
-            .dropDestination(for: TrackDrag.self) { offset, drops in
-                model.dropOnTable(drops, at: offset, rows: tracks)
-            }
+        // Rows drag to a sidebar playlist, or within a playlist to reorder,
+        // so only a playlist's table takes drops.
+        if model.selectedPlaylistID != nil {
+            withMenu(Table(of: Track.self, selection: $selection, sortOrder: $model.sortOrder,
+                           columnCustomization: $columns.customization) {
+                leadingColumns
+                trailingColumns
+            } rows: {
+                ForEach(tracks) { t in
+                    TableRow(t).draggable(TrackDrag(ids: dragged(t), playlist: model.selectedPlaylistID))
+                }
+                .dropDestination(for: TrackDrag.self) { offset, drops in
+                    model.dropOnTable(drops, at: offset, rows: tracks)
+                }
+            })
+        } else {
+            withMenu(Table(of: Track.self, selection: $selection, sortOrder: $model.sortOrder,
+                           columnCustomization: $columns.customization) {
+                // A column builder takes at most ten columns, so they come in two
+                // builder properties. (A Group would infer its sort type from the
+                // unsortable art column and reject the sortable ones.)
+                leadingColumns
+                trailingColumns
+            } rows: {
+                ForEach(tracks) { t in
+                    TableRow(t).draggable(TrackDrag(ids: dragged(t), playlist: nil))
+                }
+            })
         }
-        .contextMenu(forSelectionType: Track.ID.self) { ids in
+    }
+
+    /// The rows' context menu and double-click, for either table.
+    private func withMenu<T: View>(_ table: T) -> some View {
+        table.contextMenu(forSelectionType: Track.ID.self) { ids in
             if let id = ids.first, let t = tracks.first(where: { $0.id == id }) {
                 Button("Play") { model.play(t) }
             }
