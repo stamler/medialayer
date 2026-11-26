@@ -11,8 +11,9 @@ import MediaPlayer
 /// It watches the player and changes nothing in it:
 /// 1. A new track publishes its title, artist, album, duration and cover,
 ///    and turns the commands on.
-/// 2. Play and pause publish the elapsed time and the rate (1 or 0) and
-///    set the playback state. The system counts the time on from there.
+/// 2. Play, pause and the end of buffering publish the elapsed time and
+///    the rate (1 only while audio plays, so 0 while buffering) and set
+///    the playback state. The system counts the time on from there.
 /// 3. A position more than a second away from that count (a seek, or a
 ///    stall) publishes the elapsed time again.
 /// 4. Stop and quit clear the information and turn the commands off.
@@ -24,7 +25,8 @@ final class NowPlaying {
     private var targets: [(command: MPRemoteCommand, target: Any)] = []
     private var info: [String: Any] = [:]
     private var trackID: String?
-    private var isPlaying = false
+    private var isPlaying = false // playing or buffering: the state shown
+    private var isAudible = false // time is passing: the rate published
     /// The elapsed time last published, and when: the system counts on
     /// from it at the published rate.
     private var lastElapsed = 0.0
@@ -52,6 +54,10 @@ final class NowPlaying {
         player.$isPlaying
             .removeDuplicates()
             .sink { [weak self] playing in self?.playingChanged(playing) }
+            .store(in: &subscriptions)
+        player.$isAudible
+            .removeDuplicates()
+            .sink { [weak self] audible in self?.audibleChanged(audible) }
             .store(in: &subscriptions)
         player.clock.$position
             .sink { [weak self] position in self?.positionChanged(position) }
@@ -89,9 +95,17 @@ final class NowPlaying {
         publish(elapsed: player.position)
     }
 
+    /// Buffering is playing with no time passing: the rate is 0 until the
+    /// audio starts, so the system doesn't count time on ahead of it.
+    private func audibleChanged(_ audible: Bool) {
+        isAudible = audible
+        guard trackID != nil else { return }
+        publish(elapsed: player.position)
+    }
+
     private func positionChanged(_ position: Double) {
         guard trackID != nil else { return }
-        let counted = lastElapsed + (isPlaying ? Date().timeIntervalSince(lastUpdate) : 0)
+        let counted = lastElapsed + (isAudible ? Date().timeIntervalSince(lastUpdate) : 0)
         if abs(position - counted) > 1 { publish(elapsed: position) }
     }
 
@@ -111,7 +125,7 @@ final class NowPlaying {
         lastElapsed = elapsed
         lastUpdate = Date()
         info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = elapsed
-        info[MPNowPlayingInfoPropertyPlaybackRate] = isPlaying ? 1.0 : 0.0
+        info[MPNowPlayingInfoPropertyPlaybackRate] = isAudible ? 1.0 : 0.0
         let center = MPNowPlayingInfoCenter.default()
         center.nowPlayingInfo = info
         // macOS doesn't infer the state from the rate.
@@ -180,12 +194,10 @@ final class NowPlaying {
         MPMediaItemArtwork(boundsSize: image.size) { _ in image }
     }
 
-    /// Runs work on the main actor: now when on the main thread, else soon.
+    /// Runs work on the main actor soon, never inside the caller: a
+    /// command's work can end in clear(), which removes the command's
+    /// targets, and that must not happen inside the command's own handler.
     nonisolated private static func onMain(_ work: @escaping @MainActor @Sendable () -> Void) {
-        if Thread.isMainThread {
-            MainActor.assumeIsolated { work() }
-        } else {
-            DispatchQueue.main.async { MainActor.assumeIsolated { work() } }
-        }
+        DispatchQueue.main.async { MainActor.assumeIsolated { work() } }
     }
 }

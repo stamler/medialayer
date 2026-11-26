@@ -277,7 +277,10 @@ final class PlaybackClock: ObservableObject {
 @MainActor
 final class Player: ObservableObject {
     @Published private(set) var current: Track?
+    /// Playing or about to: false only when paused.
     @Published private(set) var isPlaying = false
+    /// Audio is actually coming out: not paused, and not waiting for data.
+    @Published private(set) var isAudible = false
     @Published private(set) var error: String?
     let clock = PlaybackClock()
     var position: Double { clock.position }
@@ -316,7 +319,10 @@ final class Player: ObservableObject {
         })
         statusObservation = avPlayer.observe(\.timeControlStatus) { [weak self] p, _ in
             DispatchQueue.main.async {
-                MainActor.assumeIsolated { self?.isPlaying = p.timeControlStatus != .paused }
+                MainActor.assumeIsolated {
+                    self?.isPlaying = p.timeControlStatus != .paused
+                    self?.isAudible = p.timeControlStatus == .playing
+                }
             }
         }
     }
@@ -349,6 +355,7 @@ final class Player: ObservableObject {
                     guard let self, item === self.avPlayer.currentItem else { return }
                     self.error = message
                     self.isPlaying = false
+                    self.isAudible = false
                 }
             }
         }
