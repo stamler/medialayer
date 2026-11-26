@@ -415,21 +415,15 @@ func (d *DB) AddPlaylistsByPath(lists []PathPlaylist) (int, error) {
 			continue
 		}
 		added++
-		pos := 0
-		for _, path := range p.Paths {
-			var fileID string
-			err := tx.QueryRow(`SELECT id FROM file WHERE path = ?`, path).Scan(&fileID)
-			if errors.Is(err, sql.ErrNoRows) {
-				continue
-			}
-			if err != nil {
-				return 0, err
-			}
+		ids, err := filesByPath(tx, p.Paths)
+		if err != nil {
+			return 0, err
+		}
+		for pos, fileID := range ids {
 			if _, err := tx.Exec(`INSERT INTO playlist_item (playlist_id, pos, file_id) VALUES (?, ?, ?)`,
 				p.ID, pos, fileID); err != nil {
 				return 0, err
 			}
-			pos++
 		}
 	}
 	if added == 0 {
@@ -439,4 +433,46 @@ func (d *DB) AddPlaylistsByPath(lists []PathPlaylist) (int, error) {
 		return 0, err
 	}
 	return added, tx.Commit()
+}
+
+// filesByPath returns the ids of the files at the given paths, in order,
+// leaving out paths the index doesn't know.
+func filesByPath(tx *sql.Tx, paths []string) ([]string, error) {
+	var ids []string
+	for _, path := range paths {
+		var fileID string
+		err := tx.QueryRow(`SELECT id FROM file WHERE path = ?`, path).Scan(&fileID)
+		if errors.Is(err, sql.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		ids = append(ids, fileID)
+	}
+	return ids, nil
+}
+
+// RefillPlaylistByPath sets the items of a playlist added by
+// AddPlaylistsByPath from its full list of paths again, once more of them
+// may resolve (after indexing). A playlist edited since it was added (its
+// updated_at differs) or deleted is left alone. It reports whether the
+// playlist was still as added.
+func (d *DB) RefillPlaylistByPath(p PathPlaylist) (bool, error) {
+	unedited := false
+	err := d.editItems(p.ID, func(tx *sql.Tx, items []string) ([]string, error) {
+		var updated int64
+		if err := tx.QueryRow(`SELECT updated_at FROM playlist WHERE id = ?`, p.ID).Scan(&updated); err != nil {
+			return nil, err
+		}
+		if updated != p.UpdatedAt {
+			return items, nil // edited since: the user's version stands
+		}
+		unedited = true
+		return filesByPath(tx, p.Paths)
+	})
+	if errors.Is(err, ErrNoPlaylist) {
+		return false, nil
+	}
+	return unedited, err
 }

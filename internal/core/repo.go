@@ -240,12 +240,16 @@ func (c *Core) restore(ctx context.Context, f fs.Fs) error {
 
 	// Playlists made in the index being replaced (one indexed from
 	// scratch while another device published first) carry over by path.
-	// The snapshot may not list every file they name yet, so they are
-	// added after this sync's index pass (see applyCarried).
+	// They join the restored index now, with the items the snapshot
+	// knows, so they never vanish; the full lists wait to be applied
+	// after this sync's index pass (see applyCarried).
 	c.playlistMu.Lock()
 	defer c.playlistMu.Unlock()
 	if old := c.currentDB(); old != nil {
 		lists, err := old.PlaylistsByPath()
+		if err == nil {
+			_, err = sdb.AddPlaylistsByPath(lists)
+		}
 		if err == nil {
 			err = c.carryPlaylists(lists)
 		}

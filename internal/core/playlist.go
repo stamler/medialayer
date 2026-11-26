@@ -19,12 +19,15 @@ import (
 // Changes are serialised by c.playlistMu, which restore also holds while
 // it reads the playlists of the index it replaces and swaps in the
 // restored one, so no change is made to an index that is being replaced.
-// The playlists it read wait in carried-playlists.json until the sync's
-// index pass ends, then join the restored index (applyCarried).
+// The playlists it read join the restored index at once, with the items
+// its snapshot knows; their full item lists wait in
+// carried-playlists.json until the sync's index pass ends, and then
+// refill each playlist not edited since (applyCarried).
 //
 // A file that is moved or renamed keeps its id (see matchMoves), so it
-// stays in its playlists. SetFolder, which deletes the local index,
-// refuses while playlist changes are unsaved.
+// stays in its playlists. SetFolder, which deletes the local index, holds
+// c.playlistMu and refuses while playlist changes are unsaved, saying
+// how to save or discard them (folderChangeBlocked).
 
 var errNoLibrary = errors.New("no library is open")
 
@@ -113,10 +116,48 @@ func (c *Core) RemoveMissingFromPlaylist(id string) error {
 	return db.RemoveMissingFromPlaylist(id)
 }
 
-// errUnsavedPlaylists stops a folder change that would discard playlist
-// changes the library's folders don't hold yet.
-var errUnsavedPlaylists = errors.New("playlist changes haven't been saved to the library yet; " +
-	"update the library first (Library > Update Library), or delete the playlists to discard them")
+// Errors that stop a folder change, which deletes the local index, from
+// discarding playlist changes the library's folders don't hold yet. Each
+// names a way out.
+var (
+	errUnsavedPlaylists = errors.New("playlist changes haven't been saved to the library yet; " +
+		"update the library first (Library > Update Library), or delete the playlists to discard them")
+	errPlaylistsPrimaryFull = errors.New("playlist changes can't be saved to the library: the primary's cloud is full; " +
+		"free up space there and update the library, or delete the playlists to discard the changes")
+	errCarriedWaiting = errors.New("playlists from this library are waiting to be restored; " +
+		"update the library first (Library > Update Library)")
+)
+
+// folderChangeBlocked returns the reason a folder change would lose
+// playlist changes, or nil. db is the open index, or nil; primaryFull
+// says the last sync found the primary's cloud full. The caller holds
+// c.playlistMu.
+func (c *Core) folderChangeBlocked(db *index.DB, primaryFull bool) error {
+	if db == nil {
+		// Carried playlists are added to the index at restore, so they
+		// wait outside it only if no index could be opened since.
+		carried, err := c.readCarried()
+		if err != nil {
+			return fmt.Errorf("check the playlists: %w", err)
+		}
+		if len(carried) > 0 {
+			return errCarriedWaiting
+		}
+		return nil
+	}
+	unsaved, err := unsavedPlaylists(db)
+	if err != nil {
+		return fmt.Errorf("check the playlists: %w", err)
+	}
+	switch {
+	case !unsaved:
+		return nil
+	case primaryFull:
+		return errPlaylistsPrimaryFull
+	default:
+		return errUnsavedPlaylists
+	}
+}
 
 // unsavedPlaylists reports whether db has playlists, and changes to them
 // that the primary doesn't hold yet.
@@ -141,14 +182,15 @@ func unsavedPlaylists(db *index.DB) (bool, error) {
 }
 
 // carriedName is the file in the data directory that holds playlists
-// carried over from a replaced index until the next index pass adds them.
+// carried over from a replaced index, by path, until the next index pass
+// has listed every file they name.
 const carriedName = "carried-playlists.json"
 
 func (c *Core) carriedPath() string { return filepath.Join(c.dataDir, carriedName) }
 
-// carryPlaylists keeps playlists, by path, to add to the index after the
-// next index pass, along with any already waiting. The caller holds
-// c.playlistMu.
+// carryPlaylists keeps playlists, by path, to refill after the next index
+// pass, along with any already waiting. A playlist read again replaces
+// the copy waiting. The caller holds c.playlistMu.
 func (c *Core) carryPlaylists(lists []index.PathPlaylist) error {
 	if len(lists) == 0 {
 		return nil
@@ -157,16 +199,17 @@ func (c *Core) carryPlaylists(lists []index.PathPlaylist) error {
 	if err != nil {
 		return err
 	}
-	have := map[string]bool{}
-	for _, p := range waiting {
-		have[p.ID] = true
-	}
+	fresh := map[string]bool{}
 	for _, p := range lists {
-		if !have[p.ID] {
-			waiting = append(waiting, p)
+		fresh[p.ID] = true
+	}
+	kept := lists
+	for _, p := range waiting {
+		if !fresh[p.ID] {
+			kept = append(kept, p)
 		}
 	}
-	b, err := json.Marshal(waiting)
+	b, err := json.Marshal(kept)
 	if err != nil {
 		return err
 	}
@@ -188,10 +231,12 @@ func (c *Core) readCarried() ([]index.PathPlaylist, error) {
 	return lists, nil
 }
 
-// applyCarried adds the carried playlists to the index, now that the
-// index pass has listed every file. Items whose path is still unknown
-// are left out. The added playlists make a new version, which the
-// publish that follows saves.
+// applyCarried refills the carried playlists from their full item lists,
+// now that the index pass has listed every file. Restore added them with
+// the items the snapshot could resolve; a playlist edited or deleted
+// since is left as it is. Items whose path is still unknown are left
+// out. A refill makes a new version, which the publish that follows
+// saves.
 func (c *Core) applyCarried() error {
 	c.playlistMu.Lock()
 	defer c.playlistMu.Unlock()
@@ -203,8 +248,10 @@ func (c *Core) applyCarried() error {
 	if db == nil {
 		return errNoLibrary
 	}
-	if _, err := db.AddPlaylistsByPath(lists); err != nil {
-		return err
+	for _, p := range lists {
+		if _, err := db.RefillPlaylistByPath(p); err != nil {
+			return err
+		}
 	}
 	return os.Remove(c.carriedPath())
 }

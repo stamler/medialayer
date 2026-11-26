@@ -101,30 +101,17 @@ func TestPlaylistsTravelWithTheLibrary(t *testing.T) {
 // including an item whose file the snapshot doesn't list yet.
 func TestPlaylistCarriesOverToRestoredIndex(t *testing.T) {
 	ctx := context.Background()
-	lib := writeLibrary(t, nil)
-	late := filepath.Join(lib, "C/Late/01.flac")
-	lateData := testFLAC([]string{"TITLE=Late"}, nil, 1000)
-	write(t, late, lateData)
-	a, b := newTestCore(t, lib), newTestCore(t, lib)
-	if err := b.index(ctx, b.fsys); err != nil {
+	lib, b, pl, bIDs := carrySetup(t)
+	// At restore the playlist is there at once, with the items the
+	// snapshot knows.
+	if err := b.restore(ctx, b.fsys); err != nil {
 		t.Fatal(err)
 	}
-	bIDs := fileIDs(t, b)
-	pl, err := b.CreatePlaylist("Early")
-	if err != nil {
-		t.Fatal(err)
+	restored := fileIDs(t, b)
+	got, err := b.currentDB().PlaylistItems(pl)
+	if want := []string{restored["B/Other/01.flac"], restored["A/Album/01.flac"]}; err != nil || !slices.Equal(got, want) {
+		t.Errorf("items right after restore = %v (%v), want %v", got, err, want)
 	}
-	if err := b.AddToPlaylist(pl, []string{bIDs["B/Other/01.flac"], bIDs["C/Late/01.flac"], bIDs["A/Album/01.flac"]}, -1); err != nil {
-		t.Fatal(err)
-	}
-	// A publishes while the late file is away, so its snapshot lacks it.
-	if err := os.Remove(late); err != nil {
-		t.Fatal(err)
-	}
-	if err := a.sync(ctx); err != nil {
-		t.Fatal(err)
-	}
-	write(t, late, lateData)
 	if err := b.sync(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -132,7 +119,7 @@ func TestPlaylistCarriesOverToRestoredIndex(t *testing.T) {
 	if bIDs["A/Album/01.flac"] == ids["A/Album/01.flac"] {
 		t.Fatal("the test needs B to index with its own file ids")
 	}
-	got, err := b.currentDB().PlaylistItems(pl)
+	got, err = b.currentDB().PlaylistItems(pl)
 	want := []string{ids["B/Other/01.flac"], ids["C/Late/01.flac"], ids["A/Album/01.flac"]}
 	if err != nil || !slices.Equal(got, want) {
 		t.Errorf("carried-over items = %v (%v), want %v", got, err, want)
@@ -148,6 +135,118 @@ func TestPlaylistCarriesOverToRestoredIndex(t *testing.T) {
 	defer func() { _ = sdb.Close() }()
 	if lists, _ := sdb.Playlists(); len(lists) != 1 || lists[0].ID != pl {
 		t.Errorf("published playlists = %+v", lists)
+	}
+}
+
+// carrySetup makes device B index a library from scratch and put three
+// files in a playlist, then device A publish the library while one of
+// them (C/Late/01.flac) is away, which then comes back. B's next restore
+// replaces its index with A's snapshot, which lacks the late file. It
+// returns the library, B, the playlist and B's own file ids.
+func carrySetup(t *testing.T) (lib string, b *Core, pl string, bIDs map[string]string) {
+	t.Helper()
+	ctx := context.Background()
+	lib = writeLibrary(t, nil)
+	late := filepath.Join(lib, "C/Late/01.flac")
+	lateData := testFLAC([]string{"TITLE=Late"}, nil, 1000)
+	write(t, late, lateData)
+	a := newTestCore(t, lib)
+	b = newTestCore(t, lib)
+	if err := b.index(ctx, b.fsys); err != nil {
+		t.Fatal(err)
+	}
+	bIDs = fileIDs(t, b)
+	pl, err := b.CreatePlaylist("Early")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := b.AddToPlaylist(pl, []string{bIDs["B/Other/01.flac"], bIDs["C/Late/01.flac"], bIDs["A/Album/01.flac"]}, -1); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(late); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.sync(ctx); err != nil {
+		t.Fatal(err)
+	}
+	write(t, late, lateData)
+	return lib, b, pl, bIDs
+}
+
+// A carried playlist edited between restore and the end of the index
+// pass keeps the edit: the full item list doesn't overwrite it.
+func TestCarriedPlaylistKeepsEdits(t *testing.T) {
+	ctx := context.Background()
+	_, b, pl, _ := carrySetup(t)
+	if err := b.restore(ctx, b.fsys); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.RemoveFromPlaylist(pl, []int{0}); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.sync(ctx); err != nil {
+		t.Fatal(err)
+	}
+	ids := fileIDs(t, b)
+	got, err := b.currentDB().PlaylistItems(pl)
+	if want := []string{ids["A/Album/01.flac"]}; err != nil || !slices.Equal(got, want) {
+		t.Errorf("items = %v (%v), want only the edit's %v", got, err, want)
+	}
+	if _, err := os.Stat(b.carriedPath()); err == nil {
+		t.Error("the carried playlists are still waiting after the sync")
+	}
+}
+
+// A playlist carried twice keeps the copy read last.
+func TestCarryReplacesWaitingCopy(t *testing.T) {
+	c, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = c.Close() }()
+	old := index.PathPlaylist{Playlist: index.Playlist{ID: "p", Name: "Old"}, Paths: []string{"a"}}
+	other := index.PathPlaylist{Playlist: index.Playlist{ID: "q", Name: "Other"}}
+	fresh := index.PathPlaylist{Playlist: index.Playlist{ID: "p", Name: "New"}, Paths: []string{"a", "b"}}
+	if err := c.carryPlaylists([]index.PathPlaylist{old, other}); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.carryPlaylists([]index.PathPlaylist{fresh}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := c.readCarried()
+	if err != nil || len(got) != 2 || got[0].Name != "New" || len(got[0].Paths) != 2 || got[1].ID != "q" {
+		t.Errorf("carried = %+v (%v), want the new p and q", got, err)
+	}
+}
+
+// Each refusal says how to get out of it.
+func TestFolderChangeBlockedReasons(t *testing.T) {
+	ctx := context.Background()
+	c := newTestCore(t, writeLibrary(t, nil))
+	if err := c.sync(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.folderChangeBlocked(c.currentDB(), false); err != nil {
+		t.Fatalf("no playlists: %v", err)
+	}
+	if _, err := c.CreatePlaylist("Mine"); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.folderChangeBlocked(c.currentDB(), false); !errors.Is(err, errUnsavedPlaylists) {
+		t.Errorf("unsaved: %v", err)
+	}
+	if err := c.folderChangeBlocked(c.currentDB(), true); !errors.Is(err, errPlaylistsPrimaryFull) {
+		t.Errorf("unsaved, primary full: %v", err)
+	}
+	// With no index open, waiting carried playlists still count.
+	if err := c.folderChangeBlocked(nil, false); err != nil {
+		t.Errorf("no index, nothing carried: %v", err)
+	}
+	if err := c.carryPlaylists([]index.PathPlaylist{{Playlist: index.Playlist{ID: "p", Name: "P"}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.folderChangeBlocked(nil, false); !errors.Is(err, errCarriedWaiting) {
+		t.Errorf("no index, carried waiting: %v", err)
 	}
 }
 
