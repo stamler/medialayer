@@ -11,7 +11,18 @@ final class AppModel: ObservableObject {
     @Published private(set) var startError: String?
     /// The last failure reading the index; cleared by the next good read.
     @Published private(set) var libraryError: String?
-    @Published private(set) var tracks: [Track] = []
+    @Published private(set) var tracks: [Track] = [] {
+        didSet { search.invalidate(); searched = search.filter(tracks, query: searchText) }
+    }
+    /// The toolbar's search text; the column browser and table show only
+    /// the tracks it leaves.
+    @Published var searchText = "" {
+        didSet { if searchText != oldValue { applySearch() } }
+    }
+    /// Bumped by Edit > Find; the search field focuses itself on a change.
+    @Published private(set) var searchFocusRequest = 0
+    /// The tracks the search leaves: all of them when it is empty.
+    @Published private(set) var searched: [Track] = []
     @Published var choosingFolder = false
 
     // Column browser: nil means "All".
@@ -23,6 +34,7 @@ final class AppModel: ObservableObject {
                                 KeyPathComparator(\Track.discNumber), KeyPathComparator(\Track.trackNumber)]
 
     let art = ArtCache()
+    private let search = TrackSearch()
     let player = Player()
 
     private var db: LibraryDB?
@@ -152,6 +164,20 @@ final class AppModel: ObservableObject {
         refresh()
     }
 
+    // MARK: Search
+
+    func focusSearch() { searchFocusRequest += 1 }
+
+    private func applySearch() {
+        searched = search.filter(tracks, query: searchText)
+        // Drop a browser choice the search has hidden, or the table would
+        // be empty with nothing selected in that column.
+        if let g = genre, !genres.contains(g) { genre = nil }
+        if let c = composer, !composers.contains(c) { composer = nil }
+        if let a = artist, !artists.contains(a) { artist = nil }
+        if let a = album, !albums.contains(a) { album = nil }
+    }
+
     // MARK: Column browser
 
     private func values(_ tracks: [Track], _ key: (Track) -> String) -> [String] {
@@ -160,8 +186,8 @@ final class AppModel: ObservableObject {
         }
     }
 
-    var genres: [String] { values(tracks, \.genre) }
-    private var byGenre: [Track] { genre.map { g in tracks.filter { $0.genre == g } } ?? tracks }
+    var genres: [String] { values(searched, \.genre) }
+    private var byGenre: [Track] { genre.map { g in searched.filter { $0.genre == g } } ?? searched }
     var composers: [String] { values(byGenre, \.composer) }
     private var byComposer: [Track] { composer.map { c in byGenre.filter { $0.composer == c } } ?? byGenre }
     var artists: [String] { values(byComposer, \.browseArtist) }

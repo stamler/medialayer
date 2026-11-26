@@ -14,6 +14,11 @@ struct MediaLayerApp: App {
                 .frame(minWidth: 900, minHeight: 560)
         }
         .commands {
+            CommandGroup(after: .textEditing) {
+                Button("Find") { model.focusSearch() }
+                    .keyboardShortcut("f")
+                    .disabled(model.status.folder.isEmpty)
+            }
             CommandMenu("Library") {
                 Button("Update Library") { model.resync() }
                     .keyboardShortcut("r")
@@ -208,6 +213,7 @@ struct LibraryView: View {
         .toolbar {
             ToolbarItemGroup(placement: .navigation) { TransportControls() }
             NowPlayingItem()
+            SearchToolbarItem()
         }
     }
 }
