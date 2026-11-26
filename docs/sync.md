@@ -10,8 +10,73 @@ changes flow one way, primary to secondaries.
 Every sync of the library (at app start, on Update Library, and right
 after a secondary is added) first brings the primary's index up to date
 and publishes it, then syncs each secondary in turn. Only one sync runs at
-a time on a device. A secondary that fails or pauses doesn't stop the
+a time on a device, and only one device syncs a library at a time (see
+"The sync lock"). A secondary that fails or pauses doesn't stop the
 others; its chip in the status bar shows its state.
+
+## The sync lock
+
+A device holds the library's sync lock (a lease) for the whole of a sync:
+indexing, publishing and copying to the secondaries. It is built in
+`internal/core/lease.go`.
+
+- **Where it lives.** At the top of the primary's `.medialayer` folder,
+  one small file per device, `lease-<device id>.json`, with the device's
+  name, a state (`waiting`, `held` or `released`), a token for this take
+  of the lock, a counter raised on every write, and when it was taken and
+  last renewed. Each device writes only its own file, because Drive has no
+  "create only if absent": two devices writing one shared file at once
+  would leave two files of the same name. The files are not in a folder
+  of their own, as two devices creating that folder at once could leave
+  two folders of one name on Drive.
+- **Taking it.** The device first checks that the primary is still its
+  primary (nothing is written otherwise), then lists `.medialayer`. If
+  another device's claim is live, it doesn't write and waits. Otherwise
+  it writes its claim as `waiting` and lists again. If no other live claim
+  is there, it rewrites its claim as `held` and syncs. If it finds
+  another, it marks its own `released` and backs off; two devices that
+  start together both back off and retry after a random 1 to 5 seconds,
+  three tries in all. After taking the lock it checks the primary again,
+  as another device may have switched it meanwhile. A claim that can't be
+  read counts as held, as it may be a file caught mid-write.
+- **Renewing it.** Every 2 minutes. The renewal reads the device's own
+  claim first: if another device marked it released, the lock was taken
+  over and the sync stops. If the device finds another `held` claim, it
+  stops; the other does the same at its next renewal. `waiting` claims
+  are ignored, as their writers back off. A failed renewal is tried again
+  every 15 seconds. A device that couldn't renew for 9 minutes (a Mac
+  asleep, say, or a renewal stuck on the network) stops before anyone
+  else could take over: every write of the sync (each file copied,
+  trashed or uploaded, `member.json` and `repo.json`) first checks that
+  the lock was renewed within 9 minutes, by both the wall clock and the
+  device's own uptime clock, and a stuck renewal gives up at that time.
+  A device that lost the lock tries again about 2 minutes later, and the
+  sync resumes as described under Resuming.
+- **Releasing it.** When the sync ends, the claim is rewritten as
+  `released`, also when the lock was lost. It is rewritten rather than
+  deleted, so Drive's trash doesn't fill with lock files. A crash leaves
+  it held until it goes stale.
+- **A device that dies holding it.** A claim not renewed for 10 minutes
+  is stale. Another device judges that only by watching the file stay
+  unchanged for 10 minutes on its own clock, never by the time written in
+  it, so a wrong clock on either device can't free the lock early. The
+  watch is kept in memory, so after the app restarts it starts again.
+  The device taking over marks the stale claim `released`, naming itself,
+  and the status bar shows a notice naming the device that stopped.
+- **A full primary.** If the claim can't be written because the
+  primary's cloud is full, the sync stops with an error saying so, and
+  nothing is synced until there is space. A renewal refused for a full
+  cloud stops the sync too. This also blocks Make Primary away from a
+  full primary.
+- **What you see.** Playback and browsing are never affected. While
+  another device syncs, the status bar says "Syncing on <device>. This
+  Mac will sync after it.", and the core tries again about every 2
+  minutes (as does Update Library). The device's name is its host name.
+- **Make Primary** holds the old primary's lock for the whole job, and
+  takes the target's lock before the switch, keeping it through the sync
+  after the switch. If another device holds either, the job waits as a
+  sync does, and the retry is a plain sync; choose Make Primary again
+  once it is done.
 
 ## Every copy is a whole library
 
@@ -118,9 +183,11 @@ copies on its own servers.
 
 ## A full primary
 
-Sync writes to the primary only to publish the library's own files (the
-snapshot and art packs, a few MB when the library changed). If the
-primary's cloud is full, that upload fails: the status bar says so, the
+Sync writes to the primary only for the sync lock and to publish the
+library's own files (the snapshot and art packs, a few MB when the
+library changed). A primary too full for the lock's small file stops the
+sync (see "The sync lock"). If the lock fits but the snapshot doesn't,
+that upload fails: the status bar says so, the
 device keeps offering that version to the primary on every sync
 (`meta.primary_version` records the newest the primary holds), and the
 secondaries still get every file and the current index version.
@@ -154,7 +221,9 @@ primary, and "the index" is the device's SQLite database of the library.
 2. The app asks you to confirm. When you confirm, it calls `Promote` in
    the core.
 3. The core refuses if a sync or another job runs, or if the target is not
-   one of this device's secondaries. Otherwise it starts a background job.
+   one of this device's secondaries. Otherwise it starts a background job,
+   which takes the primary's sync lock (see "The sync lock") and holds it
+   to the end.
    While the job runs, Update Library does nothing, and the core refuses
    to add or remove a source, approve changes, or change the music
    folder.
@@ -194,6 +263,9 @@ primary, and "the index" is the device's SQLite database of the library.
    primary.
 
 ### Switch
+
+Before the switch the job takes the target's sync lock too, and holds it
+through step 15.
 
 10. The job makes a new `repo.json` record from the primary's:
     - `generation` is one higher,
@@ -259,6 +331,7 @@ Do not use Choose Music Folder to switch back. See Known gaps.
 | Fails at | Result |
 |---|---|
 | Step 3 | Nothing changes. The status bar shows why. |
+| Taking either sync lock | Nothing more changes. If another device holds it, the status bar names it and a plain sync follows later. A full primary can't take its lock, so Make Primary can't move away from it. |
 | Steps 4 to 9 | The primary stays the primary. The status bar shows why. The sync in step 4 has run. |
 | Step 11 (write to the target) | Nothing changes. The old primary is still the primary. |
 | Step 12 (write to the old primary) | The switch continues. A later sync writes the old primary's `repo.json`. |
@@ -291,8 +364,12 @@ become synced, and you can't switch back until it has space.
   the new one. If the sync stops in between, that file is missing from the
   secondary until the next sync. It is still on the primary and in the
   secondary's trash.
-- No sync lease yet: two devices syncing the same library at once is not
-  guarded against.
+- The sync lock relies on Drive listing a file as soon as its upload
+  ends. A claim left `waiting` or `held` by a device that crashed blocks
+  others for 10 minutes after they first see it, or longer if they
+  restart meanwhile.
+- A full primary blocks syncing and Make Primary; there is no way yet to
+  move the library off a full primary from the app.
 - The 5% limit is counted per sync, not per day.
 - Each device lists its own secondaries in the primary's `repo.json`, so
   two devices with different secondaries overwrite each other's list.

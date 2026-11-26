@@ -10,6 +10,7 @@ struct CoreStatus: Decodable, Equatable {
         var failed: Int64 = 0
         var current: String?
         var error: String?
+        var holder: String? // the device syncing, while this one waits
         var failures: [String]?
         var finished: String? // when the last sync ended
     }

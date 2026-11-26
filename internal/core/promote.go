@@ -29,6 +29,9 @@ func (c *Core) Promote(id string) error {
 	if c.jobDone != nil {
 		return errors.New("the library is syncing; wait for it to finish")
 	}
+	if c.closed {
+		return errors.New("the core is closed")
+	}
 	found := false
 	for _, s := range c.settings.Secondaries {
 		found = found || s.ID == id
@@ -36,27 +39,58 @@ func (c *Core) Promote(id string) error {
 	if !found {
 		return fmt.Errorf("no secondary %s", id)
 	}
+	// The job holds the old primary's sync lease throughout, and the
+	// target's from before the switch until the sync after it ends.
 	return c.startJobLocked(func(ctx context.Context) error {
-		if err := c.sync(ctx); err != nil {
+		f, err := c.libraryFs(ctx)
+		if err != nil {
 			return err
 		}
-		c.mu.Lock()
-		m := c.mirrors[id]
-		c.mu.Unlock()
-		if m == nil || m.state != MirrorSynced {
-			why := "its sync didn't finish"
-			if m != nil && m.err != "" {
-				why = m.err
-			} else if m != nil && m.state == MirrorPaused {
-				why = "its sync is paused for review"
-			}
-			return fmt.Errorf("couldn't make it the primary: %s", why)
+		if err := c.checkPrimary(ctx, f); err != nil {
+			return err
 		}
+		return c.withLease(ctx, f, func(ctx context.Context) error { return c.promoteHeld(ctx, id) })
+	})
+}
+
+// promoteHeld is Promote's job, holding the primary's sync lease.
+func (c *Core) promoteHeld(ctx context.Context, id string) error {
+	if err := c.syncHeld(ctx); err != nil {
+		return err
+	}
+	c.mu.Lock()
+	m := c.mirrors[id]
+	c.mu.Unlock()
+	if m == nil || m.state != MirrorSynced {
+		why := "its sync didn't finish"
+		if m != nil && m.err != "" {
+			why = m.err
+		} else if m != nil && m.state == MirrorPaused {
+			why = "its sync is paused for review"
+		}
+		return fmt.Errorf("couldn't make it the primary: %s", why)
+	}
+	var target source
+	c.mu.Lock()
+	for _, s := range c.settings.Secondaries {
+		if s.ID == id {
+			target = s
+		}
+	}
+	c.mu.Unlock()
+	if target.ID == "" {
+		return fmt.Errorf("no secondary %s", id)
+	}
+	dst, err := openSource(ctx, target)
+	if err != nil {
+		return err
+	}
+	return c.withLease(ctx, dst, func(ctx context.Context) error {
 		c.setJob(func(j *jobStatus) { j.Phase, j.Done, j.Total, j.Current = PhasePromoting, 0, 0, "" })
 		if err := c.swapPrimary(ctx, id); err != nil {
 			return err
 		}
-		return c.sync(ctx)
+		return c.syncHeld(ctx)
 	})
 }
 

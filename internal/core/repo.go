@@ -28,8 +28,9 @@ import (
 //	.medialayer/repo.json                 library id and the primary record
 //	.medialayer/snapshots/000001.sqlite   the index, newest number wins
 //	.medialayer/art/pack-<ulid>.bin       cover art, content-addressed by the index
+//	.medialayer/lease-<device id>.json    each device's claim on the sync lease (lease.go)
 //
-// Change logs, header packs and the sync lease come later.
+// Change logs and header packs come later.
 
 // repoFormat is the version of the repository layout in repo.json.
 const repoFormat = 1
@@ -385,6 +386,9 @@ func (c *Core) publish(ctx context.Context, f fs.Fs) error {
 		return nil
 	}
 	c.setJob(func(j *jobStatus) { j.Phase, j.Done, j.Total, j.Current = PhasePublishing, 0, 0, "" })
+	if err := checkLease(ctx); err != nil {
+		return err
+	}
 
 	libraryID, err := db.Meta("library_id")
 	if err != nil {
@@ -499,6 +503,9 @@ func (c *Core) publish(ctx context.Context, f fs.Fs) error {
 	sort.Slice(old, func(i, j int) bool { return old[i].n > old[j].n })
 	for i, s := range old {
 		if i+1 >= snapshotsKept { // the new snapshot counts as one
+			if err := checkLease(ctx); err != nil {
+				return err
+			}
 			if err := s.o.Remove(ctx); err != nil {
 				fs.Errorf(s.o, "remove old snapshot: %v", err)
 			}
@@ -565,6 +572,9 @@ func fileSize(p string) int64 {
 
 // upload copies the local file src to remote on f.
 func upload(ctx context.Context, f fs.Fs, src, remote string) error {
+	if err := checkLease(ctx); err != nil {
+		return err
+	}
 	in, err := os.Open(src)
 	if err != nil {
 		return err

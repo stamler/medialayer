@@ -704,6 +704,7 @@ struct StatusBar: View {
             case "indexing": Text("Indexing \(j.done) of \(j.total)" + (j.failed > 0 ? ", \(j.failed) failed" : ""))
             case "publishing": Text("Saving the library to Google Drive…")
             case "promoting": Text("Switching the primary…")
+            case "waiting": Text("Syncing on \(j.holder ?? "another device"). This Mac will sync after it.")
             case "mirroring":
                 let s = core.status.sources?.first { $0.state == "syncing" }
                 Text("Copying to \(s?.name ?? "secondaries")…" + (j.total > 0 ? " \(j.done) of \(j.total)" : ""))

@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	_ "github.com/rclone/rclone/backend/drive" // Google Drive
 	"github.com/rclone/rclone/fs"
@@ -56,6 +57,13 @@ type Core struct {
 	// full, so a sync can't save changes there until space is freed.
 	primaryFull bool
 	stream      *streamServer
+	// leaseSeen is when each other device's claim on a sync lease was
+	// first seen as it is now, by folder and file.
+	leaseSeen map[string]leaseSighting
+	// retry starts the next sync after another device kept this one
+	// waiting; closed stops it for good.
+	retry  *time.Timer
+	closed bool
 }
 
 // settings are kept in settings.json in the data directory.
@@ -225,6 +233,10 @@ func removeStaleDBs(dataDir, current string) {
 // and closes the index.
 func (c *Core) Close() error {
 	c.mu.Lock()
+	c.closed = true
+	if c.retry != nil {
+		c.retry.Stop()
+	}
 	done := c.jobDone
 	if c.cancel != nil {
 		c.cancel()

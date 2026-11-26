@@ -19,6 +19,7 @@ const (
 	PhasePublishing = "publishing" // writing .medialayer to the cloud
 	PhaseMirroring  = "mirroring"  // copying changes to the secondaries
 	PhasePromoting  = "promoting"  // switching the primary
+	PhaseWaiting    = "waiting"    // another device holds the sync lock; Holder names it
 	PhaseDone       = "done"
 	PhaseError      = "error"
 )
@@ -31,6 +32,7 @@ type jobStatus struct {
 	Failed   int64     `json:"failed"`
 	Current  string    `json:"current,omitempty"` // file being read
 	Error    string    `json:"error,omitempty"`   // why the job stopped, in PhaseError
+	Holder   string    `json:"holder,omitempty"`  // the device syncing, in PhaseWaiting
 	Failures []string  `json:"failures,omitempty"`
 	Started  time.Time `json:"started,omitzero"`
 	Finished time.Time `json:"finished,omitzero"`
@@ -92,7 +94,7 @@ func (c *Core) setJob(update func(j *jobStatus)) {
 func (c *Core) StartSync() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.jobDone != nil {
+	if c.jobDone != nil || c.closed {
 		return nil
 	}
 	return c.startJobLocked(c.sync)
@@ -103,6 +105,9 @@ func (c *Core) StartSync() error {
 func (c *Core) startJobLocked(work func(context.Context) error) error {
 	if c.settings.Folder == "" {
 		return errors.New("no library folder picked")
+	}
+	if c.retry != nil {
+		c.retry.Stop() // this job is the retry
 	}
 	done := make(chan struct{})
 	ctx, cancel := context.WithCancel(context.Background())
@@ -121,22 +126,105 @@ func (c *Core) startJobLocked(work func(context.Context) error) error {
 		c.jobDone, c.cancel = nil, nil
 		c.job.Current = ""
 		c.job.Finished = time.Now()
-		if err != nil {
+		var busy *leaseBusyError
+		switch {
+		case errors.As(err, &busy):
+			c.job.Phase, c.job.Holder = PhaseWaiting, busy.name
+			c.retryLocked()
+		case errors.Is(err, errLeaseLost):
 			c.job.Phase = PhaseError
 			c.job.Error = err.Error()
-		} else {
+			c.retryLocked()
+		case err != nil:
+			c.job.Phase = PhaseError
+			c.job.Error = err.Error()
+		default:
 			c.job.Phase = PhaseDone
 		}
 	}()
 	return nil
 }
 
-// sync restores, indexes and publishes, in that order.
+// retryLocked starts a sync after leaseRetry, for a device another one
+// kept waiting. The caller holds c.mu.
+func (c *Core) retryLocked() {
+	if c.closed {
+		return
+	}
+	if c.retry != nil {
+		c.retry.Stop()
+	}
+	c.retry = time.AfterFunc(leaseRetry+leaseJitter(), func() { _ = c.StartSync() })
+}
+
+// sync restores, indexes and publishes, in that order, holding the
+// library's sync lease.
 func (c *Core) sync(ctx context.Context) error {
 	f, err := c.libraryFs(ctx)
 	if err != nil {
 		return err
 	}
+	// Checked before taking the lease too, so nothing is written to a
+	// folder that turns out not to be this device's primary.
+	if err := c.checkPrimary(ctx, f); err != nil {
+		return err
+	}
+	return c.withLease(ctx, f, c.syncHeld)
+}
+
+// syncHeld is sync, for a caller holding the lease on the primary.
+func (c *Core) syncHeld(ctx context.Context) error {
+	f, err := c.libraryFs(ctx)
+	if err != nil {
+		return err
+	}
+	if err := c.checkPrimary(ctx, f); err != nil {
+		return err
+	}
+	// A second pass happens only when another device published the
+	// library while this one indexed it from scratch: this device then
+	// takes that snapshot, keeping its file ids, and indexes on top.
+	for range 2 {
+		if err := c.restore(ctx, f); err != nil {
+			return fmt.Errorf("open the library's .medialayer: %w", err)
+		}
+		if err := c.index(ctx, f); err != nil {
+			return err
+		}
+		if err := c.applyCarried(); err != nil {
+			return fmt.Errorf("carry over playlists: %w", err)
+		}
+		err := c.publish(ctx, f)
+		if errors.Is(err, errPublishedElsewhere) {
+			continue
+		}
+		full := isFull(err)
+		if full {
+			// Sync only writes to the secondaries, so they still get the
+			// primary's last saved snapshot and every file.
+			fs.Errorf(f, "publish: %v", err)
+			c.mu.Lock()
+			c.notice = "The primary's cloud is full, so the library's latest changes couldn't be saved there. Copies still sync from it."
+			c.mu.Unlock()
+			err = nil
+		}
+		if err == nil {
+			c.mu.Lock()
+			c.primaryFull = full
+			c.mu.Unlock()
+		}
+		if err != nil {
+			return fmt.Errorf("write the library's .medialayer: %w", err)
+		}
+		return c.mirrorAll(ctx, f)
+	}
+	return errPublishedElsewhere
+}
+
+// checkPrimary makes sure f is still this device's primary. A device
+// whose primary was promoted away on another device stops here rather
+// than write to what is now a secondary.
+func (c *Core) checkPrimary(ctx context.Context, f fs.Fs) error {
 	if c.currentDB() == nil {
 		// An earlier failure left no index open; start again from an empty one.
 		c.mu.Lock()
@@ -146,8 +234,6 @@ func (c *Core) sync(ctx context.Context) error {
 			return err
 		}
 	}
-	// A device whose primary was promoted away on another device stops
-	// here rather than write to what is now a secondary.
 	if repo, err := readRepo(ctx, f); err != nil {
 		return fmt.Errorf("read the library's repo.json: %w", err)
 	} else if repo != nil && repo.Primary.Replica != "" {
@@ -188,42 +274,5 @@ func (c *Core) sync(ctx context.Context) error {
 			return fmt.Errorf("the library's primary moved to %s on another device; this device doesn't follow a move yet", repo.Primary.Folder)
 		}
 	}
-	// A second pass happens only when another device published the
-	// library while this one indexed it from scratch: this device then
-	// takes that snapshot, keeping its file ids, and indexes on top.
-	for range 2 {
-		if err := c.restore(ctx, f); err != nil {
-			return fmt.Errorf("open the library's .medialayer: %w", err)
-		}
-		if err := c.index(ctx, f); err != nil {
-			return err
-		}
-		if err := c.applyCarried(); err != nil {
-			return fmt.Errorf("carry over playlists: %w", err)
-		}
-		err := c.publish(ctx, f)
-		if errors.Is(err, errPublishedElsewhere) {
-			continue
-		}
-		full := isFull(err)
-		if full {
-			// Sync only writes to the secondaries, so they still get the
-			// primary's last saved snapshot and every file.
-			fs.Errorf(f, "publish: %v", err)
-			c.mu.Lock()
-			c.notice = "The primary's cloud is full, so the library's latest changes couldn't be saved there. Copies still sync from it."
-			c.mu.Unlock()
-			err = nil
-		}
-		if err == nil {
-			c.mu.Lock()
-			c.primaryFull = full
-			c.mu.Unlock()
-		}
-		if err != nil {
-			return fmt.Errorf("write the library's .medialayer: %w", err)
-		}
-		return c.mirrorAll(ctx, f)
-	}
-	return errPublishedElsewhere
+	return nil
 }

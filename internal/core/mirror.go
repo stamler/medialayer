@@ -42,8 +42,7 @@ import (
 //     primary. A secondary whose repo.json names a newer generation, or a
 //     different library, is never written to.
 //
-// Not yet: the sync lease (one device at a time), the 5% limit counted
-// over a day rather than one sync, and promoting a secondary.
+// Not yet: the 5% limit counted over a day rather than one sync.
 
 const (
 	trashDir   = repoDir + "/trash"
@@ -447,6 +446,9 @@ func (c *Core) mirrorAll(ctx context.Context, f fs.Fs) error {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
+			if errors.Is(err, errLeaseLost) {
+				return err
+			}
 			fail(s, err)
 			continue
 		}
@@ -497,6 +499,10 @@ func (c *Core) mirrorAll(ctx context.Context, f fs.Fs) error {
 		if err != nil && ctx.Err() != nil {
 			c.setMirror(t.s.ID, func(m *mirrorState) { m.state = "" })
 			return ctx.Err()
+		}
+		if errors.Is(err, errLeaseLost) {
+			c.setMirror(t.s.ID, func(m *mirrorState) { m.state = "" })
+			return err
 		}
 		if err != nil {
 			fail(t.s, err)
@@ -553,6 +559,9 @@ func (c *Core) check(ctx context.Context, f fs.Fs, s source, repo *repoRecord, d
 		return t, errors.New("this folder names a different primary under the same generation, so it was left alone")
 	case s.ID == repo.Primary.Replica:
 		return t, errors.New("this folder is the library's primary")
+	}
+	if err := checkLease(ctx); err != nil {
+		return t, err
 	}
 	if err := putBytes(ctx, dst, t.probe, []byte(run)); err != nil {
 		return t, fmt.Errorf("write a probe file: %w", err)
@@ -622,8 +631,7 @@ func readSmall(ctx context.Context, f fs.Fs, remote string) ([]byte, error) {
 
 // updateMembers makes the primary's repo.json list exactly the primary and
 // these secondaries, and returns it. (Each device lists its own
-// secondaries for now; sharing them between devices comes with the
-// lease.)
+// secondaries for now; sharing them between devices comes later.)
 func (c *Core) updateMembers(ctx context.Context, f fs.Fs, secs []source) (*repoRecord, error) {
 	repo, err := readRepo(ctx, f)
 	if err != nil {
@@ -656,6 +664,9 @@ func (c *Core) updateMembers(ctx context.Context, f fs.Fs, secs []source) (*repo
 
 // writeRepo uploads repo.json to f.
 func (c *Core) writeRepo(ctx context.Context, f fs.Fs, repo *repoRecord) error {
+	if err := checkLease(ctx); err != nil {
+		return err
+	}
 	b, err := json.MarshalIndent(repo, "", "  ")
 	if err != nil {
 		return err
@@ -741,6 +752,9 @@ func (c *Core) mirror(ctx context.Context, f fs.Fs, src *listing, repo *repoReco
 	approved := ""
 	c.setMirror(s.ID, func(m *mirrorState) { approved, m.approved = m.approved, "" }) // good for one sync
 	writeMember := func(m memberRecord) error {
+		if err := checkLease(ctx); err != nil {
+			return err
+		}
 		b, _ := json.Marshal(m)
 		if err := putBytes(ctx, dst, repoDir+"/member.json", b); err != nil {
 			return fmt.Errorf("write member.json: %w", err)
@@ -781,6 +795,9 @@ func (c *Core) mirror(ctx context.Context, f fs.Fs, src *listing, repo *repoReco
 	// One trash folder per sync, unique even within a second.
 	stamp := time.Now().UTC().Format(trashStamp) + "-" + strings.ToLower(index.NewID()[20:])
 	toTrash := func(o fs.Object) error {
+		if err := checkLease(ctx); err != nil {
+			return err
+		}
 		_, err := operations.Move(ctx, dst, nil, trashDir+"/"+stamp+"/"+o.Remote(), o)
 		if err != nil {
 			return fmt.Errorf("move %s to trash: %w", o.Remote(), err)
@@ -801,12 +818,18 @@ func (c *Core) mirror(ctx context.Context, f fs.Fs, src *listing, repo *repoReco
 		if err := toTrash(old); err != nil {
 			return err
 		}
+		if err := checkLease(ctx); err != nil {
+			return err
+		}
 		if _, err := operations.Copy(ctx, dst, nil, p, src.files[p]); err != nil {
 			return fmt.Errorf("copy %s: %w", p, err)
 		}
 		step(p)
 	}
 	for _, p := range copies {
+		if err := checkLease(ctx); err != nil {
+			return err
+		}
 		if _, err := operations.Copy(ctx, dst, nil, p, src.files[p]); err != nil {
 			return fmt.Errorf("copy %s: %w", p, err)
 		}
@@ -861,6 +884,9 @@ func (c *Core) mirrorRepo(ctx context.Context, dst fs.Fs, repo *repoRecord, vers
 	}
 	for n, h := range have {
 		if n != name {
+			if err := checkLease(ctx); err != nil {
+				return err
+			}
 			if err := h.Remove(ctx); err != nil {
 				fs.Errorf(h, "remove old snapshot: %v", err)
 			}
@@ -894,6 +920,9 @@ func emptyTrash(ctx context.Context, dst fs.Fs, now time.Time) error {
 		t, err := time.Parse(trashStamp, stamp)
 		if err != nil || now.Sub(t) < trashKeep {
 			continue
+		}
+		if err := checkLease(ctx); err != nil {
+			return err
 		}
 		if err := operations.Purge(ctx, dst, d.Remote()); err != nil {
 			return err
