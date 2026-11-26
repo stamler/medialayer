@@ -102,11 +102,24 @@ filters a playlist too: matching songs keep playlist order, and
 dragging to reorder stops until you clear the search.
 
 Playlists are stored in the library's index, and the Go core makes every
-change to them. A change marks the index as changed, so the next sync
-(at start-up, or Library > Update Library) publishes a new index version
-to the primary and every secondary. A song whose file leaves the library
-keeps its place in the playlist but is hidden, and comes back if the file
-returns.
+change to them:
+
+1. A change marks the index as changed.
+2. Five seconds after the last change, the app starts a sync. If a sync
+   is running, the app waits for it to end first.
+3. The sync publishes a new index version to the primary and every
+   secondary.
+
+A song whose file is moved or renamed stays in its playlists: the
+indexer matches the file at its new path by size and SHA-256 (or, with
+no hash, by size, modification time and name). A song whose file leaves
+the library keeps its place but is hidden, and comes back if the file
+returns. To drop hidden songs, right-click the playlist and choose
+Remove Missing Songs.
+
+Choose Music Folder refuses to switch while playlist changes are not on
+the primary yet. Update the library first, or delete the playlists to
+discard them.
 
 ## Now Playing and media keys
 
@@ -118,8 +131,10 @@ MediaPlayer framework:
 1. When a track starts, the app publishes its title, artist, album,
    duration and cover, and turns on play, pause, next, previous and the
    scrubber.
-2. When playback pauses or resumes, the app publishes the elapsed time
-   and the rate. The system counts the time on from there.
+2. When playback pauses, resumes or finishes buffering, the app
+   publishes the elapsed time and the rate. The rate is 1 only while
+   audio plays, so it is 0 while the track buffers. The system counts the
+   time on from there.
 3. When the position moves more than a second from that count, after a
    seek or a stall, the app publishes the elapsed time again.
 4. When playback stops or the app quits, the app clears Now Playing and
@@ -130,7 +145,8 @@ app once before you use them.
 
 ## Not yet
 
-Publishing playlist changes without a full sync, merging playlist
-changes made on two devices, header packs, the change feed, Proton,
+Publishing playlist changes without a full sync (each one lists the
+library and its sources), merging playlist changes made on two
+devices, header packs, the change feed, Proton,
 iCloud and SMB sources, the sync lease, following a primary moved on
 another device, and testing with 10,000 tracks.
