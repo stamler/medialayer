@@ -107,7 +107,31 @@ and work on it continues after the AppKit table.
    Picard's tag names; lookups keep to one request per second. Gate:
    retagging the test album leaves `audio_sha256` unchanged and every
    secondary matches the primary.
-8. **Tempo, pitch and beat matching.** Three playback controls on the
+8. **Merging a library on another source.** Add a folder on a different
+   source that already holds music, or already has its own `.medialayer`
+   library, and merge the two libraries into one. Details are to be
+   decided. Today such a folder is refused as a secondary, because sync
+   would overwrite it (see "Checks before anything is written" in
+   [sync.md](sync.md)). Open questions:
+   - Which library id and primary survive, and what happens to the other
+     library's primary record and generation, which may be higher.
+   - How the same track in both folders is recognised (path, tags, or
+     `audio_sha256` once both libraries are hashed) and which copy wins.
+   - Whether files are copied into the primary's folder layout or keep
+     their own paths.
+   - What the added folder becomes afterwards. As a secondary, any file
+     not first copied to the primary would go to trash, and the merge
+     would trip the 5% pause.
+   - What happens to the other library's secondaries, and to devices
+     holding its index, since both name a library id that no longer
+     exists.
+   - How playlists and other library data are combined, and whether a
+     library nested below the folder's top is covered.
+   - How the user previews and approves the merge before anything is
+     written, as tag editing does.
+
+   Gate: to be decided.
+9. **Tempo, pitch and beat matching.** Three playback controls on the
    Mac and iOS players. Time stretching changes speed without changing
    pitch; pitch shifting changes key without changing speed, in
    semitones; beat matching brings the next track to the current track's
