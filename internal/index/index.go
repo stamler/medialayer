@@ -415,6 +415,15 @@ func (d *DB) Locate(id, replica string) (FileLocation, error) {
 	return l, err
 }
 
+// SetAudioSHA records the audio_sha256 of the file at path, if the index
+// holds it at this size and modification time. It doesn't make a new
+// version: the hash goes out with the next one.
+func (d *DB) SetAudioSHA(path string, size, mtime int64, sha []byte) error {
+	_, err := d.db.Exec(`UPDATE file SET audio_sha256 = ? WHERE path = ? AND size = ? AND mtime = ?`,
+		sha, path, size, mtime)
+	return err
+}
+
 // TrackCount is the number of files that are not missing.
 func (d *DB) TrackCount() (int64, error) {
 	var n int64

@@ -52,7 +52,11 @@ type Core struct {
 	// syncs in this session don't download them again.
 	badCovers map[string]bool
 	mirrors   map[string]*mirrorState // by secondary id
-	notice    string                  // something the user should know, until the next sync
+	// audioHashes are the audio hashes made on this device, by audioKey,
+	// loaded from audio-hashes.json on first use.
+	audioHashes      map[string]string
+	audioHashesDirty bool
+	notice           string // something the user should know, until the next sync
 	// primaryFull is set when the last publish found the primary's cloud
 	// full, so a sync can't save changes there until space is freed.
 	primaryFull bool
