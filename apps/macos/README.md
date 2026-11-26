@@ -52,9 +52,28 @@ the library: another Drive folder, a folder in another Google account, or
 a local folder. Right-click a chip to review a paused sync, stop syncing
 to it, or make it the primary. See [docs/sync.md](../../docs/sync.md).
 
+## Now Playing and media keys
+
+The app shows the playing track in Control Centre's Now Playing, and the
+keyboard's media keys (F7 to F9), headphone buttons and Control Centre
+control it. `NowPlaying.swift` does this through the system's
+MediaPlayer framework:
+
+1. When a track starts, the app publishes its title, artist, album,
+   duration and cover, and turns on play, pause, next, previous and the
+   scrubber.
+2. When playback pauses or resumes, the app publishes the elapsed time
+   and the rate. The system counts the time on from there.
+3. When the position moves more than a second from that count, after a
+   seek or a stall, the app publishes the elapsed time again.
+4. When playback stops or the app quits, the app clears Now Playing and
+   turns the commands off.
+
+Media keys go to the app that played audio last, so press play in the
+app once before you use them.
+
 ## Not yet
 
-Search, playlists, the sidebar, the system Now Playing controls
-(Control Centre) and media keys, header packs, the change feed, Proton,
+Search, playlists, the sidebar, header packs, the change feed, Proton,
 iCloud and SMB sources, the sync lease, following a primary moved on
 another device, and testing with 10,000 tracks.
