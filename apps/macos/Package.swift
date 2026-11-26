@@ -26,7 +26,10 @@ let package = Package(
             name: "MediaLayer",
             dependencies: ["CMLCore"],
             path: "Sources/MediaLayer",
-            linkerSettings: [.linkedLibrary("sqlite3")]
+            linkerSettings: [
+                .linkedLibrary("sqlite3"),
+                .linkedFramework("MediaPlayer"), // Now Playing and the media keys
+            ]
         ),
     ]
 )

@@ -12,10 +12,32 @@ final class AppModel: ObservableObject {
     /// The last failure reading the index; cleared by the next good read.
     @Published private(set) var libraryError: String?
     @Published private(set) var tracks: [Track] = [] {
-        didSet { trackByID = Dictionary(tracks.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a }) }
+        didSet {
+            trackByID = Dictionary(tracks.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+            search.invalidate()
+            searched = search.filter(tracks, query: searchText)
+        }
     }
     /// The library's present tracks by file id, for playlists.
     private(set) var trackByID: [String: Track] = [:]
+    /// The toolbar's search text; the column browser and table show only
+    /// the tracks it leaves.
+    @Published var searchText = "" {
+        didSet { if searchText != oldValue { applySearch() } }
+    }
+    /// Bumped by Edit > Find; the search field focuses itself on a change.
+    @Published private(set) var searchFocusRequest = 0
+    /// The tracks the search leaves: all of them when it is empty.
+    @Published private(set) var searched: [Track] = [] {
+        didSet { searchedIDs = isSearching ? Set(searched.map(\.id)) : nil }
+    }
+    /// The ids of `searched` while a search is on, for playlists; nil when
+    /// the search is empty.
+    private(set) var searchedIDs: Set<String>?
+    /// Whether the search text has any word to search for.
+    var isSearching: Bool { !TrackSearch.words(searchText).isEmpty }
+    /// What the Clouds column needs from the index (see Clouds.swift).
+    @Published private(set) var cloudIndex = CloudIndex()
     @Published var choosingFolder = false
 
     // Column browser: nil means "All".
@@ -45,7 +67,10 @@ final class AppModel: ObservableObject {
     @Published var playlistError: String?
 
     let art = ArtCache()
+    private let search = TrackSearch()
     let player = Player()
+    /// Control Centre's Now Playing and the media keys.
+    private var nowPlaying: NowPlaying?
 
     private var db: LibraryDB?
     private var loadedEpoch: Int64 = -1
@@ -56,6 +81,7 @@ final class AppModel: ObservableObject {
     private var keyMonitor: Any?
 
     init() {
+        nowPlaying = NowPlaying(player: player, art: art)
         let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("MediaLayer", isDirectory: true)
         do {
@@ -117,7 +143,9 @@ final class AppModel: ObservableObject {
                 art.db = db
                 art.artDir = status.artDir
             }
-            tracks = try db?.tracks() ?? []
+            let read = try db?.tracksWithVersion()
+            cloudIndex = CloudIndex(tracks: read?.tracks ?? [], version: read?.version ?? IndexVersion())
+            tracks = read?.tracks ?? []
             try reloadPlaylists()
             loadedEpoch = status.dbEpoch
             loadedCount = status.tracks
@@ -151,6 +179,7 @@ final class AppModel: ObservableObject {
         db = nil
         art.db = nil
         tracks = []
+        cloudIndex = CloudIndex()
         playlists = []
         sidebarSelection = .songs
         loadedEpoch = -1
@@ -186,6 +215,20 @@ final class AppModel: ObservableObject {
         refresh()
     }
 
+    // MARK: Search
+
+    func focusSearch() { searchFocusRequest += 1 }
+
+    private func applySearch() {
+        searched = search.filter(tracks, query: searchText)
+        // Drop a browser choice the search has hidden, or the table would
+        // be empty with nothing selected in that column.
+        if let g = genre, !genres.contains(g) { genre = nil }
+        if let c = composer, !composers.contains(c) { composer = nil }
+        if let a = artist, !artists.contains(a) { artist = nil }
+        if let a = album, !albums.contains(a) { album = nil }
+    }
+
     // MARK: Column browser
 
     private func values(_ tracks: [Track], _ key: (Track) -> String) -> [String] {
@@ -194,8 +237,8 @@ final class AppModel: ObservableObject {
         }
     }
 
-    var genres: [String] { values(tracks, \.genre) }
-    private var byGenre: [Track] { genre.map { g in tracks.filter { $0.genre == g } } ?? tracks }
+    var genres: [String] { values(searched, \.genre) }
+    private var byGenre: [Track] { genre.map { g in searched.filter { $0.genre == g } } ?? searched }
     var composers: [String] { values(byGenre, \.composer) }
     private var byComposer: [Track] { composer.map { c in byGenre.filter { $0.composer == c } } ?? byGenre }
     var artists: [String] { values(byComposer, \.browseArtist) }
@@ -205,7 +248,9 @@ final class AppModel: ObservableObject {
     /// The tracks the browser selects, in the table's order.
     var visibleTracks: [Track] {
         if let id = selectedPlaylistID {
-            let list = playlistTracks(id)
+            // The search filters a playlist too; matches keep playlist order.
+            var list = playlistTracks(id)
+            if let keep = searchedIDs { list = list.filter { keep.contains($0.id) } }
             return playlistSortOrder.isEmpty ? list : list.sorted(using: playlistSortOrder)
         }
         let selected = album.map { a in byArtist.filter { $0.album == a } } ?? byArtist

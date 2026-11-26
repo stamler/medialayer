@@ -4,6 +4,7 @@ import SwiftUI
 @main
 struct MediaLayerApp: App {
     @StateObject private var model = AppModel()
+    @StateObject private var songColumns = SongColumns()
 
     var body: some Scene {
         WindowGroup("MediaLayer") {
@@ -11,11 +12,18 @@ struct MediaLayerApp: App {
                 .environmentObject(model)
                 .environmentObject(model.player)
                 .environmentObject(model.player.clock)
+                .environmentObject(songColumns)
                 .frame(minWidth: 900, minHeight: 560)
         }
         .commands {
             SidebarCommands()
             PlaylistCommands(model: model)
+            CommandGroup(after: .textEditing) {
+                Button("Find") { model.focusSearch() }
+                    .keyboardShortcut("f")
+                    .disabled(model.status.folder.isEmpty)
+            }
+            CommandGroup(after: .toolbar) { ColumnsMenu(columns: songColumns) }
             CommandMenu("Library") {
                 Button("Update Library") { model.resync() }
                     .keyboardShortcut("r")
@@ -213,13 +221,16 @@ struct LibraryView: View {
                     .onDeleteCommand(perform: removeFromPlaylist)
             }
             .safeAreaInset(edge: .bottom, spacing: 0) { StatusBar(tracks: visible) }
+            // On the detail column, so the items sit in its part of the
+            // toolbar, after the sidebar's toggle.
+            .toolbar {
+                ToolbarItemGroup(placement: .navigation) { TransportControls() }
+                NowPlayingItem()
+                SearchToolbarItem()
+            }
         }
         .onChange(of: model.sidebarSelection) { selection = [] }
         .sheet(isPresented: $model.addingSource) { AddSourceSheet() }
-        .toolbar {
-            ToolbarItemGroup(placement: .navigation) { TransportControls() }
-            NowPlayingItem()
-        }
     }
 
     /// Delete in a playlist removes the selected rows from it; Songs has no
@@ -246,7 +257,7 @@ struct TransportControls: View {
 /// The now-playing display in the toolbar: a cover framed by a squarer left
 /// end, then the title, artist, album and progress, inside a shape whose
 /// right end is a full capsule curve.
-struct NowPlaying: View {
+struct NowPlayingDisplay: View {
     @EnvironmentObject var model: AppModel
     @EnvironmentObject var player: Player
     @EnvironmentObject var clock: PlaybackClock
@@ -358,8 +369,8 @@ struct TransportBackground<S: InsettableShape>: ViewModifier {
     }
 }
 
-/// The toolbar item for NowPlaying. On macOS 26 the toolbar would wrap it
-/// in its own capsule; hide that, since NowPlaying draws its own shape.
+/// The toolbar item for NowPlayingDisplay. On macOS 26 the toolbar would wrap it
+/// in its own capsule; hide that, since NowPlayingDisplay draws its own shape.
 struct NowPlayingItem: ToolbarContent {
     var body: some ToolbarContent {
         if #available(macOS 26.0, *) {
@@ -369,7 +380,7 @@ struct NowPlayingItem: ToolbarContent {
         }
     }
 
-    private var item: some View { NowPlaying().frame(minWidth: 360, idealWidth: 460) }
+    private var item: some View { NowPlayingDisplay().frame(minWidth: 360, idealWidth: 460) }
 }
 
 struct ColumnBrowser: View {
@@ -434,73 +445,6 @@ struct BrowserColumn: View {
     }
 }
 
-struct SongsTable: View {
-    @EnvironmentObject var model: AppModel
-    @EnvironmentObject var player: Player
-    let tracks: [Track]
-    @Binding var selection: Set<Track.ID>
-
-    var body: some View {
-        Table(of: Track.self, selection: $selection, sortOrder: $model.sortOrder) {
-            TableColumn("") { t in
-                ZStack {
-                    ArtView(sha: t.artSHA, size: 18)
-                    if player.current?.id == t.id {
-                        Image(systemName: "speaker.wave.2.fill").font(.caption2)
-                            .foregroundStyle(.white).shadow(radius: 2)
-                    }
-                }
-            }
-            .width(24)
-            TableColumn("Name", value: \.displayTitle)
-                .width(min: 120, ideal: 240)
-            TableColumn("Time", value: \.durationMS) { t in
-                Text(formatDuration(t.durationMS)).monospacedDigit()
-            }
-            .width(50)
-            TableColumn("Artist", value: \.artist).width(min: 80, ideal: 160)
-            TableColumn("Album", value: \.album).width(min: 80, ideal: 180)
-            TableColumn("Genre", value: \.genre).width(min: 60, ideal: 90)
-            TableColumn("Year", value: \.year).width(44)
-            TableColumn("#", value: \.trackNumber) { t in
-                Text(t.trackNumber > 0 ? "\(t.trackNumber)" : "").monospacedDigit()
-            }
-            .width(30)
-            TableColumn("Kind", value: \.format) { t in Text(kind(t)) }.width(min: 60, ideal: 90)
-        } rows: {
-            // Rows drag to a sidebar playlist, or within a playlist to reorder.
-            ForEach(tracks) { t in
-                TableRow(t).draggable(TrackDrag(ids: dragged(t), playlist: model.selectedPlaylistID))
-            }
-            .dropDestination(for: TrackDrag.self) { drops, offset in
-                model.dropOnTable(drops, at: offset, rows: tracks)
-            }
-        }
-        .contextMenu(forSelectionType: Track.ID.self) { ids in
-            if let id = ids.first, let t = tracks.first(where: { $0.id == id }) {
-                Button("Play") { model.play(t) }
-            }
-            PlaylistMenuItems(ids: tracks.filter { ids.contains($0.id) }.map(\.id))
-        } primaryAction: { ids in
-            if let id = ids.first, let t = tracks.first(where: { $0.id == id }) { model.play(t) }
-        }
-    }
-
-    /// A drag of a selected row takes the whole selection, in table order.
-    private func dragged(_ t: Track) -> [String] {
-        selection.contains(t.id) ? tracks.filter { selection.contains($0.id) }.map(\.id) : [t.id]
-    }
-
-    private func kind(_ t: Track) -> String {
-        switch t.format {
-        case "flac" where t.bitDepth > 0 && t.sampleRate > 0:
-            return "FLAC \(t.bitDepth)/\(t.sampleRate / 1000)"
-        case "mp3": return "MP3"
-        default: return t.format.uppercased()
-        }
-    }
-}
-
 struct ArtView: View {
     @EnvironmentObject var model: AppModel
     let sha: String?
@@ -524,9 +468,7 @@ struct ArtView: View {
             let px = Int(size * 2) // Retina
             if let hit = model.art.cached(sha, size: px) { image = hit; return }
             image = nil
-            let loaded = await withCheckedContinuation { done in
-                model.art.load(sha, size: px) { done.resume(returning: $0) }
-            }
+            let loaded = await model.art.image(sha, size: px)
             if !Task.isCancelled { image = loaded } // not a cover since replaced
         }
     }

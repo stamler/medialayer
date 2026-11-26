@@ -128,7 +128,8 @@ extension AppModel {
     /// there. Songs takes no drops.
     func dropOnTable(_ drops: [TrackDrag], at offset: Int, rows: [Track]) {
         guard let p = selectedPlaylist else { return }
-        guard playlistSortOrder.isEmpty else { return NSSound.beep() } // sorted: no order to drop into
+        // Sorted or searched: the rows don't show the playlist's order.
+        guard playlistSortOrder.isEmpty, !isSearching else { return NSSound.beep() }
         let ids = TrackDrag.ids(drops)
         let first = p.firstPositions
         // Positions count hidden (missing) items too, so name the row the

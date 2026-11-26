@@ -27,6 +27,7 @@ struct CoreStatus: Decodable, Equatable {
         var deletes = 0
         var error: String?
         var synced: String?
+        var version: Int? // the index version a synced secondary matches
 
         var name: String { (folder as NSString).lastPathComponent }
     }

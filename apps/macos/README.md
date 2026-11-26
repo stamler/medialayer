@@ -8,6 +8,11 @@ browser (Genres, Composers, Artists, Albums) above the Songs table, and
 double-click to play. Tracks stream from Drive through a localhost
 endpoint in the core, one ranged request per play or seek.
 
+Search from the field in the toolbar (⌘F to focus it, Escape to clear
+it). Each word you type must match the name, artist, album artist,
+album, composer or genre, ignoring case and accents. The column browser
+and the Songs table show only the tracks that match.
+
 ## Build
 
 Needs Go and the Xcode Command Line Tools (full Xcode is not needed):
@@ -45,6 +50,27 @@ on Drive.
 - A restart opens the library from the local index at once.
 - Playback starts in 1.0 to 2.1 s (status bar, "started in").
 
+## Songs table
+
+- To show or hide a column, right-click the table header or choose
+  View > Columns. To move a column, drag its header. The app keeps your
+  choice. Restore Default Columns in View > Columns resets it.
+- Album Artist, Composer, Disc, Bit Rate, Size and Date Modified are
+  hidden at first. Name always shows.
+- The Art column loads each cover when its row comes into view, and keeps
+  at most 32 MB of thumbnails in memory.
+- The Clouds column shows an icon for each source of the track:
+  - The primary always holds the track.
+  - A secondary icon shows at full strength when the secondary's last
+    sync in this session finished and copied the index version the app
+    shows. That secondary holds every track, except paths that sync can't
+    keep apart (see Known gaps in [docs/sync.md](../../docs/sync.md)).
+  - A dimmed icon means the secondary may not hold the track yet: it is
+    copying, paused, failed, has an older version, or has not synced since
+    the app opened. Hover over the icon to see why.
+  - The app works this out from the sources' state and the index version.
+    It writes nothing per source into the index.
+
 ## Sources
 
 Add Source (Library menu, or the + by the chips) adds a second copy of
@@ -71,7 +97,9 @@ lists Songs and the playlists. To use playlists:
    keeps its songs in the library.
 
 Click a column header to sort a playlist; dragging to reorder then
-stops until you choose View > Sort by Playlist Order.
+stops until you choose View > Sort by Playlist Order. The search field
+filters a playlist too: matching songs keep playlist order, and
+dragging to reorder stops until you clear the search.
 
 Playlists are stored in the library's index, and the Go core makes every
 change to them. A change marks the index as changed, so the next sync
@@ -80,10 +108,29 @@ to the primary and every secondary. A song whose file leaves the library
 keeps its place in the playlist but is hidden, and comes back if the file
 returns.
 
+## Now Playing and media keys
+
+The app shows the playing track in Control Centre's Now Playing, and the
+keyboard's media keys (F7 to F9), headphone buttons and Control Centre
+control it. `NowPlaying.swift` does this through the system's
+MediaPlayer framework:
+
+1. When a track starts, the app publishes its title, artist, album,
+   duration and cover, and turns on play, pause, next, previous and the
+   scrubber.
+2. When playback pauses or resumes, the app publishes the elapsed time
+   and the rate. The system counts the time on from there.
+3. When the position moves more than a second from that count, after a
+   seek or a stall, the app publishes the elapsed time again.
+4. When playback stops or the app quits, the app clears Now Playing and
+   turns the commands off.
+
+Media keys go to the app that played audio last, so press play in the
+app once before you use them.
+
 ## Not yet
 
-Search, the system Now Playing controls (Control Centre) and media keys,
-publishing playlist changes without a full sync, merging playlist changes
-made on two devices, header packs, the change feed, Proton, iCloud and
-SMB sources, the sync lease, following a primary moved on another device,
-and testing with 10,000 tracks.
+Publishing playlist changes without a full sync, merging playlist
+changes made on two devices, header packs, the change feed, Proton,
+iCloud and SMB sources, the sync lease, following a primary moved on
+another device, and testing with 10,000 tracks.
