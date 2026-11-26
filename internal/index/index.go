@@ -28,10 +28,10 @@ import (
 const SchemaVersion = "1"
 
 // AudioHashVersion names how file.audio_sha256 is made, stored in meta as
-// "audio_hash_version": "2" hashes FLAC's decoded samples and MP3's audio
+// "audio_hash_version": "3" hashes lossless files' decoded samples (see media.pcmHash) and lossy files' audio
 // bytes. An index opened with another version has its audio hashes
 // cleared, so they are made again.
-const AudioHashVersion = "2"
+const AudioHashVersion = "3"
 
 const schema = `
 CREATE TABLE IF NOT EXISTS meta (

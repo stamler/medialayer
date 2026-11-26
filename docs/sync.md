@@ -200,26 +200,29 @@ leaves it as it was:
 
 - **Lossless files (FLAC) hash their decoded samples.** The same audio
   can be encoded in many ways (another compression level or block size,
-  a re-encode, another encoder), so the encoded bytes can differ while
-  the audio is identical. The hash covers `flac-pcm`, the sample rate,
-  channel count and bits per sample, then every sample, interleaved by
-  channel, little-endian, in the fewest whole bytes that hold the bits
-  per sample (the layout FLAC's own MD5 uses). While decoding, each
-  frame's CRC is checked, every sample must fit the bits per sample, and
-  the samples are checked against the STREAMINFO block's MD5 and sample
-  count where the encoder recorded them, with no audio frame after the
-  count; a file that fails is damaged and gets no hash. Streams of 4 to
-  24 bits per sample are hashed; the decoder can't read 32-bit FLAC, so
-  such files get no hash and always count as changed. Built in
-  `internal/media/flacpcm.go`, with the public-domain decoder
-  `github.com/mewkiz/flac`. Any lossless format added later (ALAC, WAV,
-  AIFF) must hash its decoded samples the same way.
+  a re-encode, another encoder or lossless codec), so the encoded bytes
+  can differ while the audio is identical. The hash covers `pcm` and a
+  zero byte, the sample rate, channel count and bits per sample, then
+  every sample, interleaved by channel in WAVE order, little-endian, in
+  the fewest whole bytes that hold the bits per sample (the layout
+  FLAC's own MD5 uses), so any lossless file of the same audio hashes
+  the same. While decoding, each frame's CRC-8 and CRC-16 are checked,
+  every sample must fit the bits per sample, and the samples are checked
+  against the STREAMINFO block's MD5 and sample count where the encoder
+  recorded them, with no audio frame after the count; a file that fails
+  is damaged and gets no hash. Every bit depth FLAC allows (4 to 32) is
+  decoded, by MediaLayer's own decoder (`internal/media/flacdec.go`,
+  with the hash in `flacpcm.go`); it keeps samples as 64-bit integers,
+  which also hold the 33-bit side channel of 32-bit stereo. Its tests
+  check the hash of ffmpeg-encoded files (`internal/media/testdata`,
+  made by `scripts/make-audio-fixtures.sh`) against ffmpeg's own
+  decoding.
 - **Lossy files (MP3) hash their audio bytes.** Decoding them gives no
   truer audio, so the hash is of the file without its tags: at the start
   any ID3v2 tags, at the end an ID3v1, APEv2 or Lyrics3 v2 tag. Built in
   `internal/media/audiospan.go`.
 
-`meta.audio_hash_version` in the index names this way of hashing (`2`).
+`meta.audio_hash_version` in the index names this way of hashing (`3`).
 An index opened with another version has its hashes cleared, so they are
 made again. That includes an index restored from the primary, so two
 devices running different versions would each clear the other's hashes:
@@ -491,9 +494,6 @@ become synced, and you can't switch back until it has space.
   there outside MediaLayer to `member.json` resets it.
 - Tag edits are told apart only for FLAC and MP3 files; other files that
   differ always count.
-- A FLAC file with two ID3v2 tags before its `fLaC` marker, or one with
-  a footer, can't be decoded, so it gets no hash and always counts as
-  changed.
 - The hash pass runs wherever the core runs, so on an iPhone it would
   download the whole library over the phone's connection; the iOS app
   needs to limit it (Wi-Fi only, say) or turn it off.
