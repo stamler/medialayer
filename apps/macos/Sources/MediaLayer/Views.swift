@@ -16,7 +16,7 @@ struct MediaLayerApp: App {
                 .environmentObject(model.browse)
                 .environmentObject(model.player)
                 .environmentObject(model.player.clock)
-                .frame(minWidth: 720, minHeight: 480)
+                .frame(minWidth: 760, minHeight: 480)
         }
         .commands {
             SidebarCommands()
@@ -221,7 +221,10 @@ struct LibraryView: View {
     var body: some View {
         NavigationSplitView(columnVisibility: $model.sidebarVisibility) {
             SidebarView()
-                .navigationSplitViewColumnWidth(min: 160, ideal: 200, max: 360)
+                // Window minimum (760) ≥ sidebar max + the detail's minimum (the
+                // browser's 4 × 90 plus dividers) + slack, or the split view
+                // can't fit both and the sidebar's contents shift off its left.
+                .navigationSplitViewColumnWidth(min: 160, ideal: 200, max: 300)
         } detail: {
             VSplitView {
                 if model.selectedPlaylistID == nil { // playlists show without the browser, as in iTunes
@@ -243,7 +246,7 @@ struct LibraryView: View {
             // toolbar, after the sidebar's toggle.
             // The window title would take toolbar room from the transport,
             // now playing and search, which must stay visible.
-            .navigationTitle("")
+            .modifier(HiddenWindowTitle())
             .toolbar {
                 ToolbarItemGroup(placement: .navigation) { TransportControls() }
                 NowPlayingItem()
@@ -604,6 +607,7 @@ struct StatusBar: View {
             }
             Spacer()
             Text("\(s.count) \(s.count == 1 ? "song" : "songs"), \(formatLong(s.durationMS)), \(ByteCountFormatter.string(fromByteCount: s.bytes, countStyle: .file))")
+                .lineLimit(1).truncationMode(.middle)
             Spacer()
             StartLatency()
         }
@@ -928,15 +932,29 @@ struct AddSourceSheet: View {
     }
 }
 
+/// Hides the window title in the toolbar, keeping it for the Window menu
+/// and Mission Control where the OS allows.
+struct HiddenWindowTitle: ViewModifier {
+    func body(content: Content) -> some View {
+        if #available(macOS 15.0, *) {
+            content.toolbar(removing: .title)
+        } else {
+            content.navigationTitle("")
+        }
+    }
+}
+
 /// One line of text, centred. When it is wider than its room it scrolls
 /// slowly to its end and back, pausing at each end, as in iTunes' display.
-/// Text that fits doesn't move, so nothing animates.
+/// Text that fits doesn't move, and each scroll is a finite animation, so
+/// nothing animates between them.
 struct MarqueeText: View {
     let text: String
     let font: Font
     let height: CGFloat
     @State private var textWidth: CGFloat = 0
     @State private var atEnd = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         GeometryReader { g in
@@ -947,13 +965,20 @@ struct MarqueeText: View {
                         .onAppear { textWidth = t.size.width }
                         .onChange(of: t.size.width) { _, w in textWidth = w }
                 })
-                .offset(x: overflow > 0 && atEnd ? -overflow : 0)
-                .frame(width: g.size.width, alignment: overflow > 0 ? .leading : .center)
-                .animation(overflow > 0
-                           ? .linear(duration: Double(overflow) / 25).delay(2).repeatForever(autoreverses: true)
-                           : nil,
-                           value: atEnd)
-                .onAppear { atEnd = true }
+                .offset(x: overflow > 4 && atEnd ? -overflow : 0)
+                .frame(width: g.size.width, alignment: overflow > 4 ? .leading : .center)
+                // Restarts when the text or its room changes.
+                .task(id: Int(overflow)) {
+                    atEnd = false
+                    guard overflow > 4, !reduceMotion else { return }
+                    let leg = Double(overflow) / 25
+                    while !Task.isCancelled {
+                        try? await Task.sleep(nanoseconds: 2_000_000_000)
+                        if Task.isCancelled { return }
+                        withAnimation(.linear(duration: leg)) { atEnd.toggle() }
+                        try? await Task.sleep(nanoseconds: UInt64(leg * 1_000_000_000))
+                    }
+                }
         }
         .frame(height: height)
         .clipped()
