@@ -71,8 +71,9 @@ func readCAF(fetch FetchFunc, size int64, withInfo bool) (*cafFile, error) {
 		if chunks > 1000 {
 			return nil, fmt.Errorf("too many chunks: %w", ErrNotCAF)
 		}
-		if desc != nil && kuki != nil && f.pakt != nil && f.data >= 0 {
-			break // all that's needed; tags come before the audio
+		if desc != nil && kuki != nil && f.pakt != nil && f.data >= 0 &&
+			(!withInfo || f.info != nil || pos+12 > int64(len(head))) {
+			break // all that's needed, but tags in the head
 		}
 		h, err := at(pos, 12)
 		if err != nil {
@@ -94,7 +95,9 @@ func readCAF(fetch FetchFunc, size int64, withInfo bool) (*cafFile, error) {
 		}
 		switch typ {
 		case "desc":
-			desc, err = read(1 << 10)
+			if desc, err = read(1 << 10); err == nil && len(desc) >= 32 && string(desc[8:12]) != "alac" {
+				return nil, fmt.Errorf("audio codec %q: %w (%w)", desc[8:12], ErrNotCAF, ErrUnsupported)
+			}
 		case "kuki":
 			kuki, err = read(1 << 10)
 		case "info":
@@ -269,12 +272,7 @@ func parseCAFInfo(b []byte, info *Info) {
 		}
 		key, ok := cafTags[k]
 		if !ok {
-			key = strings.Map(func(r rune) rune {
-				if r == ' ' || r == '-' || r == '_' {
-					return -1
-				}
-				return r
-			}, strings.ToUpper(k))
+			key = strings.ToUpper(strings.ReplaceAll(k, " ", ""))
 		}
 		hasDate = hasDate || key == "DATE"
 		if key == "TRACKNUMBER" || key == "DISCNUMBER" {

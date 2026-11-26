@@ -295,11 +295,22 @@ func TestParseCAF(t *testing.T) {
 	if _, err := ParseCAF(fetchAll(pcm), int64(len(pcm))); !errors.Is(err, ErrUnsupported) {
 		t.Errorf("PCM in CAF: %v", err)
 	}
+	// The codec is checked as soon as it's known, before any chunks after.
+	var trail []byte
+	for range 40 {
+		trail = append(trail, "uuid\x00\x00\x00\x00\x00\x01\x00\x00"...)
+		trail = append(trail, make([]byte, 1<<16)...)
+	}
+	pcm = cat(pcm, trail)
+	if _, err := ParseCAF(fetchAll(pcm), int64(len(pcm))); !errors.Is(err, ErrUnsupported) {
+		t.Errorf("PCM in CAF with chunks after: %v", err)
+	}
 	// Tags: bounded, Apple's names, the year before the recorded date.
 	var tagInfo Info
-	parseCAFInfo(cat([]byte{0xff, 0xff, 0xff, 0xff}, []byte("recorded date\x002023-05-01\x00year\x002024\x00sub-title\x00Live\x00"),
+	parseCAFInfo(cat([]byte{0xff, 0xff, 0xff, 0xff}, []byte("recorded date\x002023-05-01\x00year\x002024\x00sub-title\x00Live\x00MUSICBRAINZ_TRACKID\x00abc\x00"),
 		bytes.Repeat([]byte("x\x00y\x00"), 2000)), &tagInfo)
-	if len(tagInfo.Tags) != cafMaxTags-1 || tagInfo.Tags[0] != (Tag{"DATE", "2024"}) || tagInfo.Tags[1] != (Tag{"SUBTITLE", "Live"}) {
+	if len(tagInfo.Tags) != cafMaxTags-1 || tagInfo.Tags[0] != (Tag{"DATE", "2024"}) || tagInfo.Tags[1] != (Tag{"SUBTITLE", "Live"}) ||
+		tagInfo.Tags[2] != (Tag{"MUSICBRAINZ_TRACKID", "abc"}) {
 		t.Errorf("tags %v ... (%d)", tagInfo.Tags[:3], len(tagInfo.Tags))
 	}
 	fetch, _, size = fileFuncs(t, "alac16.m4a")

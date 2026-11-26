@@ -29,7 +29,7 @@ const (
 )
 
 // FLACHeader reads the start of a FLAC file through fetch and returns the
-// bytes that precede the first audio frame: an optional ID3v2 tag, the
+// bytes that precede the first audio frame: any ID3v2 tags, the
 // "fLaC" marker and every metadata block (STREAMINFO, VORBIS_COMMENT,
 // PICTURE, SEEKTABLE, CUESHEET, PADDING ...).
 //
