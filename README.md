@@ -28,6 +28,16 @@ The macOS app ([apps/macos](apps/macos/README.md)):
 - **Browsing and playback.** A column browser (Genres, Composers, Artists,
   Albums) sits above the Songs table. Tracks stream from Drive through a
   localhost endpoint, one ranged request per play or seek.
+- **Search** from the toolbar (⌘F), across titles, artists, albums,
+  composers and genres, ignoring case and accents.
+- **Sidebar and playlists.** A collapsible sidebar (⌃⌘S) with playlists:
+  create (⌘N), rename, delete, add songs by menu or drag, reorder. They are
+  stored in the index, so they reach every source with the next sync.
+- **Columns.** Album art and Clouds (which sources hold the track)
+  columns, and a chooser for which columns show (right-click the header,
+  or View > Columns).
+- **Now Playing and media keys.** The track shows in Control Centre, and
+  the keyboard's media keys and headphone buttons control playback.
 - **Shortcuts.** Space plays and pauses, ⌘→ and ⌘← go to the next and
   previous track, and ⌘R updates the library.
 - **Second sources.** Add Source copies the whole library to another Drive
