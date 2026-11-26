@@ -202,21 +202,24 @@ final class AppModel: ObservableObject {
     }
 
     func useFolder(_ folder: String) throws {
-        player.stop()
+        // Only the read connection closes first, so the core never deletes
+        // the index file under it. What the window shows stays until the
+        // core has agreed to the change.
         db = nil
         art.db = nil
+        do {
+            try Core.setFolder(folder)
+        } catch {
+            // Refused (unsaved playlist changes, say): reopen the index.
+            reload()
+            throw error
+        }
+        player.stop()
         tracks = []
         cloudIndex = CloudIndex()
         playlists = []
         sidebarSelection = .songs
         loadedEpoch = -1
-        do {
-            try Core.setFolder(folder)
-        } catch {
-            // Refused (unsaved playlist changes, say): the library stays.
-            reload()
-            throw error
-        }
         refresh()
     }
 
