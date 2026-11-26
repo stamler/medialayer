@@ -476,6 +476,11 @@ func TestMirrorCarriesEachIndexVersion(t *testing.T) {
 		t.Fatalf("member.json = %s (%v)", b, err)
 	}
 	snaps, _ := os.ReadDir(filepath.Join(sec, ".medialayer/snapshots"))
+	// The status names the version the secondary matches, for the app's
+	// Clouds column.
+	if st := c.Status().Sources; len(st) != 2 || st[1].State != MirrorSynced || st[1].Version != 2 {
+		t.Errorf("secondary status = %+v, want synced at version 2", st)
+	}
 	if len(snaps) != 1 || snaps[0].Name() != "000002.sqlite" {
 		t.Errorf("secondary snapshots = %v, want only 000002.sqlite", snaps)
 	}
