@@ -3,11 +3,22 @@ import AVFoundation
 import Foundation
 import SwiftUI
 
-/// The app's state: the core's status, the library, the column browser's
-/// selection and the player.
+/// The core's status, polled every half second. It is apart from AppModel
+/// so that a poll redraws only the views that show it: the status bar, the
+/// source chips and the menus. During a sync it changes on most polls.
+@MainActor
+final class StatusModel: ObservableObject {
+    @Published var status = CoreStatus()
+}
+
+/// The app's state: the library, the column browser's selection, the
+/// playlists and the player. The core's status is in `statusModel`.
 @MainActor
 final class AppModel: ObservableObject {
-    @Published private(set) var status = CoreStatus()
+    let statusModel = StatusModel()
+    /// The core's status as last polled. Views that show it observe
+    /// `statusModel`; this model doesn't publish when it changes.
+    var status: CoreStatus { statusModel.status }
     @Published private(set) var startError: String?
     /// The last failure reading the index; cleared by the next good read.
     @Published private(set) var libraryError: String?
@@ -146,7 +157,7 @@ final class AppModel: ObservableObject {
         // A sync that ended since the last load, even one that started and
         // ended between two polls.
         let finished = !new.isBusy && new.job.finished != loadedFinish
-        if new != status { status = new }
+        if new != status { statusModel.status = new }
         let changed = new.dbEpoch != loadedEpoch || new.tracks != loadedCount
         // While indexing, reload at most every 2 seconds; at the end, always.
         if !new.dbPath.isEmpty, changed || finished, finished || Date().timeIntervalSince(lastLoad) > 2 {

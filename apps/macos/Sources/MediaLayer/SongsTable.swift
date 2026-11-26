@@ -8,6 +8,7 @@ struct SongsTable: View {
     @EnvironmentObject var model: AppModel
     @EnvironmentObject var player: Player
     @EnvironmentObject var columns: SongColumns
+    @EnvironmentObject var core: StatusModel // the Clouds column shows the sources' state
     let tracks: [Track]
     @Binding var selection: Set<Track.ID>
 

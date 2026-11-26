@@ -45,10 +45,7 @@ struct SidebarView: View {
         .onDeleteCommand { if let p = model.selectedPlaylist { deleting = p } }
         .safeAreaInset(edge: .bottom, spacing: 0) {
             HStack {
-                Button { model.newPlaylist() } label: { Image(systemName: "plus") }
-                    .buttonStyle(.borderless)
-                    .help("New Playlist")
-                    .disabled(!model.showsLibrary)
+                NewPlaylistButton()
                 Spacer()
             }
             .padding(.horizontal, 10)
@@ -61,6 +58,21 @@ struct SidebarView: View {
         } message: { _ in
             Text("Its songs stay in the library.")
         }
+    }
+}
+
+/// The + under the sidebar. Apart from SidebarView because it observes the
+/// core's status (through showsLibrary), which changes on most polls
+/// during a sync; the playlists don't need to redraw then.
+private struct NewPlaylistButton: View {
+    @EnvironmentObject var model: AppModel
+    @EnvironmentObject var core: StatusModel
+
+    var body: some View {
+        Button { model.newPlaylist() } label: { Image(systemName: "plus") }
+            .buttonStyle(.borderless)
+            .help("New Playlist")
+            .disabled(!model.showsLibrary)
     }
 }
 
@@ -133,6 +145,8 @@ struct PlaylistMenuItems: View {
 /// sidebar's Show/Hide Sidebar (⌃⌘S) comes from SidebarCommands.
 struct PlaylistCommands: Commands {
     @ObservedObject var model: AppModel
+    /// Observed for showsLibrary, which depends on the core's status.
+    @ObservedObject var core: StatusModel
 
     var body: some Commands {
         CommandGroup(replacing: .newItem) {

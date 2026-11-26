@@ -3,13 +3,17 @@ import SwiftUI
 
 @main
 struct MediaLayerApp: App {
-    @StateObject private var model = AppModel()
-    @StateObject private var songColumns = SongColumns()
+    // @State, not @StateObject: the scene doesn't observe the model, so a
+    // change to it doesn't rebuild the scene and its menus. The menus
+    // that show the model's state observe it themselves.
+    @State private var model = AppModel()
+    @State private var songColumns = SongColumns()
 
     var body: some Scene {
         WindowGroup("MediaLayer") {
             ContentView()
                 .environmentObject(model)
+                .environmentObject(model.statusModel)
                 .environmentObject(model.player)
                 .environmentObject(model.player.clock)
                 .environmentObject(songColumns)
@@ -17,22 +21,9 @@ struct MediaLayerApp: App {
         }
         .commands {
             SidebarCommands()
-            PlaylistCommands(model: model)
-            CommandGroup(after: .textEditing) {
-                Button("Find") { model.focusSearch() }
-                    .keyboardShortcut("f")
-                    .disabled(model.status.folder.isEmpty)
-            }
+            PlaylistCommands(model: model, core: model.statusModel)
+            LibraryCommands(model: model, core: model.statusModel)
             CommandGroup(after: .toolbar) { ColumnsMenu(columns: songColumns) }
-            CommandMenu("Library") {
-                Button("Update Library") { model.resync() }
-                    .keyboardShortcut("r")
-                    .disabled(model.status.folder.isEmpty || model.status.isBusy)
-                Button("Choose Music Folder…") { model.choosingFolder = true }
-                    .disabled(!model.status.connected || model.status.isBusy)
-                Button("Add Source…") { model.addingSource = true }
-                    .disabled(model.status.folder.isEmpty || model.status.isBusy)
-            }
             CommandMenu("Controls") {
                 // Space is handled by AppModel's key monitor; a bare-Space
                 // menu shortcut could take spaces from text fields.
@@ -46,16 +37,40 @@ struct MediaLayerApp: App {
     }
 }
 
+/// Edit > Find and the Library menu, which depend on the core's status.
+struct LibraryCommands: Commands {
+    @ObservedObject var model: AppModel
+    @ObservedObject var core: StatusModel
+
+    var body: some Commands {
+        CommandGroup(after: .textEditing) {
+            Button("Find") { model.focusSearch() }
+                .keyboardShortcut("f")
+                .disabled(core.status.folder.isEmpty)
+        }
+        CommandMenu("Library") {
+            Button("Update Library") { model.resync() }
+                .keyboardShortcut("r")
+                .disabled(core.status.folder.isEmpty || core.status.isBusy)
+            Button("Choose Music Folder…") { model.choosingFolder = true }
+                .disabled(!core.status.connected || core.status.isBusy)
+            Button("Add Source…") { model.addingSource = true }
+                .disabled(core.status.folder.isEmpty || core.status.isBusy)
+        }
+    }
+}
+
 struct ContentView: View {
     @EnvironmentObject var model: AppModel
+    @EnvironmentObject var core: StatusModel
 
     var body: some View {
         if let error = model.startError {
             ContentUnavailableView("MediaLayer could not start", systemImage: "exclamationmark.triangle",
                                    description: Text(error))
-        } else if !model.status.connected {
+        } else if !core.status.connected {
             ConnectView()
-        } else if model.status.folder.isEmpty || model.choosingFolder {
+        } else if core.status.folder.isEmpty || model.choosingFolder {
             FolderPicker()
         } else {
             LibraryView()
@@ -262,7 +277,6 @@ struct TransportControls: View {
 /// end, then the title, artist, album and progress, inside a shape whose
 /// right end is a full capsule curve.
 struct NowPlayingDisplay: View {
-    @EnvironmentObject var model: AppModel
     @EnvironmentObject var player: Player
     @EnvironmentObject var clock: PlaybackClock
 
@@ -480,7 +494,7 @@ struct ArtView: View {
 
 struct StatusBar: View {
     @EnvironmentObject var model: AppModel
-    @EnvironmentObject var clock: PlaybackClock
+    @EnvironmentObject var core: StatusModel
     let tracks: [Track]
 
     var body: some View {
@@ -489,15 +503,13 @@ struct StatusBar: View {
         HStack(spacing: 10) {
             SourcesBar()
             jobText.foregroundStyle(.secondary).lineLimit(1)
-            if let n = model.status.notice, !model.status.isBusy {
+            if let n = core.status.notice, !core.status.isBusy {
                 Image(systemName: "exclamationmark.circle").foregroundStyle(.orange).help(n)
             }
             Spacer()
             Text("\(tracks.count) \(tracks.count == 1 ? "song" : "songs"), \(formatLong(ms)), \(ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file))")
             Spacer()
-            if let l = clock.startLatency {
-                Text(String(format: "started in %.1f s", l)).foregroundStyle(.secondary)
-            }
+            StartLatency()
         }
         .font(.caption)
         // Clear of the window's rounded bottom corners (large on macOS 26).
@@ -507,24 +519,36 @@ struct StatusBar: View {
     }
 
     @ViewBuilder private var jobText: some View {
-        let j = model.status.job
-        if let e = model.libraryError ?? model.status.error {
+        let j = core.status.job
+        if let e = model.libraryError ?? core.status.error {
             Text("Can't read the library: \(e)").foregroundStyle(.red).help(e)
         } else {
             switch j.phase {
             case "opening": Text("Opening library from Google Drive…")
-            case "listing": Text("Listing \(model.status.folder)… \(j.done) files")
+            case "listing": Text("Listing \(core.status.folder)… \(j.done) files")
             case "indexing": Text("Indexing \(j.done) of \(j.total)" + (j.failed > 0 ? ", \(j.failed) failed" : ""))
             case "publishing": Text("Saving the library to Google Drive…")
             case "promoting": Text("Switching the primary…")
             case "mirroring":
-                let s = model.status.sources?.first { $0.state == "syncing" }
+                let s = core.status.sources?.first { $0.state == "syncing" }
                 Text("Copying to \(s?.name ?? "secondaries")…" + (j.total > 0 ? " \(j.done) of \(j.total)" : ""))
             case "error": Text("Update failed: \(j.error ?? "")").foregroundStyle(.red).help(j.error ?? "")
             case "done" where j.failed > 0:
                 Text("\(j.failed) files could not be read").help((j.failures ?? []).joined(separator: "\n"))
             default: EmptyView()
             }
+        }
+    }
+}
+
+/// How long the last play took to start. Apart from StatusBar because it
+/// observes the playback clock, which ticks four times a second.
+struct StartLatency: View {
+    @EnvironmentObject var clock: PlaybackClock
+
+    var body: some View {
+        if let l = clock.startLatency {
+            Text(String(format: "started in %.1f s", l)).foregroundStyle(.secondary)
         }
     }
 }
@@ -548,13 +572,14 @@ func formatLong(_ ms: Int64) -> String {
 /// cloud, the primary highlighted, and the state of each secondary.
 struct SourcesBar: View {
     @EnvironmentObject var model: AppModel
+    @EnvironmentObject var core: StatusModel
     @State private var approving: CoreStatus.Source?
     @State private var promoting: CoreStatus.Source?
     @State private var error: String?
 
     var body: some View {
         HStack(spacing: 4) {
-            ForEach(model.status.sources ?? []) { source in
+            ForEach(core.status.sources ?? []) { source in
                 chip(source)
             }
             Button { model.addingSource = true } label: {
@@ -562,7 +587,7 @@ struct SourcesBar: View {
             }
             .buttonStyle(.borderless)
             .foregroundStyle(.secondary)
-            .disabled(model.status.isBusy)
+            .disabled(core.status.isBusy)
             .help("Add a folder that keeps a copy of the library")
         }
         .confirmationDialog(approving.map { "Apply changes to “\($0.name)”?" } ?? "",
@@ -607,11 +632,11 @@ struct SourcesBar: View {
             }
             if !source.primary {
                 Button("Make Primary…") { promoting = source }
-                    .disabled(source.state != "synced" || model.status.isBusy)
+                    .disabled(source.state != "synced" || core.status.isBusy)
                 Button("Stop Syncing to “\(source.name)”") {
                     do { try model.removeSecondary(source.id) } catch { self.error = error.localizedDescription }
                 }
-                .disabled(model.status.isBusy)
+                .disabled(core.status.isBusy)
             }
         }
         .onTapGesture { if source.state == "paused" { approving = source } }
@@ -713,6 +738,7 @@ struct DriveGlyph: Shape {
 /// then gets a copy of the library and follows the primary.
 struct AddSourceSheet: View {
     @EnvironmentObject var model: AppModel
+    @EnvironmentObject var core: StatusModel
     @Environment(\.dismiss) private var dismiss
     @State private var account: String? // the remote whose folders to browse
     @State private var working = false
@@ -736,7 +762,7 @@ struct AddSourceSheet: View {
         }
     }
 
-    private var primaryRemote: String? { model.status.sources?.first { $0.primary }?.remote }
+    private var primaryRemote: String? { core.status.sources?.first { $0.primary }?.remote }
 
     private var chooser: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -744,7 +770,7 @@ struct AddSourceSheet: View {
             Text("A second source holds a full copy of your library. The primary stays the source of truth, and every sync makes the copy match it.")
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
-            ForEach(model.status.accounts ?? [], id: \.self) { remote in
+            ForEach(core.status.accounts ?? [], id: \.self) { remote in
                 option(icon: "drive",
                        title: remote == primaryRemote ? "Google Drive, same account" : "Google Drive (\(remote))",
                        detail: remote == primaryRemote ? "Another folder in the primary's Google account" : "A folder in that Google account") {
