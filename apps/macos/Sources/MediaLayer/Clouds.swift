@@ -11,9 +11,9 @@ import SwiftUI
 //   from the primary's files.
 // - A secondary whose last sync this session ended in `synced` holds
 //   every track of the index version it copied. The core reports that
-//   version, and the app reads the index's own version (and whether it
-//   has changed since) in the same transaction as the tracks. When they
-//   match, the secondary holds every listed track, except the paths that
+//   version, and the app reads the index's own version (and whether its
+//   files have changed since: a playlist edit alone changes no file) in
+//   the same transaction as the tracks. When they match, the secondary holds every listed track, except the paths that
 //   sync leaves alone (docs/sync.md, Known gaps): paths that collide in
 //   Unicode NFC, and on local folders also ignoring case. CloudIndex finds
 //   those among the indexed paths.
@@ -73,7 +73,7 @@ extension AppModel {
             let place = "“\(s.name)” (\(SourceIcon.label(s.type)))"
             if s.primary { return TrackCloud(source: s, holds: true, help: "On the primary, \(place)") }
             let current = s.state == "synced" && cloudIndex.version.version > 0
-                && s.version == cloudIndex.version.version && !cloudIndex.version.dirty
+                && s.version == cloudIndex.version.version && cloudIndex.version.filesMatchVersion
             if current {
                 let clash = (s.remote.isEmpty ? cloudIndex.foldedClashes : cloudIndex.clashes).contains(track.id)
                 if !clash { return TrackCloud(source: s, holds: true, help: "On \(place), up to date") }

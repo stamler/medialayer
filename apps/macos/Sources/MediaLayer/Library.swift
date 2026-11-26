@@ -38,6 +38,12 @@ struct Track: Identifiable, Hashable {
 struct IndexVersion: Equatable {
     var version = 0
     var dirty = false
+    /// The changes since that version include file rows, not only
+    /// playlists. An index from before the core recorded this counts as
+    /// such a change.
+    var filesDirty = true
+    /// The files are as that version has them.
+    var filesMatchVersion: Bool { !dirty || !filesDirty }
 }
 
 /// Reads the index the Go core writes. The database is in WAL mode, so
@@ -114,7 +120,7 @@ final class LibraryDB {
         }
         var version = IndexVersion()
         var stmt: OpaquePointer?
-        guard sqlite3_prepare_v2(db, "SELECT key, value FROM meta WHERE key IN ('version', 'dirty')",
+        guard sqlite3_prepare_v2(db, "SELECT key, value FROM meta WHERE key IN ('version', 'dirty', 'files_dirty')",
                                  -1, &stmt, nil) == SQLITE_OK else {
             throw CoreError(message: String(cString: sqlite3_errmsg(db)))
         }
@@ -123,6 +129,7 @@ final class LibraryDB {
             let value = sqlite3_column_text(stmt, 1).map { String(cString: $0) } ?? ""
             if key == "version" { version.version = Int(value) ?? 0 }
             if key == "dirty" { version.dirty = value == "1" }
+            if key == "files_dirty" { version.filesDirty = value != "0" }
         }
         sqlite3_finalize(stmt)
         return (try tracks(), version)
