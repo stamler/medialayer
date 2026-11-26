@@ -6,6 +6,8 @@ SwiftUI the wrong choice for an app that targets macOS, Windows and Linux,
 then iOS and Android, and should MediaLayer move to a fast cross-platform
 UI toolkit such as Rust's gpui?
 
+**Decided (26 November 2026): stay native and fix the table** (path A below).
+
 ## Recommendation
 
 **Don't pivot. Keep the Apple apps native and fix the Songs table, which
