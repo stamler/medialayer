@@ -39,17 +39,15 @@ var ErrNoFrame = errors.New("no FLAC frame found")
 func OpenFLACSource(fetch FetchFunc, size, maxHeader int64, ogg bool) (*FLACSource, error) {
 	s := &FLACSource{ogg: ogg, size: size}
 	if ogg {
-		fr := &fetchReader{fetch: fetch, size: size}
-		r := bufio.NewReaderSize(fr, oggMaxPage+1)
-		h, _, err := readOggFLACHeader(r, int(maxHeader))
+		h, start, err := fetchOggFLACHeader(fetch, size, maxHeader)
 		if err != nil {
 			return nil, err
 		}
-		s.Info, s.serial = h.Info, h.Serial
-		s.audioStart = fr.off - int64(len(fr.buf)) - int64(r.Buffered())
+		s.Info, s.serial, s.audioStart = h.Info, h.Serial, start
+		s.base = firstFrameNumber(fetch, start, h.Info, true, h.Serial)
 		s.Total = h.Info.TotalSamples
 		if s.Total == 0 {
-			s.Total = uint64(max(lastGranule(fetch, size, h.Serial), 0))
+			s.Total = oggLength(fetch, size, h.Serial, s.base)
 		}
 	} else {
 		header, complete, err := FLACHeader(fetch, size, maxHeader)
@@ -64,24 +62,39 @@ func OpenFLACSource(fetch FetchFunc, size, maxHeader int64, ogg bool) (*FLACSour
 			return nil, err
 		}
 		s.Info, s.Total, s.audioStart = d.Info, d.Info.TotalSamples, int64(len(header))
+		s.base = firstFrameNumber(fetch, s.audioStart, d.Info, false, 0)
 	}
 	if s.Total == 0 {
 		return nil, fmt.Errorf("a FLAC stream of unknown length: %w", ErrNotFLAC)
 	}
-	open := func(off, n int64) (io.ReadCloser, error) {
-		b, err := fetch(off, min(n, 1<<20))
-		return io.NopCloser(bytes.NewReader(b)), err
-	}
-	f, err := s.framesAt(open, s.audioStart, s.size-s.audioStart)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = f.Close() }()
-	// The header is enough: a damaged first frame still gives its number
-	// (First stays 0 when the header itself is bad: the usual base).
-	_, _ = f.d.Next()
-	s.base, s.baseKnown = f.d.First, true
+	s.baseKnown = true
 	return s, nil
+}
+
+// firstFrameNumber reads the number of the frame header exactly at off,
+// the stream's first sample: 0, unless the stream was cut from a longer
+// one without renumbering. A damaged header there gives 0, the usual.
+func firstFrameNumber(fetch FetchFunc, off int64, info StreamInfo, ogg bool, serial uint32) uint64 {
+	n := int64(16)
+	if ogg {
+		n = oggMaxPage
+	}
+	b, err := fetch(off, n)
+	if err != nil {
+		return 0
+	}
+	if ogg {
+		p, _, err := parseOggPage(b)
+		if err != nil || p.serial != serial || p.flags&1 != 0 {
+			return 0
+		}
+		b = p.body
+	}
+	probe := &FLACDecoder{Info: info, br: newBitReader(bytes.NewReader(b[:min(len(b), 16)]))}
+	if probe.checkHeader() != nil {
+		return 0
+	}
+	return probe.First
 }
 
 // FLACFrames decodes frames from a point in a FLACSource.
@@ -118,16 +131,13 @@ func (f *FLACFrames) Next() (first uint64, n int, err error) {
 // frame found: the frame numbers then say where it is.
 func (f *FLACFrames) Resync() error {
 	if f.st != nil {
-		st := f.st
-		for {
-			if err := st.next(); err != nil {
-				return ErrNoFrame
-			}
-			if st.skipContinued() {
-				break
-			}
+		// From the next page whose CRC checks, as a new run of pages: a
+		// page lost or damaged leaves a gap, not an end.
+		d, err := f.src.oggFrames(f.br)
+		if err != nil {
+			return err
 		}
-		f.d = newFLACFrameDecoder(f.src.Info, st)
+		f.d, f.st = d, d.br.r.(*oggStream)
 	} else {
 		d, err := f.src.nativeFrames(f.br)
 		if err != nil {

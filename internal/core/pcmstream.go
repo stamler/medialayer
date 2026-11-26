@@ -213,6 +213,7 @@ func (s *streamServer) writePCM(w http.ResponseWriter, r *http.Request, o fs.Obj
 			}
 			continue
 		}
+		retries = 0
 		n = int(min(uint64(n), src.Total-min(first, src.Total))) // past what the header promised
 		if first+uint64(n) <= sample {
 			continue

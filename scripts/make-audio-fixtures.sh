@@ -30,7 +30,7 @@ ff -i src.wav -c:a aac -b:a 96k aac.m4a
 ff -i src.wav -i cover.png -map 0 -map 1 -c:a aac -b:a 96k -c:v copy -disposition:v attached_pic \
 	-metadata title="A Title" -metadata artist="An Artist" aac-tagged.m4a
 # FLAC in Ogg, tagged, of the same audio as flac16.flac.
-ff -i src.wav -c:a flac -sample_fmt s16 -metadata title="A Title" -metadata artist="An Artist" -fflags +bitexact flac16.oga
+ff -i src.wav -c:a flac -sample_fmt s16 -metadata title="A Title" -metadata artist="An Artist" -fflags +bitexact -page_duration 50000 flac16.oga
 # Remuxes, which must hash the same: AAC with its bit rates rewritten,
 # ALAC the way QuickTime stores it.
 ff -i aac.m4a -c copy -movflags faststart aac-remux.m4a

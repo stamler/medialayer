@@ -405,6 +405,12 @@ func TestOggFLAC(t *testing.T) {
 	if _, err := HashOggFLAC(bytes.NewReader(cut)); err == nil {
 		t.Error("a file missing a page hashed")
 	}
+	// A STREAMINFO block whose length isn't 34 is refused, not a panic.
+	odd := bytes.Clone(b)
+	odd[27+int(odd[26])+16] = 33
+	if _, err := ParseOggFLAC(fetchAll(odd), int64(len(odd)), 1<<20); err == nil {
+		t.Error("STREAMINFO of 33 bytes read")
+	}
 	// Opus in Ogg is not a track MediaLayer reads.
 	fetch, _, size = fileFuncs(t, "opus.ogg")
 	if _, err := ParseOggFLAC(fetch, size, 1<<20); !errors.Is(err, ErrUnsupported) {

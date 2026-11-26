@@ -629,10 +629,10 @@ func TestStreamServesDecodedFLAC(t *testing.T) {
 			t.Fatal(err)
 		}
 		write(t, filepath.Join(lib, "D", name), b)
-		if name == "flac32.flac" { // and a copy with a damaged frame
+		if name == "flac32.flac" || name == "flac16.oga" { // and a copy with a damaged frame
 			b = bytes.Clone(b)
 			b[len(b)/2] ^= 0x40
-			write(t, filepath.Join(lib, "D", "damaged.flac"), b)
+			write(t, filepath.Join(lib, "D", "damaged"+filepath.Ext(name)), b)
 		}
 	}
 	c := newTestCore(t, lib)
@@ -640,7 +640,7 @@ func TestStreamServesDecodedFLAC(t *testing.T) {
 		t.Fatal(err)
 	}
 	wavs := map[string][]byte{}
-	for _, name := range []string{"flac32.flac", "flac16.oga", "flac24-51.ogg", "damaged.flac"} {
+	for _, name := range []string{"flac32.flac", "flac16.oga", "flac24-51.ogg", "damaged.flac", "damaged.oga"} {
 		t.Run(name, func(t *testing.T) {
 			var id string
 			if err := c.currentDB().SQL().QueryRow(`SELECT id FROM file WHERE path = ?`, "D/"+name).Scan(&id); err != nil {
@@ -671,9 +671,12 @@ func TestStreamServesDecodedFLAC(t *testing.T) {
 				t.Fatalf("data chunk of %d bytes in %d", binary.LittleEndian.Uint32(wav[64:]), len(wav))
 			}
 			wavs[name] = wav
-			if name == "damaged.flac" {
+			if strings.HasPrefix(name, "damaged") {
 				// Silence where the damaged frame was, and the audio after.
 				clean := wavs["flac32.flac"]
+				if name == "damaged.oga" {
+					clean = wavs["flac16.oga"]
+				}
 				if len(wav) != len(clean) || !bytes.Equal(wav[len(wav)-4096:], clean[len(clean)-4096:]) ||
 					!bytes.Equal(wav[:wavHeaderLen], clean[:wavHeaderLen]) || bytes.Equal(wav, clean) {
 					t.Fatalf("damaged: %d bytes, clean %d; head same %v tail same %v", len(wav), len(clean),

@@ -147,7 +147,7 @@ func (s *oggStream) next() error {
 var errBigPacket = errors.New("Ogg packet too big")
 
 // packet returns the next whole packet; one over max bytes is read to
-// its end and errBigPacket returned.
+// its end, and its first 4 bytes returned with errBigPacket.
 func (s *oggStream) packet(max int) ([]byte, error) {
 	var out []byte
 	started, big := false, false
@@ -169,15 +169,15 @@ func (s *oggStream) packet(max int) ([]byte, error) {
 		if !big {
 			out = append(out, s.page.body[s.off:s.off+l]...)
 		}
-		if len(out) > max {
-			out, big = nil, true
+		if len(out) > max && !big {
+			out, big = out[:min(len(out), 4)], true
 		}
 		s.seg++
 		s.off += l
 		if l < 255 {
 			s.pos = s.off
 			if big {
-				return nil, errBigPacket
+				return out, errBigPacket
 			}
 			return out, nil
 		}
@@ -254,7 +254,8 @@ func readOggFLACHeader(r *bufio.Reader, max int) (*OggFLACHeader, *oggStream, er
 	}
 	// 0x7F "FLAC", version 1.0, the header packet count, "fLaC", then
 	// the STREAMINFO block.
-	if len(first) != 51 || first[5] != 1 || string(first[9:13]) != "fLaC" || first[13]&0x7f != 0 {
+	if len(first) != 51 || first[5] != 1 || string(first[9:13]) != "fLaC" || first[13]&0x7f != 0 ||
+		first[14] != 0 || first[15] != 0 || first[16] != 34 {
 		return nil, nil, fmt.Errorf("bad Ogg FLAC mapping header: %w", ErrNotOggFLAC)
 	}
 	h := &OggFLACHeader{Serial: s.serial}
@@ -267,13 +268,15 @@ func readOggFLACHeader(r *bufio.Reader, max int) (*OggFLACHeader, *oggStream, er
 	count := int(binary.BigEndian.Uint16(first[7:]))
 	last := count == 0 && first[13]&0x80 != 0
 	lastAt := 4
+	blocks := []int{4} // where each block starts in Meta
 	for n := 0; !last && (count == 0 || n < count); n++ {
 		if n >= maxBlocks {
 			return nil, nil, fmt.Errorf("more than %d FLAC metadata blocks: %w", maxBlocks, ErrNotOggFLAC)
 		}
 		p, err := s.packet(max - len(h.Meta))
-		if errors.Is(err, errBigPacket) {
-			continue // a cover over the header limit: left out, as for native FLAC
+		if errors.Is(err, errBigPacket) { // a cover over the header limit: left out, as for native FLAC
+			last = count == 0 && len(p) > 0 && p[0]&0x80 != 0
+			continue
 		}
 		if errors.Is(err, io.EOF) {
 			err = fmt.Errorf("file ends in the header packets: %w", ErrNotOggFLAC)
@@ -286,16 +289,13 @@ func readOggFLACHeader(r *bufio.Reader, max int) (*OggFLACHeader, *oggStream, er
 		}
 		last = count == 0 && p[0]&0x80 != 0
 		lastAt = len(h.Meta)
+		blocks = append(blocks, lastAt)
 		h.Meta = append(h.Meta, p...)
 	}
-	for i := 4; i < len(h.Meta); { // the flag only on the last block
-		n := int(h.Meta[i+1])<<16 | int(h.Meta[i+2])<<8 | int(h.Meta[i+3])
+	for _, i := range blocks { // the flag only on the last block
 		h.Meta[i] &^= 0x80
-		if i == lastAt {
-			h.Meta[i] |= 0x80
-		}
-		i += 4 + n
 	}
+	h.Meta[lastAt] |= 0x80
 	if s.page != nil && s.seg != len(s.page.segs) {
 		return nil, nil, fmt.Errorf("audio on the last header page: %w", ErrNotOggFLAC)
 	}
@@ -306,8 +306,7 @@ func readOggFLACHeader(r *bufio.Reader, max int) (*OggFLACHeader, *oggStream, er
 // details from its header packets, read through fetch. The length comes
 // from STREAMINFO or else the last page's position.
 func ParseOggFLAC(fetch FetchFunc, size, max int64) (*Info, error) {
-	r := bufio.NewReaderSize(&fetchReader{fetch: fetch, size: size}, oggMaxPage+1)
-	h, _, err := readOggFLACHeader(r, int(max))
+	h, start, err := fetchOggFLACHeader(fetch, size, max)
 	if err != nil {
 		return nil, err
 	}
@@ -317,11 +316,34 @@ func ParseOggFLAC(fetch FetchFunc, size, max int64) (*Info, error) {
 	}
 	info.Format = "oga"
 	if h.Info.TotalSamples == 0 {
-		if n := lastGranule(fetch, size, h.Serial); n > 0 {
-			info.DurationMS = n * 1000 / int64(h.Info.SampleRate)
+		base := firstFrameNumber(fetch, start, h.Info, true, h.Serial)
+		if n := oggLength(fetch, size, h.Serial, base); n > 0 {
+			info.DurationMS = int64(n) * 1000 / int64(h.Info.SampleRate)
 		}
 	}
 	return info, nil
+}
+
+// fetchOggFLACHeader reads an Ogg FLAC file's header packets through
+// fetch, and returns where the audio pages start.
+func fetchOggFLACHeader(fetch FetchFunc, size, max int64) (*OggFLACHeader, int64, error) {
+	fr := &fetchReader{fetch: fetch, size: size}
+	r := bufio.NewReaderSize(fr, oggMaxPage+1)
+	h, _, err := readOggFLACHeader(r, int(max))
+	if err != nil {
+		return nil, 0, err
+	}
+	return h, fr.off - int64(len(fr.buf)) - int64(r.Buffered()), nil
+}
+
+// oggLength is the stream's length in samples from its last page's
+// position, which counts from the first frame's number, base.
+func oggLength(fetch FetchFunc, size int64, serial uint32, base uint64) uint64 {
+	g := uint64(max(lastGranule(fetch, size, serial), 0))
+	if g <= base {
+		return 0
+	}
+	return g - base
 }
 
 // lastGranule finds the position of the stream's last page in the last
