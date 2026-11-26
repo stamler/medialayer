@@ -45,6 +45,27 @@ on Drive.
 - A restart opens the library from the local index at once.
 - Playback starts in 1.0 to 2.1 s (status bar, "started in").
 
+## Songs table
+
+- To show or hide a column, right-click the table header or choose
+  View > Columns. To move a column, drag its header. The app keeps your
+  choice. Restore Default Columns in View > Columns resets it.
+- Album Artist, Composer, Disc, Bit Rate, Size and Date Modified are
+  hidden at first. Name always shows.
+- The Art column loads each cover when its row comes into view, and keeps
+  at most 32 MB of thumbnails in memory.
+- The Clouds column shows an icon for each source of the track:
+  - The primary always holds the track.
+  - A secondary icon shows at full strength when the secondary's last
+    sync in this session finished and copied the index version the app
+    shows. That secondary holds every track, except paths that sync can't
+    keep apart (see Known gaps in [docs/sync.md](../../docs/sync.md)).
+  - A dimmed icon means the secondary may not hold the track yet: it is
+    copying, paused, failed, has an older version, or has not synced since
+    the app opened. Hover over the icon to see why.
+  - The app works this out from the sources' state and the index version.
+    It writes nothing per source into the index.
+
 ## Sources
 
 Add Source (Library menu, or the + by the chips) adds a second copy of

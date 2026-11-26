@@ -99,6 +99,12 @@ struct SongsTable: View {
                 .width(min: 90, ideal: 130)
                 .customizationID(SongColumn.modified.id)
                 .defaultVisibility(SongColumn.modified.defaultVisibility)
+                TableColumn(SongColumn.clouds.title) { t in
+                    CloudsCell(clouds: model.clouds(for: t))
+                }
+                .width(min: 44, ideal: 60)
+                .customizationID(SongColumn.clouds.id)
+                .defaultVisibility(SongColumn.clouds.defaultVisibility)
             }
         }
         .contextMenu(forSelectionType: Track.ID.self) { ids in
@@ -130,7 +136,7 @@ struct SongsTable: View {
 /// The Songs table's columns, in their default order.
 enum SongColumn: String, CaseIterable, Identifiable {
     case art, name, time, artist, albumArtist, album, genre, composer, year, disc, track, kind,
-         bitRate, size, modified
+         bitRate, size, modified, clouds
 
     var id: String { rawValue } // the column's customizationID; saved, so don't rename
 
@@ -151,6 +157,7 @@ enum SongColumn: String, CaseIterable, Identifiable {
         case .bitRate: "Bit Rate"
         case .size: "Size"
         case .modified: "Date Modified"
+        case .clouds: "Clouds"
         }
     }
 

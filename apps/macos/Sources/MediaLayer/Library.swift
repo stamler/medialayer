@@ -33,6 +33,13 @@ struct Track: Identifiable, Hashable {
     var bitRate: Int64 { durationMS > 0 ? size * 8 / durationMS : 0 }
 }
 
+/// The index's version, read with the tracks. `dirty` means the index has
+/// changed since that version was made.
+struct IndexVersion: Equatable {
+    var version = 0
+    var dirty = false
+}
+
 /// Reads the index the Go core writes. The database is in WAL mode, so
 /// reading here never blocks the indexer.
 final class LibraryDB {
@@ -90,6 +97,35 @@ final class LibraryDB {
         }
         guard rc == SQLITE_DONE else { throw CoreError(message: String(cString: sqlite3_errmsg(db))) }
         return out
+    }
+
+    /// The tracks and the index version they belong to, read in one
+    /// transaction so the indexer can't change the index in between.
+    func tracksWithVersion() throws -> (tracks: [Track], version: IndexVersion) {
+        guard sqlite3_exec(db, "BEGIN", nil, nil, nil) == SQLITE_OK else {
+            throw CoreError(message: String(cString: sqlite3_errmsg(db)))
+        }
+        defer {
+            // A transaction left open would pin this read's snapshot, and
+            // the app would never see the index change again.
+            if sqlite3_exec(db, "COMMIT", nil, nil, nil) != SQLITE_OK {
+                sqlite3_exec(db, "ROLLBACK", nil, nil, nil)
+            }
+        }
+        var version = IndexVersion()
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, "SELECT key, value FROM meta WHERE key IN ('version', 'dirty')",
+                                 -1, &stmt, nil) == SQLITE_OK else {
+            throw CoreError(message: String(cString: sqlite3_errmsg(db)))
+        }
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            let key = sqlite3_column_text(stmt, 0).map { String(cString: $0) } ?? ""
+            let value = sqlite3_column_text(stmt, 1).map { String(cString: $0) } ?? ""
+            if key == "version" { version.version = Int(value) ?? 0 }
+            if key == "dirty" { version.dirty = value == "1" }
+        }
+        sqlite3_finalize(stmt)
+        return (try tracks(), version)
     }
 
     /// Where an image lives in the art packs.
