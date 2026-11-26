@@ -14,98 +14,11 @@ struct SongsTable: View {
     var body: some View {
         Table(of: Track.self, selection: $selection, sortOrder: $model.sortOrder,
               columnCustomization: $columns.customization) {
-            // A column builder takes at most ten columns, so they come in groups.
-            Group {
-                TableColumn(SongColumn.art.title) { t in
-                    ZStack {
-                        ArtView(sha: t.artSHA, size: 18)
-                        if player.current?.id == t.id {
-                            Image(systemName: "speaker.wave.2.fill").font(.caption2)
-                                .foregroundStyle(.white).shadow(radius: 2)
-                        }
-                    }
-                }
-                .width(28)
-                .customizationID(SongColumn.art.id)
-                .defaultVisibility(SongColumn.art.defaultVisibility)
-                TableColumn(SongColumn.name.title, value: \.displayTitle)
-                    .width(min: 120, ideal: 240)
-                    .customizationID(SongColumn.name.id)
-                    .disabledCustomizationBehavior(.visibility) // a table with no Name says little
-                TableColumn(SongColumn.time.title, value: \.durationMS) { t in
-                    Text(formatDuration(t.durationMS)).monospacedDigit()
-                }
-                .width(50)
-                .customizationID(SongColumn.time.id)
-                .defaultVisibility(SongColumn.time.defaultVisibility)
-                TableColumn(SongColumn.artist.title, value: \.artist)
-                    .width(min: 80, ideal: 160)
-                    .customizationID(SongColumn.artist.id)
-                    .defaultVisibility(SongColumn.artist.defaultVisibility)
-                TableColumn(SongColumn.albumArtist.title, value: \.albumArtist)
-                    .width(min: 80, ideal: 160)
-                    .customizationID(SongColumn.albumArtist.id)
-                    .defaultVisibility(SongColumn.albumArtist.defaultVisibility)
-                TableColumn(SongColumn.album.title, value: \.album)
-                    .width(min: 80, ideal: 180)
-                    .customizationID(SongColumn.album.id)
-                    .defaultVisibility(SongColumn.album.defaultVisibility)
-                TableColumn(SongColumn.genre.title, value: \.genre)
-                    .width(min: 60, ideal: 90)
-                    .customizationID(SongColumn.genre.id)
-                    .defaultVisibility(SongColumn.genre.defaultVisibility)
-                TableColumn(SongColumn.composer.title, value: \.composer)
-                    .width(min: 80, ideal: 140)
-                    .customizationID(SongColumn.composer.id)
-                    .defaultVisibility(SongColumn.composer.defaultVisibility)
-            }
-            Group {
-                TableColumn(SongColumn.year.title, value: \.year)
-                    .width(44)
-                    .customizationID(SongColumn.year.id)
-                    .defaultVisibility(SongColumn.year.defaultVisibility)
-                TableColumn(SongColumn.disc.title, value: \.discNumber) { t in
-                    Text(t.discNumber > 0 ? "\(t.discNumber)" : "").monospacedDigit()
-                }
-                .width(36)
-                .customizationID(SongColumn.disc.id)
-                .defaultVisibility(SongColumn.disc.defaultVisibility)
-                TableColumn(SongColumn.track.title, value: \.trackNumber) { t in
-                    Text(t.trackNumber > 0 ? "\(t.trackNumber)" : "").monospacedDigit()
-                }
-                .width(30)
-                .customizationID(SongColumn.track.id)
-                .defaultVisibility(SongColumn.track.defaultVisibility)
-                TableColumn(SongColumn.kind.title, value: \.format) { t in Text(Self.kind(t)) }
-                    .width(min: 60, ideal: 90)
-                    .customizationID(SongColumn.kind.id)
-                    .defaultVisibility(SongColumn.kind.defaultVisibility)
-                TableColumn(SongColumn.bitRate.title, value: \.bitRate) { t in
-                    Text(t.bitRate > 0 ? "\(t.bitRate) kbps" : "").monospacedDigit()
-                }
-                .width(min: 60, ideal: 76)
-                .customizationID(SongColumn.bitRate.id)
-                .defaultVisibility(SongColumn.bitRate.defaultVisibility)
-                TableColumn(SongColumn.size.title, value: \.size) { t in
-                    Text(ByteCountFormatter.string(fromByteCount: t.size, countStyle: .file)).monospacedDigit()
-                }
-                .width(min: 56, ideal: 70)
-                .customizationID(SongColumn.size.id)
-                .defaultVisibility(SongColumn.size.defaultVisibility)
-                TableColumn(SongColumn.modified.title, value: \.mtimeMS) { t in
-                    Text(t.mtimeMS > 0 ? Self.dates.string(from: Date(timeIntervalSince1970: Double(t.mtimeMS) / 1000)) : "")
-                        .monospacedDigit()
-                }
-                .width(min: 90, ideal: 130)
-                .customizationID(SongColumn.modified.id)
-                .defaultVisibility(SongColumn.modified.defaultVisibility)
-                TableColumn(SongColumn.clouds.title) { t in
-                    CloudsCell(clouds: model.clouds(for: t))
-                }
-                .width(min: 44, ideal: 60)
-                .customizationID(SongColumn.clouds.id)
-                .defaultVisibility(SongColumn.clouds.defaultVisibility)
-            }
+            // A column builder takes at most ten columns, so they come in two
+            // builder properties. (A Group would infer its sort type from the
+            // unsortable art column and reject the sortable ones.)
+            leadingColumns
+            trailingColumns
         } rows: {
             // Rows drag to a sidebar playlist, or within a playlist to reorder.
             ForEach(tracks) { t in
@@ -123,6 +36,101 @@ struct SongsTable: View {
         } primaryAction: { ids in
             if let id = ids.first, let t = tracks.first(where: { $0.id == id }) { model.play(t) }
         }
+    }
+
+    @TableColumnBuilder<Track, KeyPathComparator<Track>>
+    private var leadingColumns: some TableColumnContent<Track, KeyPathComparator<Track>> {
+        TableColumn(SongColumn.art.title) { t in
+            ZStack {
+                ArtView(sha: t.artSHA, size: 18)
+                if player.current?.id == t.id {
+                    Image(systemName: "speaker.wave.2.fill").font(.caption2)
+                        .foregroundStyle(.white).shadow(radius: 2)
+                }
+            }
+        }
+        .width(28)
+        .customizationID(SongColumn.art.id)
+        .defaultVisibility(SongColumn.art.defaultVisibility)
+        TableColumn(SongColumn.name.title, value: \.displayTitle)
+            .width(min: 120, ideal: 240)
+            .customizationID(SongColumn.name.id)
+            .disabledCustomizationBehavior(.visibility) // a table with no Name says little
+        TableColumn(SongColumn.time.title, value: \.durationMS) { t in
+            Text(formatDuration(t.durationMS)).monospacedDigit()
+        }
+        .width(50)
+        .customizationID(SongColumn.time.id)
+        .defaultVisibility(SongColumn.time.defaultVisibility)
+        TableColumn(SongColumn.artist.title, value: \.artist)
+            .width(min: 80, ideal: 160)
+            .customizationID(SongColumn.artist.id)
+            .defaultVisibility(SongColumn.artist.defaultVisibility)
+        TableColumn(SongColumn.albumArtist.title, value: \.albumArtist)
+            .width(min: 80, ideal: 160)
+            .customizationID(SongColumn.albumArtist.id)
+            .defaultVisibility(SongColumn.albumArtist.defaultVisibility)
+        TableColumn(SongColumn.album.title, value: \.album)
+            .width(min: 80, ideal: 180)
+            .customizationID(SongColumn.album.id)
+            .defaultVisibility(SongColumn.album.defaultVisibility)
+        TableColumn(SongColumn.genre.title, value: \.genre)
+            .width(min: 60, ideal: 90)
+            .customizationID(SongColumn.genre.id)
+            .defaultVisibility(SongColumn.genre.defaultVisibility)
+        TableColumn(SongColumn.composer.title, value: \.composer)
+            .width(min: 80, ideal: 140)
+            .customizationID(SongColumn.composer.id)
+            .defaultVisibility(SongColumn.composer.defaultVisibility)
+    }
+
+    @TableColumnBuilder<Track, KeyPathComparator<Track>>
+    private var trailingColumns: some TableColumnContent<Track, KeyPathComparator<Track>> {
+        TableColumn(SongColumn.year.title, value: \.year)
+            .width(44)
+            .customizationID(SongColumn.year.id)
+            .defaultVisibility(SongColumn.year.defaultVisibility)
+        TableColumn(SongColumn.disc.title, value: \.discNumber) { t in
+            Text(t.discNumber > 0 ? "\(t.discNumber)" : "").monospacedDigit()
+        }
+        .width(36)
+        .customizationID(SongColumn.disc.id)
+        .defaultVisibility(SongColumn.disc.defaultVisibility)
+        TableColumn(SongColumn.track.title, value: \.trackNumber) { t in
+            Text(t.trackNumber > 0 ? "\(t.trackNumber)" : "").monospacedDigit()
+        }
+        .width(30)
+        .customizationID(SongColumn.track.id)
+        .defaultVisibility(SongColumn.track.defaultVisibility)
+        TableColumn(SongColumn.kind.title, value: \.format) { t in Text(Self.kind(t)) }
+            .width(min: 60, ideal: 90)
+            .customizationID(SongColumn.kind.id)
+            .defaultVisibility(SongColumn.kind.defaultVisibility)
+        TableColumn(SongColumn.bitRate.title, value: \.bitRate) { t in
+            Text(t.bitRate > 0 ? "\(t.bitRate) kbps" : "").monospacedDigit()
+        }
+        .width(min: 60, ideal: 76)
+        .customizationID(SongColumn.bitRate.id)
+        .defaultVisibility(SongColumn.bitRate.defaultVisibility)
+        TableColumn(SongColumn.size.title, value: \.size) { t in
+            Text(ByteCountFormatter.string(fromByteCount: t.size, countStyle: .file)).monospacedDigit()
+        }
+        .width(min: 56, ideal: 70)
+        .customizationID(SongColumn.size.id)
+        .defaultVisibility(SongColumn.size.defaultVisibility)
+        TableColumn(SongColumn.modified.title, value: \.mtimeMS) { t in
+            Text(t.mtimeMS > 0 ? Self.dates.string(from: Date(timeIntervalSince1970: Double(t.mtimeMS) / 1000)) : "")
+                .monospacedDigit()
+        }
+        .width(min: 90, ideal: 130)
+        .customizationID(SongColumn.modified.id)
+        .defaultVisibility(SongColumn.modified.defaultVisibility)
+        TableColumn(SongColumn.clouds.title) { t in
+            CloudsCell(clouds: model.clouds(for: t))
+        }
+        .width(min: 44, ideal: 60)
+        .customizationID(SongColumn.clouds.id)
+        .defaultVisibility(SongColumn.clouds.defaultVisibility)
     }
 
     /// A drag of a selected row takes the whole selection, in table order.

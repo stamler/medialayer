@@ -198,24 +198,29 @@ final class ArtCache {
         let op: Operation
         var waiters: [Int: CheckedContinuation<NSImage?, Never>]
     }
-    private var requests: [NSString: Request] = [:]
+    private var requests: [String: Request] = [:]
     private var nextWaiter = 0
 
     var db: LibraryDB?
     var artDir = ""
 
-    private static func key(_ sha: String, _ size: Int) -> NSString { "\(sha)-\(size)" as NSString }
+    private static func key(_ sha: String, _ size: Int) -> String { "\(sha)-\(size)" }
 
     func cached(_ sha: String, size: Int) -> NSImage? {
-        cache.object(forKey: Self.key(sha, size))
+        cache.object(forKey: Self.key(sha, size) as NSString)
     }
 
     /// A thumbnail at most `size` pixels on its long side, or nil if there
     /// is none or the calling task was cancelled.
     func image(_ sha: String, size: Int) async -> NSImage? {
         let key = Self.key(sha, size)
-        if let hit = cache.object(forKey: key) { return hit }
-        guard let db, !artDir.isEmpty else { return nil }
+        if let hit = cache.object(forKey: key as NSString) { return hit }
+        guard let libraryDB = db, !artDir.isEmpty else { return nil }
+        // The decode runs off the main actor. NSCache is thread-safe, and
+        // LibraryDB only reads, through a connection opened read-only with
+        // SQLITE_OPEN_FULLMUTEX; neither type is marked Sendable.
+        nonisolated(unsafe) let db = libraryDB
+        nonisolated(unsafe) let cache = self.cache
         let dir = artDir
         let waiter = nextWaiter
         nextWaiter += 1
@@ -227,10 +232,10 @@ final class ArtCache {
                     return
                 }
                 let op = BlockOperation()
-                op.addExecutionBlock { [cache, weak op] in
+                op.addExecutionBlock { [weak op] in
                     guard let op, !op.isCancelled else { return }
                     let image = Self.decode(db: db, dir: dir, sha: sha, size: size)
-                    if let image { cache.setObject(image, forKey: key, cost: size * size * 4) } // at most
+                    if let image { cache.setObject(image, forKey: key as NSString, cost: size * size * 4) } // at most
                     DispatchQueue.main.async {
                         MainActor.assumeIsolated { self.finish(key, op: op, image: image) }
                     }
@@ -243,13 +248,13 @@ final class ArtCache {
         }
     }
 
-    private func finish(_ key: NSString, op: Operation, image: NSImage?) {
+    private func finish(_ key: String, op: Operation, image: NSImage?) {
         guard let r = requests[key], r.op === op else { return } // cancelled, or replaced since
         requests[key] = nil
         for done in r.waiters.values { done.resume(returning: image) }
     }
 
-    private func cancel(_ key: NSString, waiter: Int) {
+    private func cancel(_ key: String, waiter: Int) {
         guard var r = requests[key], let done = r.waiters.removeValue(forKey: waiter) else { return }
         done.resume(returning: nil)
         if r.waiters.isEmpty {
