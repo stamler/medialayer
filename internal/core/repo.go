@@ -238,6 +238,19 @@ func (c *Core) restore(ctx context.Context, f fs.Fs) error {
 		return err
 	}
 
+	// Playlists made in the index being replaced (one indexed from
+	// scratch while another device published first) carry over, matched
+	// by path. They make the restored index a newer version than the
+	// snapshot, which the next publish saves.
+	c.playlistMu.Lock()
+	defer c.playlistMu.Unlock()
+	if old := c.currentDB(); old != nil {
+		if _, err := old.CopyPlaylists(sdb); err != nil {
+			_ = sdb.Close()
+			return fmt.Errorf("carry over playlists: %w", err)
+		}
+	}
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	old := c.db

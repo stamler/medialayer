@@ -33,14 +33,17 @@ const remoteName = "gdrive"
 type Core struct {
 	dataDir string
 
-	mu       sync.Mutex
-	settings settings
-	fsys     fs.Fs     // the library folder, nil until one is picked
-	db       *index.DB // nil until a folder is picked
-	dbEpoch  int64     // raised each time the database file is replaced
-	job      jobStatus
-	jobDone  chan struct{}      // closed when the running job ends; nil if none
-	cancel   context.CancelFunc // stops the running job
+	mu sync.Mutex
+	// playlistMu serialises playlist changes with restore; take it
+	// before mu.
+	playlistMu sync.Mutex
+	settings   settings
+	fsys       fs.Fs     // the library folder, nil until one is picked
+	db         *index.DB // nil until a folder is picked
+	dbEpoch    int64     // raised each time the database file is replaced
+	job        jobStatus
+	jobDone    chan struct{}      // closed when the running job ends; nil if none
+	cancel     context.CancelFunc // stops the running job
 	// tracks is the index's track count, kept here so Status never waits
 	// on the database while the indexer writes.
 	tracks atomic.Int64
