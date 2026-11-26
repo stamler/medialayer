@@ -8,6 +8,11 @@ browser (Genres, Composers, Artists, Albums) above the Songs table, and
 double-click to play. Tracks stream from Drive through a localhost
 endpoint in the core, one ranged request per play or seek.
 
+Search from the field in the toolbar (⌘F to focus it, Escape to clear
+it). Each word you type must match the name, artist, album artist,
+album, composer or genre, ignoring case and accents. The column browser
+and the Songs table show only the tracks that match.
+
 ## Build
 
 Needs Go and the Xcode Command Line Tools (full Xcode is not needed):
@@ -54,7 +59,7 @@ to it, or make it the primary. See [docs/sync.md](../../docs/sync.md).
 
 ## Not yet
 
-Search, playlists, the sidebar, the system Now Playing controls
+Playlists, the sidebar, the system Now Playing controls
 (Control Centre) and media keys, header packs, the change feed, Proton,
 iCloud and SMB sources, the sync lease, following a primary moved on
 another device, and testing with 10,000 tracks.
