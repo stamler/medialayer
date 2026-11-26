@@ -118,8 +118,23 @@ returns. To drop hidden songs, right-click the playlist and choose
 Remove Missing Songs.
 
 Choose Music Folder refuses to switch while playlist changes are not on
-the primary yet. Update the library first, or delete the playlists to
-discard them.
+the primary yet, and the message says what to do:
+
+- Update the library first, or delete the playlists to discard the
+  changes.
+- If the primary's cloud is full, an update can't save them. Free up
+  space there and update the library, or delete the playlists.
+
+Known limits:
+
+- A file moved onto a path that the index knows as missing (a file that
+  was there before and was removed) takes that old file's id, not its
+  own. The moved song leaves its playlists.
+- Each burst of playlist edits starts a full sync, which lists the
+  library and every source. A job that only publishes the index is
+  needed.
+- Switching between Songs and a playlist resets the table's scroll
+  position.
 
 ## Now Playing and media keys
 
@@ -145,8 +160,7 @@ app once before you use them.
 
 ## Not yet
 
-Publishing playlist changes without a full sync (each one lists the
-library and its sources), merging playlist changes made on two
-devices, header packs, the change feed, Proton,
+A publish-only job for playlist changes (see Known limits above),
+merging playlist changes made on two devices, header packs, the change feed, Proton,
 iCloud and SMB sources, the sync lease, following a primary moved on
 another device, and testing with 10,000 tracks.
