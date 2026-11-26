@@ -183,7 +183,7 @@ func MP4AudioTrack(moov []byte) (*MP4Track, error) {
 		}
 		return t, nil
 	}
-	return nil, fmt.Errorf("no audio track: %w", ErrNotMP4)
+	return nil, fmt.Errorf("no audio track: %w (%w)", ErrNotMP4, ErrUnsupported)
 }
 
 // readEntry reads the first sample description.
@@ -235,7 +235,7 @@ func (t *MP4Track) readEntry(stsd []byte) error {
 			t.esds = child(child(rest, "wave"), "esds")
 		}
 	default:
-		return fmt.Errorf("audio codec %q: %w", e.typ, ErrNotMP4)
+		return fmt.Errorf("audio codec %q: %w (%w)", e.typ, ErrNotMP4, ErrUnsupported)
 	}
 	return nil
 }

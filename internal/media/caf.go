@@ -1,6 +1,7 @@
 package media
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -21,19 +22,23 @@ var ErrNotCAF = errors.New("not a CAF file with ALAC audio")
 // everything but the audio and its packet table is usually in it.
 const cafHead = 64 << 10
 
+// cafFarReads bounds the reads past the head that finding the chunks
+// takes, against crafted files with many small chunks.
+const cafFarReads = 16
+
 // cafFile is what a CAF file's chunks say about its audio.
 type cafFile struct {
 	alac        ALACConfig
 	validFrames int64
-	info        []byte // the "info" chunk's body, nil if none
+	info        []byte // the "info" chunk's body, nil if none or too big
 	pakt        []byte
 	data        int64 // where the packets start
 	dataEnd     int64
 }
 
 // readCAF finds a CAF file's chunks through fetch and reads all but the
-// audio.
-func readCAF(fetch FetchFunc, size int64) (*cafFile, error) {
+// audio, and the tags if withInfo is set.
+func readCAF(fetch FetchFunc, size int64, withInfo bool) (*cafFile, error) {
 	head, err := fetch(0, min(size, cafHead))
 	if err != nil {
 		return nil, err
@@ -42,9 +47,13 @@ func readCAF(fetch FetchFunc, size int64) (*cafFile, error) {
 		return nil, ErrNotCAF
 	}
 	// at reads n bytes at off, from the head where it holds them.
+	far := 0
 	at := func(off, n int64) ([]byte, error) {
 		if off+n <= int64(len(head)) {
 			return head[off : off+n], nil
+		}
+		if far++; far > cafFarReads {
+			return nil, fmt.Errorf("chunks spread too far: %w", ErrNotCAF)
 		}
 		b, err := fetch(off, n)
 		if err != nil {
@@ -61,6 +70,9 @@ func readCAF(fetch FetchFunc, size int64) (*cafFile, error) {
 	for chunks := 0; pos+12 <= size; chunks++ {
 		if chunks > 1000 {
 			return nil, fmt.Errorf("too many chunks: %w", ErrNotCAF)
+		}
+		if desc != nil && kuki != nil && f.pakt != nil && f.data >= 0 {
+			break // all that's needed; tags come before the audio
 		}
 		h, err := at(pos, 12)
 		if err != nil {
@@ -86,7 +98,9 @@ func readCAF(fetch FetchFunc, size int64) (*cafFile, error) {
 		case "kuki":
 			kuki, err = read(1 << 10)
 		case "info":
-			f.info, err = read(16 << 20)
+			if withInfo && n <= 1<<20 { // more is no tags MediaLayer keeps
+				f.info, err = read(1 << 20)
+			}
 		case "pakt":
 			f.pakt, err = read(maxMoov)
 		case "data":
@@ -104,7 +118,7 @@ func readCAF(fetch FetchFunc, size int64) (*cafFile, error) {
 		return nil, fmt.Errorf("no stream description: %w", ErrNotCAF)
 	}
 	if id := string(desc[8:12]); id != "alac" {
-		return nil, fmt.Errorf("audio codec %q: %w", id, ErrNotCAF)
+		return nil, fmt.Errorf("audio codec %q: %w (%w)", id, ErrNotCAF, ErrUnsupported)
 	}
 	if f.alac, err = parseALACConfig(kuki); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrNotCAF, err)
@@ -119,6 +133,33 @@ func readCAF(fetch FetchFunc, size int64) (*cafFile, error) {
 		f.validFrames = int64(binary.BigEndian.Uint64(f.pakt[8:]))
 	}
 	return f, nil
+}
+
+// duration works out the stream's length in samples. ffmpeg counts every
+// packet whole in the packet table, so the last packet's own header,
+// which says when it holds fewer samples, is read for it.
+func (f *cafFile) duration(fetch FetchFunc) int64 {
+	samples, err := f.packets()
+	if err != nil || len(samples) == 0 {
+		return 0
+	}
+	full := int64(len(samples)) * int64(f.alac.FrameLength)
+	n := full
+	last := samples[len(samples)-1]
+	if b, err := fetch(last.Offset, 7); err == nil && len(b) == 7 {
+		// Element tag (3 bits), 4 + 12 unused, has-size, 2 bits of extra
+		// bytes, not-compressed, then the sample count if has-size.
+		h := binary.BigEndian.Uint64(append([]byte{0}, b...))
+		if h>>(56-20)&1 != 0 {
+			if k := int64(h >> 1 & 0xffffffff); k <= int64(f.alac.FrameLength) {
+				n = full - int64(f.alac.FrameLength) + k
+			}
+		}
+	}
+	if f.validFrames > 0 && f.validFrames < n { // Apple's, exact
+		n = f.validFrames
+	}
+	return n
 }
 
 // packets reads the packet table: each packet's size, as a variable-
@@ -162,15 +203,13 @@ func (f *cafFile) packets() ([]MP4Sample, error) {
 
 // ParseCAF reads a CAF file's tags and stream details.
 func ParseCAF(fetch FetchFunc, size int64) (*Info, error) {
-	f, err := readCAF(fetch, size)
+	f, err := readCAF(fetch, size, true)
 	if err != nil {
 		return nil, err
 	}
 	c := f.alac
 	info := &Info{Format: "caf", SampleRate: int(c.SampleRate), Channels: int(c.Channels), BitDepth: int(c.BitDepth)}
-	if f.validFrames > 0 {
-		info.DurationMS = f.validFrames * 1000 / int64(c.SampleRate)
-	}
+	info.DurationMS = f.duration(fetch) * 1000 / int64(c.SampleRate)
 	parseCAFInfo(f.info, info)
 	return info, nil
 }
@@ -179,10 +218,14 @@ func ParseCAF(fetch FetchFunc, size int64) (*Info, error) {
 // index's tag names. Other keys keep their own names, upper-cased.
 var cafTags = map[string]string{
 	"track number": "TRACKNUMBER", "track": "TRACKNUMBER", "year": "DATE",
-	"recorded date": "DATE", "comments": "COMMENT", "album artist": "ALBUMARTIST",
+	"comments": "COMMENT", "album artist": "ALBUMARTIST",
 	"album_artist": "ALBUMARTIST", "disc": "DISCNUMBER", "disc number": "DISCNUMBER",
-	"encoding application": "ENCODER", "encoder": "ENCODER",
+	"encoding application": "ENCODER", "encoder": "ENCODER", "sub-title": "SUBTITLE",
+	"tempo": "BPM", "key signature": "KEY", "encoded_by": "ENCODEDBY",
 }
+
+// cafMaxTags bounds the tags read from one file.
+const cafMaxTags = 1024
 
 // cafSkip are info keys that describe the stream, not the music.
 var cafSkip = map[string]bool{
@@ -191,22 +234,49 @@ var cafSkip = map[string]bool{
 }
 
 // parseCAFInfo reads an "info" chunk: an entry count, then each entry's
-// key and value as NUL-terminated UTF-8 strings.
+// key and value as NUL-terminated UTF-8 strings. Apple's "recorded date"
+// is the date only when there is no "year".
 func parseCAFInfo(b []byte, info *Info) {
 	if len(b) < 4 {
 		return
 	}
-	n := binary.BigEndian.Uint32(b)
-	parts := strings.Split(string(b[4:]), "\x00")
-	for i := 0; uint32(i) < n && 2*i+1 < len(parts); i++ {
-		k, v := strings.ToLower(strings.TrimSpace(parts[2*i])), strings.TrimSpace(parts[2*i+1])
+	n := min(binary.BigEndian.Uint32(b), cafMaxTags)
+	b = b[4:]
+	str := func() (string, bool) {
+		i := bytes.IndexByte(b, 0)
+		if i < 0 {
+			return "", false
+		}
+		s := string(b[:i])
+		b = b[i+1:]
+		return strings.TrimSpace(s), true
+	}
+	var recorded string
+	hasDate := false
+	for range n {
+		k, ok := str()
+		v, ok2 := str()
+		if !ok || !ok2 {
+			break
+		}
+		k = strings.ToLower(k)
 		if k == "" || v == "" || cafSkip[k] {
+			continue
+		}
+		if k == "recorded date" {
+			recorded = v
 			continue
 		}
 		key, ok := cafTags[k]
 		if !ok {
-			key = strings.ToUpper(strings.ReplaceAll(k, " ", ""))
+			key = strings.Map(func(r rune) rune {
+				if r == ' ' || r == '-' || r == '_' {
+					return -1
+				}
+				return r
+			}, strings.ToUpper(k))
 		}
+		hasDate = hasDate || key == "DATE"
 		if key == "TRACKNUMBER" || key == "DISCNUMBER" {
 			if num, total, ok := strings.Cut(v, "/"); ok {
 				v = strings.TrimSpace(num)
@@ -217,12 +287,15 @@ func parseCAFInfo(b []byte, info *Info) {
 		}
 		info.Tags = append(info.Tags, Tag{key, v})
 	}
+	if recorded != "" && !hasDate {
+		info.Tags = append(info.Tags, Tag{"DATE", recorded})
+	}
 }
 
 // HashCAFAudio decodes a CAF file's ALAC audio and returns its audio
 // hash (see pcmHash): the same as a FLAC or MP4 file of the same audio.
 func HashCAFAudio(fetch FetchFunc, open OpenFunc, size int64) ([]byte, error) {
-	f, err := readCAF(fetch, size)
+	f, err := readCAF(fetch, size, false)
 	if err != nil {
 		return nil, err
 	}

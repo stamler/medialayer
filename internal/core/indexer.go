@@ -242,6 +242,12 @@ func (c *Core) indexFiles(ctx context.Context, db *index.DB, pack *artPack, todo
 				if err == nil {
 					c.countTracks(db)
 				}
+				if errors.Is(err, media.ErrUnsupported) {
+					// Not a track (a video, PCM in CAF, Vorbis in Ogg):
+					// skipped, not a failure; looked at again next sync.
+					fs.Debugf(o, "index: skipped: %v", err)
+					err = nil
+				}
 				c.setJob(func(j *jobStatus) {
 					j.Done++
 					if err != nil {

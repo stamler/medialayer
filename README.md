@@ -21,6 +21,9 @@ The macOS app ([apps/macos](apps/macos/README.md)):
   file headers into a SQLite index. It resumes if interrupted, and later
   syncs index only new and changed files. It reads FLAC (`.flac`), MP3,
   ALAC or AAC in MP4 (`.m4a`, `.mp4`, `.m4b`), and ALAC in CAF (`.caf`).
+  Files with those extensions holding other audio (PCM in CAF, say) or
+  none (a video) are skipped, not counted as failures. CAF has no cover
+  art of its own.
 - **The `.medialayer` folder.** The core saves the index (as numbered
   versions), the cover art packs and the library record (`repo.json`) in
   the music folder. A new device restores the library from it in seconds.

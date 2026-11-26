@@ -253,8 +253,9 @@ func TestParseCAF(t *testing.T) {
 	if info.Format != "caf" || info.SampleRate != 44100 || info.BitDepth != 16 || info.Channels != 2 {
 		t.Fatalf("stream %+v", info)
 	}
-	// ffmpeg counts whole packets, so its duration can run a packet long.
-	if info.DurationMS < 300 || info.DurationMS > 300+4096*1000/44100 {
+	// ffmpeg counts whole packets in the packet table; the last packet
+	// says how many samples it holds.
+	if info.DurationMS != 300 {
 		t.Fatalf("duration %d ms", info.DurationMS)
 	}
 	tags := map[string]string{}
@@ -271,8 +272,28 @@ func TestParseCAF(t *testing.T) {
 	if info, err = ParseCAF(fetch, size); err != nil || info.BitDepth != 24 || info.Channels != 6 || info.SampleRate != 48000 {
 		t.Fatalf("24-bit 5.1: %+v, %v", info, err)
 	}
+	if info.DurationMS != 100 {
+		t.Errorf("24-bit 5.1: %d ms", info.DurationMS)
+	}
+	// Another codec in CAF is not a track; neither is a damaged one.
+	b, err := os.ReadFile("testdata/alac16.caf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pcm := bytes.Clone(b)
+	copy(pcm[bytes.Index(pcm, []byte("desc"))+12+8:], "lpcm")
+	if _, err := ParseCAF(fetchAll(pcm), int64(len(pcm))); !errors.Is(err, ErrUnsupported) {
+		t.Errorf("PCM in CAF: %v", err)
+	}
+	// Tags: bounded, Apple's names, the year before the recorded date.
+	var tagInfo Info
+	parseCAFInfo(cat([]byte{0xff, 0xff, 0xff, 0xff}, []byte("recorded date\x002023-05-01\x00year\x002024\x00sub-title\x00Live\x00"),
+		bytes.Repeat([]byte("x\x00y\x00"), 2000)), &tagInfo)
+	if len(tagInfo.Tags) != cafMaxTags-1 || tagInfo.Tags[0] != (Tag{"DATE", "2024"}) || tagInfo.Tags[1] != (Tag{"SUBTITLE", "Live"}) {
+		t.Errorf("tags %v ... (%d)", tagInfo.Tags[:3], len(tagInfo.Tags))
+	}
 	fetch, _, size = fileFuncs(t, "alac16.m4a")
-	if _, err := ParseCAF(fetch, size); !errors.Is(err, ErrNotCAF) {
+	if _, err := ParseCAF(fetch, size); !errors.Is(err, ErrNotCAF) || errors.Is(err, ErrUnsupported) {
 		t.Fatalf("an MP4 file read as CAF: %v", err)
 	}
 }

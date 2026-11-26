@@ -1,6 +1,7 @@
 package core
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -188,7 +189,14 @@ func TestIndexAndHashALAC(t *testing.T) {
 		}
 		write(t, filepath.Join(lib, to), b)
 	}
-	if st := runSync(t, c); st.Job.Phase != PhaseDone {
+	// PCM in CAF isn't a track MediaLayer reads: skipped, not a failure.
+	pcm, err := os.ReadFile(filepath.Join("..", "media", "testdata", "alac16.caf"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	copy(pcm[bytes.Index(pcm, []byte("desc"))+20:], "lpcm")
+	write(t, filepath.Join(lib, "M4A", "pcm.caf"), pcm)
+	if st := runSync(t, c); st.Job.Phase != PhaseDone || st.Job.Failed != 0 {
 		t.Fatalf("job = %+v", st.Job)
 	}
 	c.waitHashPass()
