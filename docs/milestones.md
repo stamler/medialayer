@@ -49,6 +49,14 @@ the primary. No command line.
   warned. A replaced primary's late changes are kept in trash and flagged,
   never synced over the new primary.
 
+## Feel
+
+The app must feel buttery smooth: scrolling, resizing the window, typing
+in search, and showing or hiding the sidebar stay at the display's frame
+rate with a 10,000-track library, with no dropped frames or beachballs. The
+Mac player is measured against this (see [ui-framework.md](ui-framework.md))
+and work on it continues after the AppKit table.
+
 ## Next
 
 1. **Core library and connecting a cloud.** A Go package with a small

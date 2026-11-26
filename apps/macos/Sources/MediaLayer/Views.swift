@@ -16,7 +16,7 @@ struct MediaLayerApp: App {
                 .environmentObject(model.browse)
                 .environmentObject(model.player)
                 .environmentObject(model.player.clock)
-                .frame(minWidth: 900, minHeight: 560)
+                .frame(minWidth: 720, minHeight: 480)
         }
         .commands {
             SidebarCommands()
@@ -221,7 +221,7 @@ struct LibraryView: View {
     var body: some View {
         NavigationSplitView(columnVisibility: $model.sidebarVisibility) {
             SidebarView()
-                .navigationSplitViewColumnWidth(min: 150, ideal: 190, max: 320)
+                .navigationSplitViewColumnWidth(min: 160, ideal: 200, max: 360)
         } detail: {
             VSplitView {
                 if model.selectedPlaylistID == nil { // playlists show without the browser, as in iTunes
@@ -241,6 +241,9 @@ struct LibraryView: View {
             .safeAreaInset(edge: .bottom, spacing: 0) { StatusBar() }
             // On the detail column, so the items sit in its part of the
             // toolbar, after the sidebar's toggle.
+            // The window title would take toolbar room from the transport,
+            // now playing and search, which must stay visible.
+            .navigationTitle("")
             .toolbar {
                 ToolbarItemGroup(placement: .navigation) { TransportControls() }
                 NowPlayingItem()
@@ -292,9 +295,10 @@ struct NowPlayingDisplay: View {
                     cornerRadius: Self.coverRadius)
             VStack(spacing: 1) {
                 if let t = player.current {
-                    Text(t.displayTitle).font(.system(size: 12, weight: .medium)).lineLimit(1)
-                    Text([t.artist, t.album].filter { !$0.isEmpty }.joined(separator: " — "))
-                        .font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
+                    MarqueeText(text: t.displayTitle, font: .system(size: 12, weight: .medium), height: 15)
+                    MarqueeText(text: [t.artist, t.album].filter { !$0.isEmpty }.joined(separator: " — "),
+                                font: .system(size: 11), height: 14)
+                        .foregroundStyle(.secondary)
                     Scrubber(duration: player.duration, position: clock.position) { player.seek(to: $0) }
                         .padding(.top, 2)
                 } else {
@@ -392,7 +396,9 @@ struct NowPlayingItem: ToolbarContent {
         }
     }
 
-    private var item: some View { NowPlayingDisplay().frame(minWidth: 360, idealWidth: 460) }
+    // Narrow enough that a small window keeps the transport and search;
+    // text that doesn't fit scrolls (MarqueeText).
+    private var item: some View { NowPlayingDisplay().frame(minWidth: 200, idealWidth: 460) }
 }
 
 struct ColumnBrowser: View {
@@ -447,7 +453,7 @@ struct BrowserColumn: View, Equatable {
             Divider()
             BrowserList(title: title, values: values, selection: $selection)
         }
-        .frame(minWidth: 140)
+        .frame(minWidth: 90)
     }
 }
 
@@ -919,5 +925,38 @@ struct AddSourceSheet: View {
             try model.addSecondary(remote: "", folder: url.path)
             dismiss()
         } catch { self.error = error.localizedDescription }
+    }
+}
+
+/// One line of text, centred. When it is wider than its room it scrolls
+/// slowly to its end and back, pausing at each end, as in iTunes' display.
+/// Text that fits doesn't move, so nothing animates.
+struct MarqueeText: View {
+    let text: String
+    let font: Font
+    let height: CGFloat
+    @State private var textWidth: CGFloat = 0
+    @State private var atEnd = false
+
+    var body: some View {
+        GeometryReader { g in
+            let overflow = max(0, textWidth - g.size.width)
+            Text(text).font(font).lineLimit(1).fixedSize()
+                .background(GeometryReader { t in
+                    Color.clear
+                        .onAppear { textWidth = t.size.width }
+                        .onChange(of: t.size.width) { _, w in textWidth = w }
+                })
+                .offset(x: overflow > 0 && atEnd ? -overflow : 0)
+                .frame(width: g.size.width, alignment: overflow > 0 ? .leading : .center)
+                .animation(overflow > 0
+                           ? .linear(duration: Double(overflow) / 25).delay(2).repeatForever(autoreverses: true)
+                           : nil,
+                           value: atEnd)
+                .onAppear { atEnd = true }
+        }
+        .frame(height: height)
+        .clipped()
+        .id(text) // a new track starts again from the left
     }
 }
