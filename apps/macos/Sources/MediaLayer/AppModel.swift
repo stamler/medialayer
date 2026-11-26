@@ -11,10 +11,19 @@ final class StatusModel: ObservableObject {
     @Published var status = CoreStatus()
 }
 
+/// Tells the views that show the search or the column browser that they
+/// changed. AppModel's search and browser properties are not @Published:
+/// a keystroke in the search field must redraw the search field, the
+/// column browser and the status bar, not the whole window.
+@MainActor
+final class BrowseSignal: ObservableObject {}
+
 /// The app's state: the library, the column browser's selection, the
-/// playlists and the player. The core's status is in `statusModel`.
+/// playlists and the player. The core's status is in `statusModel`; the
+/// search and the column browser announce changes through `browse`.
 @MainActor
 final class AppModel: ObservableObject {
+    let browse = BrowseSignal()
     let statusModel = StatusModel()
     /// The core's status as last polled. Views that show it observe
     /// `statusModel`; this model doesn't publish when it changes.
@@ -24,22 +33,28 @@ final class AppModel: ObservableObject {
     @Published private(set) var libraryError: String?
     @Published private(set) var tracks: [Track] = [] {
         didSet {
+            tracksGeneration += 1
+            browseRank = nil
             trackByID = Dictionary(tracks.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
             search.invalidate()
             searched = search.filter(tracks, query: searchText)
         }
     }
+    /// Raised each time `tracks` is set: the sorted library's cache key.
+    private var tracksGeneration = 0
     /// The library's present tracks by file id, for playlists.
     private(set) var trackByID: [String: Track] = [:]
     /// The toolbar's search text; the column browser and table show only
     /// the tracks it leaves.
-    @Published var searchText = "" {
+    var searchText = "" {
+        willSet { browse.objectWillChange.send() }
         didSet { if searchText != oldValue { applySearch() } }
     }
     /// Bumped by Edit > Find; the search field focuses itself on a change.
     @Published private(set) var searchFocusRequest = 0
     /// The tracks the search leaves: all of them when it is empty.
-    @Published private(set) var searched: [Track] = [] {
+    private(set) var searched: [Track] = [] {
+        willSet { browse.objectWillChange.send() }
         didSet {
             searchedIDs = isSearching ? Set(searched.map(\.id)) : nil
             searchedGeneration += 1
@@ -48,8 +63,8 @@ final class AppModel: ObservableObject {
     /// Raised each time `searched` is set, which every change to the tracks
     /// or the search does: part of visibleTracks's cache key.
     private var searchedGeneration = 0
-    /// The ids of `searched` while a search is on, for playlists; nil when
-    /// the search is empty.
+    /// The ids of `searched` while a search is on; nil when the search is
+    /// empty.
     private(set) var searchedIDs: Set<String>?
     /// Whether the search text has any word to search for.
     var isSearching: Bool { !TrackSearch.words(searchText).isEmpty }
@@ -58,10 +73,21 @@ final class AppModel: ObservableObject {
     @Published var choosingFolder = false
 
     // Column browser: nil means "All".
-    @Published var genre: String? { didSet { if genre != oldValue { composer = nil; artist = nil; album = nil } } }
-    @Published var composer: String? { didSet { if composer != oldValue { artist = nil; album = nil } } }
-    @Published var artist: String? { didSet { if artist != oldValue { album = nil } } }
-    @Published var album: String?
+    var genre: String? = nil {
+        willSet { browse.objectWillChange.send() }
+        didSet { if genre != oldValue { composer = nil; artist = nil; album = nil } }
+    }
+    var composer: String? = nil {
+        willSet { browse.objectWillChange.send() }
+        didSet { if composer != oldValue { artist = nil; album = nil } }
+    }
+    var artist: String? = nil {
+        willSet { browse.objectWillChange.send() }
+        didSet { if artist != oldValue { album = nil } }
+    }
+    var album: String? = nil {
+        willSet { browse.objectWillChange.send() }
+    }
     @Published var librarySortOrder = [KeyPathComparator(\Track.browseArtist), KeyPathComparator(\Track.album),
                                        KeyPathComparator(\Track.discNumber), KeyPathComparator(\Track.trackNumber)]
     /// A playlist's sort; empty means playlist order, the only order in
@@ -89,6 +115,16 @@ final class AppModel: ObservableObject {
     private var playlistsGeneration = 0
     /// visibleTracks's last result, and what it was computed from.
     private var visibleCache: (key: VisibleKey, tracks: [Track])?
+    /// Raised each time visibleTracks is computed anew.
+    private(set) var visibleVersion = 0
+    private var summaryCache = TrackSummary()
+    /// The library sorted by librarySortOrder, and what it was sorted from.
+    private var sortedCache: (tracks: Int, order: [KeyPathComparator<Track>], sorted: [Track])?
+    /// The column browser's four levels (see browseLevel).
+    private var browseLevels: [BrowseLevel?] = [nil, nil, nil, nil]
+    /// Every browser value of the library in display order, and each
+    /// one's place in it (see values).
+    private var browseRank: (rank: [String: Int], values: [String])?
     /// Debounces the sync that publishes playlist changes (Playlists.swift).
     var publishTask: Task<Void, Never>?
     /// The playlist whose name is being edited in the sidebar.
@@ -277,42 +313,118 @@ final class AppModel: ObservableObject {
     }
 
     // MARK: Column browser
+    //
+    // Each column lists the values of the tracks that the columns to its
+    // left leave: Genres lists the search's tracks, Composers the tracks
+    // of the chosen genre, and so on. Each level is kept until the search
+    // or a choice to its left changes, so a view that asks again, or a
+    // change in Albums, sorts nothing.
 
-    private func values(_ tracks: [Track], _ key: (Track) -> String) -> [String] {
-        Array(Set(tracks.map(key).filter { !$0.isEmpty })).sorted {
-            $0.localizedStandardCompare($1) == .orderedAscending
+    /// One column's input tracks and the values it lists.
+    private struct BrowseLevel {
+        var key: BrowseKey
+        var tracks: [Track]
+        var values: [String]
+    }
+
+    private struct BrowseKey: Equatable {
+        var searched: Int
+        var picks: [String?] // the choices in the columns to the left
+    }
+
+    /// The field that browser column `level` lists: 0 Genres, 1 Composers,
+    /// 2 Artists, 3 Albums.
+    private static func browseValue(_ t: Track, _ level: Int) -> String {
+        switch level {
+        case 0: return t.genre
+        case 1: return t.composer
+        case 2: return t.browseArtist
+        default: return t.album
         }
     }
 
-    var genres: [String] { values(searched, \.genre) }
-    private var byGenre: [Track] { genre.map { g in searched.filter { $0.genre == g } } ?? searched }
-    var composers: [String] { values(byGenre, \.composer) }
-    private var byComposer: [Track] { composer.map { c in byGenre.filter { $0.composer == c } } ?? byGenre }
-    var artists: [String] { values(byComposer, \.browseArtist) }
-    private var byArtist: [Track] { artist.map { a in byComposer.filter { $0.browseArtist == a } } ?? byComposer }
-    var albums: [String] { values(byArtist, \.album) }
+    private func browseLevel(_ level: Int) -> BrowseLevel {
+        let picks: [String?] = [genre, composer, artist]
+        let key = BrowseKey(searched: searchedGeneration, picks: Array(picks.prefix(level)))
+        if let cached = browseLevels[level], cached.key == key { return cached }
+        var input = searched
+        if level > 0 {
+            input = browseLevel(level - 1).tracks
+            if let pick = picks[level - 1] {
+                input = input.filter { Self.browseValue($0, level - 1) == pick }
+            }
+        }
+        let result = BrowseLevel(key: key, tracks: input, values: values(input, level))
+        browseLevels[level] = result
+        return result
+    }
 
-    /// What visibleTracks depends on. The model publishes on every status
-    /// poll, so the views ask for it far more often than it changes.
+    /// The distinct, non-empty values of one field, in Finder order. The
+    /// library's values are sorted once per change of the tracks; a list
+    /// then sorts their places, which are integers.
+    private func values(_ tracks: [Track], _ level: Int) -> [String] {
+        let ranked = rankedBrowseValues()
+        var seen = Set<Int>()
+        for t in tracks {
+            if let i = ranked.rank[Self.browseValue(t, level)] { seen.insert(i) }
+        }
+        return seen.sorted().map { ranked.values[$0] }
+    }
+
+    private func rankedBrowseValues() -> (rank: [String: Int], values: [String]) {
+        if let r = browseRank { return r }
+        var all = Set<String>()
+        for t in tracks {
+            for level in 0..<4 { all.insert(Self.browseValue(t, level)) }
+        }
+        all.remove("")
+        let sorted = all.sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+        var rank = [String: Int](minimumCapacity: sorted.count)
+        for (i, v) in sorted.enumerated() { rank[v] = i }
+        browseRank = (rank, sorted)
+        return (rank, sorted)
+    }
+
+    var genres: [String] { browseLevel(0).values }
+    var composers: [String] { browseLevel(1).values }
+    var artists: [String] { browseLevel(2).values }
+    var albums: [String] { browseLevel(3).values }
+
+    /// What visibleTracks depends on. The views ask for it far more often
+    /// than it changes. Parts that don't apply to what the sidebar shows
+    /// are left at their defaults, so changing them recomputes nothing.
     private struct VisibleKey: Equatable {
         var searched: Int
-        var playlists: Int
+        var playlists = 0
         var sidebar: SidebarItem
         var genre, composer, artist, album: String?
-        var librarySort: [KeyPathComparator<Track>]
-        var playlistSort: [KeyPathComparator<Track>]
+        var sort: [KeyPathComparator<Track>]
     }
 
     /// The tracks the browser or the playlist shows, in the table's order,
     /// kept until something they depend on changes.
     var visibleTracks: [Track] {
-        let key = VisibleKey(searched: searchedGeneration, playlists: playlistsGeneration, sidebar: sidebarSelection,
-                             genre: genre, composer: composer, artist: artist, album: album,
-                             librarySort: librarySortOrder, playlistSort: playlistSortOrder)
+        var key = VisibleKey(searched: searchedGeneration, sidebar: sidebarSelection, sort: sortOrder)
+        if selectedPlaylistID != nil {
+            key.playlists = playlistsGeneration
+        } else {
+            key.genre = genre
+            key.composer = composer
+            key.artist = artist
+            key.album = album
+        }
         if let cache = visibleCache, cache.key == key { return cache.tracks }
         let result = computeVisibleTracks()
         visibleCache = (key, result)
+        visibleVersion += 1
+        summaryCache = TrackSummary(result)
         return result
+    }
+
+    /// The count, length and size of visibleTracks, for the status bar.
+    var visibleSummary: TrackSummary {
+        _ = visibleTracks
+        return summaryCache
     }
 
     private func computeVisibleTracks() -> [Track] {
@@ -322,14 +434,46 @@ final class AppModel: ObservableObject {
             if let keep = searchedIDs { list = list.filter { keep.contains($0.id) } }
             return playlistSortOrder.isEmpty ? list : list.sorted(using: playlistSortOrder)
         }
-        let selected = album.map { a in byArtist.filter { $0.album == a } } ?? byArtist
-        return selected.sorted(using: librarySortOrder)
+        // Filtering keeps the order, so the library is sorted once per
+        // change of the tracks or the sort, not once per keystroke.
+        let sorted = sortedLibrary()
+        let keep = searchedIDs
+        let g = genre, c = composer, a = artist, al = album
+        if keep == nil, g == nil, c == nil, a == nil, al == nil { return sorted }
+        return sorted.filter { t in
+            (keep?.contains(t.id) ?? true) && (g == nil || t.genre == g) && (c == nil || t.composer == c)
+                && (a == nil || t.browseArtist == a) && (al == nil || t.album == al)
+        }
+    }
+
+    private func sortedLibrary() -> [Track] {
+        if let c = sortedCache, c.tracks == tracksGeneration, c.order == librarySortOrder { return c.sorted }
+        let sorted = tracks.sorted(using: librarySortOrder)
+        sortedCache = (tracksGeneration, librarySortOrder, sorted)
+        return sorted
     }
 
     func play(_ track: Track) {
         let queue = visibleTracks
         guard let base = URL(string: status.streamBase) else { return }
         player.play(queue: queue, startAt: queue.firstIndex(of: track) ?? 0, base: base)
+    }
+}
+
+/// A list of tracks' count, length and size, as the status bar shows it.
+struct TrackSummary: Equatable {
+    var count = 0
+    var durationMS: Int64 = 0
+    var bytes: Int64 = 0
+
+    init() {}
+
+    init(_ tracks: [Track]) {
+        count = tracks.count
+        for t in tracks {
+            durationMS += t.durationMS
+            bytes += t.size
+        }
     }
 }
 

@@ -14,6 +14,7 @@ struct MediaLayerApp: App {
             ContentView()
                 .environmentObject(model)
                 .environmentObject(model.statusModel)
+                .environmentObject(model.browse)
                 .environmentObject(model.player)
                 .environmentObject(model.player.clock)
                 .environmentObject(songColumns)
@@ -213,6 +214,7 @@ struct DriveFolderPicker: View {
 
 struct LibraryView: View {
     @EnvironmentObject var model: AppModel
+    @EnvironmentObject var browse: BrowseSignal // the table shows the search's tracks
     @State private var selection = Set<Track.ID>()
 
     var body: some View {
@@ -235,7 +237,7 @@ struct LibraryView: View {
                     }
                     .onDeleteCommand(perform: removeFromPlaylist)
             }
-            .safeAreaInset(edge: .bottom, spacing: 0) { StatusBar(tracks: visible) }
+            .safeAreaInset(edge: .bottom, spacing: 0) { StatusBar() }
             // On the detail column, so the items sit in its part of the
             // toolbar, after the sidebar's toggle.
             .toolbar {
@@ -403,16 +405,19 @@ struct NowPlayingItem: ToolbarContent {
 
 struct ColumnBrowser: View {
     @EnvironmentObject var model: AppModel
+    @EnvironmentObject var browse: BrowseSignal
 
     var body: some View {
+        // Equatable, so a column whose values and choice are unchanged
+        // isn't rebuilt when another column changes.
         HStack(spacing: 0) {
-            BrowserColumn(title: "Genres", values: model.genres, selection: $model.genre)
+            BrowserColumn(title: "Genres", values: model.genres, selection: $model.genre).equatable()
             columnDivider
-            BrowserColumn(title: "Composers", values: model.composers, selection: $model.composer)
+            BrowserColumn(title: "Composers", values: model.composers, selection: $model.composer).equatable()
             columnDivider
-            BrowserColumn(title: "Artists", values: model.artists, selection: $model.artist)
+            BrowserColumn(title: "Artists", values: model.artists, selection: $model.artist).equatable()
             columnDivider
-            BrowserColumn(title: "Albums", values: model.albums, selection: $model.album)
+            BrowserColumn(title: "Albums", values: model.albums, selection: $model.album).equatable()
         }
     }
 
@@ -423,11 +428,15 @@ struct ColumnBrowser: View {
     }
 }
 
-struct BrowserColumn: View {
+struct BrowserColumn: View, Equatable {
     static let headerHeight: CGFloat = 22
     let title: String
     let values: [String]
     @Binding var selection: String?
+
+    static func == (a: BrowserColumn, b: BrowserColumn) -> Bool {
+        a.title == b.title && a.selection == b.selection && a.values == b.values
+    }
 
     // A change waiting to be applied (see listSelection).
     @State private var pending: String??
@@ -495,11 +504,10 @@ struct ArtView: View {
 struct StatusBar: View {
     @EnvironmentObject var model: AppModel
     @EnvironmentObject var core: StatusModel
-    let tracks: [Track]
+    @EnvironmentObject var browse: BrowseSignal // the summary follows the search
 
     var body: some View {
-        let ms = tracks.reduce(Int64(0)) { $0 + $1.durationMS }
-        let bytes = tracks.reduce(Int64(0)) { $0 + $1.size }
+        let s = model.visibleSummary
         HStack(spacing: 10) {
             SourcesBar()
             jobText.foregroundStyle(.secondary).lineLimit(1)
@@ -507,7 +515,7 @@ struct StatusBar: View {
                 Image(systemName: "exclamationmark.circle").foregroundStyle(.orange).help(n)
             }
             Spacer()
-            Text("\(tracks.count) \(tracks.count == 1 ? "song" : "songs"), \(formatLong(ms)), \(ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file))")
+            Text("\(s.count) \(s.count == 1 ? "song" : "songs"), \(formatLong(s.durationMS)), \(ByteCountFormatter.string(fromByteCount: s.bytes, countStyle: .file))")
             Spacer()
             StartLatency()
         }

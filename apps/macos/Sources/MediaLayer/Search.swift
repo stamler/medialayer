@@ -79,6 +79,7 @@ struct SearchToolbarItem: ToolbarContent {
 
 private struct SearchBox: View {
     @EnvironmentObject var model: AppModel
+    @EnvironmentObject var browse: BrowseSignal // searchText announces itself here
 
     var body: some View {
         SearchField(text: $model.searchText, focusRequest: model.searchFocusRequest)
