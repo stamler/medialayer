@@ -23,6 +23,8 @@ final class AppModel: ObservableObject {
     @Published private(set) var searchFocusRequest = 0
     /// The tracks the search leaves: all of them when it is empty.
     @Published private(set) var searched: [Track] = []
+    /// What the Clouds column needs from the index (see Clouds.swift).
+    @Published private(set) var cloudIndex = CloudIndex()
     @Published var choosingFolder = false
 
     // Column browser: nil means "All".
@@ -110,7 +112,9 @@ final class AppModel: ObservableObject {
                 art.db = db
                 art.artDir = status.artDir
             }
-            tracks = try db?.tracks() ?? []
+            let read = try db?.tracksWithVersion()
+            cloudIndex = CloudIndex(tracks: read?.tracks ?? [], version: read?.version ?? IndexVersion())
+            tracks = read?.tracks ?? []
             loadedEpoch = status.dbEpoch
             loadedCount = status.tracks
             loadedFinish = status.job.finished
@@ -134,6 +138,7 @@ final class AppModel: ObservableObject {
         db = nil
         art.db = nil
         tracks = []
+        cloudIndex = CloudIndex()
         loadedEpoch = -1
         try Core.setFolder(folder)
         refresh()

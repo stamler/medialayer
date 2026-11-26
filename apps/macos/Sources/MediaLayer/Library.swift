@@ -23,10 +23,21 @@ struct Track: Identifiable, Hashable {
     let discNumber: Int
     let year: String
     let artSHA: String? // hex SHA-256 of the cover, front cover first
+    let mtimeMS: Int64 // the file's modification time on the primary
 
     /// The artist the Artists column groups by, as iTunes does.
     var browseArtist: String { albumArtist.isEmpty ? artist : albumArtist }
     var displayTitle: String { title.isEmpty ? (path as NSString).lastPathComponent : title }
+    /// Average bit rate in kbit/s, from the file's size, so it includes
+    /// tags and cover art.
+    var bitRate: Int64 { durationMS > 0 ? size * 8 / durationMS : 0 }
+}
+
+/// The index's version, read with the tracks. `dirty` means the index has
+/// changed since that version was made.
+struct IndexVersion: Equatable {
+    var version = 0
+    var dirty = false
 }
 
 /// Reads the index the Go core writes. The database is in WAL mode, so
@@ -55,7 +66,8 @@ final class LibraryDB {
         }.joined(separator: ", ")
         let sql = """
             SELECT f.id, f.path, f.format, f.size, f.duration_ms, f.sample_rate, f.bit_depth, \(tags),
-              (SELECT hex(art_sha256) FROM file_art WHERE file_id = f.id ORDER BY role <> 3, role LIMIT 1)
+              (SELECT hex(art_sha256) FROM file_art WHERE file_id = f.id ORDER BY role <> 3, role LIMIT 1),
+              f.mtime
             FROM file f WHERE f.missing = 0
             """
         var stmt: OpaquePointer?
@@ -78,12 +90,42 @@ final class LibraryDB {
                 title: text(7), artist: text(8), albumArtist: text(9), album: text(10),
                 genre: text(11), composer: text(12),
                 trackNumber: leadingInt(text(13)), discNumber: leadingInt(text(14)),
-                year: String(text(15).prefix(4)), artSHA: art.isEmpty ? nil : art
+                year: String(text(15).prefix(4)), artSHA: art.isEmpty ? nil : art,
+                mtimeMS: sqlite3_column_int64(stmt, 17)
             ))
             rc = sqlite3_step(stmt)
         }
         guard rc == SQLITE_DONE else { throw CoreError(message: String(cString: sqlite3_errmsg(db))) }
         return out
+    }
+
+    /// The tracks and the index version they belong to, read in one
+    /// transaction so the indexer can't change the index in between.
+    func tracksWithVersion() throws -> (tracks: [Track], version: IndexVersion) {
+        guard sqlite3_exec(db, "BEGIN", nil, nil, nil) == SQLITE_OK else {
+            throw CoreError(message: String(cString: sqlite3_errmsg(db)))
+        }
+        defer {
+            // A transaction left open would pin this read's snapshot, and
+            // the app would never see the index change again.
+            if sqlite3_exec(db, "COMMIT", nil, nil, nil) != SQLITE_OK {
+                sqlite3_exec(db, "ROLLBACK", nil, nil, nil)
+            }
+        }
+        var version = IndexVersion()
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, "SELECT key, value FROM meta WHERE key IN ('version', 'dirty')",
+                                 -1, &stmt, nil) == SQLITE_OK else {
+            throw CoreError(message: String(cString: sqlite3_errmsg(db)))
+        }
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            let key = sqlite3_column_text(stmt, 0).map { String(cString: $0) } ?? ""
+            let value = sqlite3_column_text(stmt, 1).map { String(cString: $0) } ?? ""
+            if key == "version" { version.version = Int(value) ?? 0 }
+            if key == "dirty" { version.dirty = value == "1" }
+        }
+        sqlite3_finalize(stmt)
+        return (try tracks(), version)
     }
 
     /// Where an image lives in the art packs.
@@ -101,46 +143,106 @@ final class LibraryDB {
 }
 
 /// Loads covers from the art packs and keeps small thumbnails in memory.
+/// The cache is bounded by the bytes of its decoded images. Requests for
+/// one image at one size share a single decode, and a request nobody
+/// waits for any more (its row scrolled away) is cancelled before it runs.
+@MainActor
 final class ArtCache {
-    private let cache = NSCache<NSString, NSImage>()
+    private let cache: NSCache<NSString, NSImage> = {
+        let c = NSCache<NSString, NSImage>()
+        c.totalCostLimit = 32 << 20 // decoded bytes; a 36-pixel thumbnail is about 5 KB
+        c.countLimit = 4000
+        return c
+    }()
     private let queue: OperationQueue = {
         let q = OperationQueue()
         q.maxConcurrentOperationCount = 4
         q.qualityOfService = .userInitiated
         return q
     }()
+
+    /// A decode under way and the callers waiting for it.
+    private struct Request {
+        let op: Operation
+        var waiters: [Int: CheckedContinuation<NSImage?, Never>]
+    }
+    private var requests: [NSString: Request] = [:]
+    private var nextWaiter = 0
+
     var db: LibraryDB?
     var artDir = ""
 
+    private static func key(_ sha: String, _ size: Int) -> NSString { "\(sha)-\(size)" as NSString }
+
     func cached(_ sha: String, size: Int) -> NSImage? {
-        cache.object(forKey: "\(sha)-\(size)" as NSString)
+        cache.object(forKey: Self.key(sha, size))
     }
 
-    /// Loads a thumbnail at most `size` pixels on its long side.
-    func load(_ sha: String, size: Int, done: @escaping (NSImage?) -> Void) {
-        let key = "\(sha)-\(size)" as NSString
-        if let image = cache.object(forKey: key) { return done(image) }
-        guard let db, !artDir.isEmpty else { return done(nil) }
+    /// A thumbnail at most `size` pixels on its long side, or nil if there
+    /// is none or the calling task was cancelled.
+    func image(_ sha: String, size: Int) async -> NSImage? {
+        let key = Self.key(sha, size)
+        if let hit = cache.object(forKey: key) { return hit }
+        guard let db, !artDir.isEmpty else { return nil }
         let dir = artDir
-        queue.addOperation { [cache] in
-            var image: NSImage?
-            if let loc = db.artLocation(sha: sha),
-               let fh = FileHandle(forReadingAtPath: (dir as NSString).appendingPathComponent(loc.pack)) {
-                defer { try? fh.close() }
-                try? fh.seek(toOffset: UInt64(loc.offset))
-                if let data = try? fh.read(upToCount: Int(loc.length)),
-                   let src = CGImageSourceCreateWithData(data as CFData, nil),
-                   let cg = CGImageSourceCreateThumbnailAtIndex(src, 0, [
-                       kCGImageSourceCreateThumbnailFromImageAlways: true,
-                       kCGImageSourceThumbnailMaxPixelSize: size,
-                       kCGImageSourceCreateThumbnailWithTransform: true,
-                   ] as CFDictionary) {
-                    image = NSImage(cgImage: cg, size: .zero)
-                    cache.setObject(image!, forKey: key)
+        let waiter = nextWaiter
+        nextWaiter += 1
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { (done: CheckedContinuation<NSImage?, Never>) in
+                if Task.isCancelled { return done.resume(returning: nil) }
+                if requests[key] != nil {
+                    requests[key]!.waiters[waiter] = done
+                    return
                 }
+                let op = BlockOperation()
+                op.addExecutionBlock { [cache, weak op] in
+                    guard let op, !op.isCancelled else { return }
+                    let image = Self.decode(db: db, dir: dir, sha: sha, size: size)
+                    if let image { cache.setObject(image, forKey: key, cost: size * size * 4) } // at most
+                    DispatchQueue.main.async {
+                        MainActor.assumeIsolated { self.finish(key, op: op, image: image) }
+                    }
+                }
+                requests[key] = Request(op: op, waiters: [waiter: done])
+                queue.addOperation(op)
             }
-            DispatchQueue.main.async { done(image) }
+        } onCancel: {
+            Task { @MainActor in self.cancel(key, waiter: waiter) }
         }
+    }
+
+    private func finish(_ key: NSString, op: Operation, image: NSImage?) {
+        guard let r = requests[key], r.op === op else { return } // cancelled, or replaced since
+        requests[key] = nil
+        for done in r.waiters.values { done.resume(returning: image) }
+    }
+
+    private func cancel(_ key: NSString, waiter: Int) {
+        guard var r = requests[key], let done = r.waiters.removeValue(forKey: waiter) else { return }
+        done.resume(returning: nil)
+        if r.waiters.isEmpty {
+            r.op.cancel()
+            requests[key] = nil
+        } else {
+            requests[key] = r
+        }
+    }
+
+    nonisolated private static func decode(db: LibraryDB, dir: String, sha: String, size: Int) -> NSImage? {
+        guard let loc = db.artLocation(sha: sha),
+              let fh = FileHandle(forReadingAtPath: (dir as NSString).appendingPathComponent(loc.pack))
+        else { return nil }
+        defer { try? fh.close() }
+        try? fh.seek(toOffset: UInt64(loc.offset))
+        guard let data = try? fh.read(upToCount: Int(loc.length)),
+              let src = CGImageSourceCreateWithData(data as CFData, nil),
+              let cg = CGImageSourceCreateThumbnailAtIndex(src, 0, [
+                  kCGImageSourceCreateThumbnailFromImageAlways: true,
+                  kCGImageSourceThumbnailMaxPixelSize: size,
+                  kCGImageSourceCreateThumbnailWithTransform: true,
+              ] as CFDictionary)
+        else { return nil }
+        return NSImage(cgImage: cg, size: .zero)
     }
 }
 

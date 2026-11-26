@@ -75,6 +75,7 @@ type mirrorState struct {
 	copies, replaces, deletes int    // pending when paused, else done in the last sync
 	err                       string
 	synced                    time.Time
+	version                   int // the index version the last good sync copied
 	// pending identifies the removals and replacements a pause is for;
 	// approved is the one the user allowed, for the next sync only.
 	pending, approved string
@@ -101,6 +102,10 @@ type SourceStatus struct {
 	Deletes  int       `json:"deletes"`
 	Error    string    `json:"error,omitempty"`
 	Synced   time.Time `json:"synced,omitzero"`
+	// Version is the index version a synced secondary matches. The app
+	// compares it with the index it reads to tell whether the secondary
+	// holds every track it lists.
+	Version int `json:"version,omitempty"`
 }
 
 // sourcesLocked lists the primary and the secondaries. The caller holds
@@ -120,6 +125,9 @@ func (c *Core) sourcesLocked() []SourceStatus {
 		st := SourceStatus{ID: s.ID, Type: s.sourceType(), Remote: s.Remote, Folder: s.Folder}
 		if m := c.mirrors[s.ID]; m != nil {
 			st.State, st.Error, st.Synced = m.state, m.err, m.synced
+			if m.state == MirrorSynced {
+				st.Version = m.version
+			}
 			st.Copies, st.Replaces, st.Deletes = m.copies, m.replaces, m.deletes
 		}
 		out = append(out, st)
@@ -826,7 +834,7 @@ func (c *Core) mirror(ctx context.Context, f fs.Fs, src *listing, repo *repoReco
 		}
 	}
 	c.setMirror(s.ID, func(m *mirrorState) {
-		m.state, m.err, m.synced, m.pending = MirrorSynced, "", time.Now().UTC(), ""
+		m.state, m.err, m.synced, m.pending, m.version = MirrorSynced, "", time.Now().UTC(), "", version
 		m.copies, m.replaces, m.deletes = len(copies), len(replaces), len(deletes)
 	})
 	return nil

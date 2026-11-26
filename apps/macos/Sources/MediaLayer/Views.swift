@@ -4,6 +4,7 @@ import SwiftUI
 @main
 struct MediaLayerApp: App {
     @StateObject private var model = AppModel()
+    @StateObject private var songColumns = SongColumns()
 
     var body: some Scene {
         WindowGroup("MediaLayer") {
@@ -11,6 +12,7 @@ struct MediaLayerApp: App {
                 .environmentObject(model)
                 .environmentObject(model.player)
                 .environmentObject(model.player.clock)
+                .environmentObject(songColumns)
                 .frame(minWidth: 900, minHeight: 560)
         }
         .commands {
@@ -19,6 +21,7 @@ struct MediaLayerApp: App {
                     .keyboardShortcut("f")
                     .disabled(model.status.folder.isEmpty)
             }
+            CommandGroup(after: .toolbar) { ColumnsMenu(columns: songColumns) }
             CommandMenu("Library") {
                 Button("Update Library") { model.resync() }
                     .keyboardShortcut("r")
@@ -420,59 +423,6 @@ struct BrowserColumn: View {
     }
 }
 
-struct SongsTable: View {
-    @EnvironmentObject var model: AppModel
-    @EnvironmentObject var player: Player
-    let tracks: [Track]
-    @Binding var selection: Set<Track.ID>
-
-    var body: some View {
-        Table(tracks, selection: $selection, sortOrder: $model.sortOrder) {
-            TableColumn("") { t in
-                ZStack {
-                    ArtView(sha: t.artSHA, size: 18)
-                    if player.current?.id == t.id {
-                        Image(systemName: "speaker.wave.2.fill").font(.caption2)
-                            .foregroundStyle(.white).shadow(radius: 2)
-                    }
-                }
-            }
-            .width(24)
-            TableColumn("Name", value: \.displayTitle)
-                .width(min: 120, ideal: 240)
-            TableColumn("Time", value: \.durationMS) { t in
-                Text(formatDuration(t.durationMS)).monospacedDigit()
-            }
-            .width(50)
-            TableColumn("Artist", value: \.artist).width(min: 80, ideal: 160)
-            TableColumn("Album", value: \.album).width(min: 80, ideal: 180)
-            TableColumn("Genre", value: \.genre).width(min: 60, ideal: 90)
-            TableColumn("Year", value: \.year).width(44)
-            TableColumn("#", value: \.trackNumber) { t in
-                Text(t.trackNumber > 0 ? "\(t.trackNumber)" : "").monospacedDigit()
-            }
-            .width(30)
-            TableColumn("Kind", value: \.format) { t in Text(kind(t)) }.width(min: 60, ideal: 90)
-        }
-        .contextMenu(forSelectionType: Track.ID.self) { ids in
-            if let id = ids.first, let t = tracks.first(where: { $0.id == id }) {
-                Button("Play") { model.play(t) }
-            }
-        } primaryAction: { ids in
-            if let id = ids.first, let t = tracks.first(where: { $0.id == id }) { model.play(t) }
-        }
-    }
-
-    private func kind(_ t: Track) -> String {
-        switch t.format {
-        case "flac" where t.bitDepth > 0 && t.sampleRate > 0:
-            return "FLAC \(t.bitDepth)/\(t.sampleRate / 1000)"
-        case "mp3": return "MP3"
-        default: return t.format.uppercased()
-        }
-    }
-}
-
 struct ArtView: View {
     @EnvironmentObject var model: AppModel
     let sha: String?
@@ -496,9 +446,7 @@ struct ArtView: View {
             let px = Int(size * 2) // Retina
             if let hit = model.art.cached(sha, size: px) { image = hit; return }
             image = nil
-            let loaded = await withCheckedContinuation { done in
-                model.art.load(sha, size: px) { done.resume(returning: $0) }
-            }
+            let loaded = await model.art.image(sha, size: px)
             if !Task.isCancelled { image = loaded } // not a cover since replaced
         }
     }
