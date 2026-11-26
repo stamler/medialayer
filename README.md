@@ -43,8 +43,10 @@ The macOS app ([apps/macos](apps/macos/README.md)):
 - **Second sources.** Add Source copies the whole library to another Drive
   folder, in the same or another Google account, or to a local folder. Sync
   is one way, primary to secondaries. Removed and replaced files go to the
-  secondary's trash for 30 days. A sync pauses for review when removals and replacements exceed 5% of the
-  library's files.
+  secondary's trash for 30 days. A sync pauses for review when a
+  secondary's removals and replacements over the last 24 hours would pass
+  5% of the library's files or 30 files, whichever is smaller. Tag edits,
+  where the audio is unchanged, don't count.
   Every secondary also gets the current index, so each one is a complete
   library. Only one device syncs a library at a time; another device
   shows who is syncing and syncs after it (see

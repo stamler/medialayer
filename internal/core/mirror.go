@@ -35,22 +35,26 @@ import (
 //   - A file that differs on the secondary, because it changed on the
 //     primary or was edited on the secondary directly, is moved to trash
 //     before the primary's copy replaces it.
-//   - If one sync would remove or replace more than 5% of the library's
-//     files, it pauses and asks before changing anything.
+//   - If the removals and replacements on a secondary over the last 24
+//     hours would pass the day's limit, the smaller of 5% of the
+//     library's files and 30 files, the sync pauses and asks before
+//     changing anything. A replacement whose audio is the same on both
+//     sides (a tag edit) doesn't count.
 //   - The secondary gets the primary's repo.json, snapshot and art packs,
 //     so it can open the library on its own and knows which cloud is the
 //     primary. A secondary whose repo.json names a newer generation, or a
 //     different library, is never written to.
-//
-// Not yet: the 5% limit counted over a day rather than one sync.
 
 const (
 	trashDir   = repoDir + "/trash"
 	trashStamp = "20060102T150405Z"
 	trashKeep  = 30 * 24 * time.Hour
-	// massChange is the share of the library's files that one sync may
-	// remove or replace on a secondary without asking.
-	massChange = 0.05
+	// massChangePercent is the share of the library's files, and
+	// massChangeMax the number of files, that may be removed or replaced
+	// on a secondary in massWindow without asking. The smaller wins.
+	massChangePercent = 5
+	massChangeMax     = 30
+	massWindow        = 24 * time.Hour
 )
 
 // source is a secondary in settings.json.
@@ -72,6 +76,9 @@ func (s source) sourceType() string {
 type mirrorState struct {
 	state                     string // MirrorSyncing, MirrorSynced, MirrorPaused or MirrorError
 	copies, replaces, deletes int    // pending when paused, else done in the last sync
+	tagOnly                   int    // of replaces, those only retagged
+	recent                    int    // when paused: changes counted in the last day before this sync
+	limit                     int    // when paused: the most changes a day allows; -1 when any change asks
 	err                       string
 	synced                    time.Time
 	version                   int // the index version the last good sync copied
@@ -90,17 +97,25 @@ const (
 
 // SourceStatus is one of the library's folders, primary first.
 type SourceStatus struct {
-	ID       string    `json:"id"`
-	Type     string    `json:"type"`   // rclone backend: "drive", "local", ...
-	Remote   string    `json:"remote"` // "" for a local folder
-	Folder   string    `json:"folder"`
-	Primary  bool      `json:"primary"`
-	State    string    `json:"state,omitempty"`
-	Copies   int       `json:"copies"`
-	Replaces int       `json:"replaces"`
-	Deletes  int       `json:"deletes"`
-	Error    string    `json:"error,omitempty"`
-	Synced   time.Time `json:"synced,omitzero"`
+	ID       string `json:"id"`
+	Type     string `json:"type"`   // rclone backend: "drive", "local", ...
+	Remote   string `json:"remote"` // "" for a local folder
+	Folder   string `json:"folder"`
+	Primary  bool   `json:"primary"`
+	State    string `json:"state,omitempty"`
+	Copies   int    `json:"copies"`
+	Replaces int    `json:"replaces"`
+	Deletes  int    `json:"deletes"`
+	// TagOnly is how many of Replaces are tag edits, with the same audio
+	// on both sides. They don't count toward the day's limit.
+	TagOnly int `json:"tag_only,omitempty"`
+	// Recent, when paused, is how many removals and replacements were made
+	// in the last 24 hours before this sync, and Limit the most the day
+	// allows without asking.
+	Recent int       `json:"recent,omitempty"`
+	Limit  *int      `json:"limit,omitempty"`
+	Error  string    `json:"error,omitempty"`
+	Synced time.Time `json:"synced,omitzero"`
 	// Version is the index version a synced secondary matches. The app
 	// compares it with the index it reads to tell whether the secondary
 	// holds every track it lists.
@@ -127,7 +142,11 @@ func (c *Core) sourcesLocked() []SourceStatus {
 			if m.state == MirrorSynced {
 				st.Version = m.version
 			}
-			st.Copies, st.Replaces, st.Deletes = m.copies, m.replaces, m.deletes
+			st.Copies, st.Replaces, st.Deletes, st.TagOnly = m.copies, m.replaces, m.deletes, m.tagOnly
+			if m.state == MirrorPaused && m.limit >= 0 {
+				limit := m.limit
+				st.Recent, st.Limit = m.recent, &limit
+			}
 		}
 		out = append(out, st)
 	}
@@ -613,6 +632,38 @@ type memberRecord struct {
 	// Generation is the primary's generation it was synced under.
 	Generation int64     `json:"generation,omitempty"`
 	SyncedAt   time.Time `json:"synced_at,omitzero"`
+	// Recent are the removals and replacements counted toward the day's
+	// limit, one entry per sync, over the last 24 hours. Any device
+	// syncing this folder reads and extends it.
+	Recent []recentChange `json:"recent,omitempty"`
+}
+
+// recentChange is one sync's removals and replacements that counted
+// toward the day's limit.
+type recentChange struct {
+	At      time.Time `json:"at"`
+	Changes int       `json:"changes"`
+}
+
+// recentSince keeps the entries after since and returns them with their
+// total.
+func recentSince(rs []recentChange, since time.Time) ([]recentChange, int) {
+	var out []recentChange
+	n := 0
+	for _, r := range rs {
+		if r.At.After(since) && r.Changes > 0 {
+			out = append(out, r)
+			n += r.Changes
+		}
+	}
+	return out, n
+}
+
+// dailyLimit is the most removals and replacements a secondary may take
+// in massWindow without asking: the smaller of 5% of the library's files
+// (rounded down, as a count of files) and massChangeMax.
+func dailyLimit(files int) int {
+	return min(files*massChangePercent/100, massChangeMax)
 }
 
 // readSmall reads a small file.
@@ -765,21 +816,53 @@ func (c *Core) mirror(ctx context.Context, f fs.Fs, src *listing, repo *repoReco
 	c.mu.Lock()
 	strict := c.settings.ReviewFirst == s.ID // a demoted primary: any change asks first
 	c.mu.Unlock()
-	if changes > 0 && (strict || float64(changes) > massChange*float64(max(len(src.files), 1))) && sig != approved {
+	// The day's limit counts this sync's removals and replacements with
+	// those of the last 24 hours, as member.json records them. Tag edits
+	// are found only when they could keep the sync from pausing, as that
+	// reads both copies of each replaced file.
+	now := time.Now().UTC()
+	recent, before := recentSince(t.member.Recent, now.Add(-massWindow))
+	limit := dailyLimit(len(src.files))
+	counted := changes
+	var tagOnly map[string]bool
+	// When the removals alone pass the limit, the sync pauses whatever
+	// the replacements are, so nothing is read.
+	if !strict && sig != approved && before+counted > limit && before+len(deletes) <= limit && len(replaces) > 0 {
+		var err error
+		if tagOnly, err = c.tagOnly(ctx, f, dst, src, replaces, lookup); err != nil {
+			return err
+		}
+		counted -= len(tagOnly)
+	}
+	if changes > 0 && sig != approved && (strict || (counted > 0 && before+counted > limit)) {
 		c.setMirror(s.ID, func(m *mirrorState) {
 			m.state, m.pending = MirrorPaused, sig
-			m.copies, m.replaces, m.deletes = len(copies), len(replaces), len(deletes)
+			m.copies, m.replaces, m.deletes, m.tagOnly = len(copies), len(replaces), len(deletes), len(tagOnly)
+			m.recent, m.limit = before, limit
+			if strict {
+				m.limit = -1 // any change asks, whatever the day's count
+			}
 		})
 		if t.member.State != "paused" {
 			m := t.member
-			m.LibraryID, m.Replica, m.State = repo.LibraryID, s.ID, "paused"
+			m.LibraryID, m.Replica, m.State, m.Recent = repo.LibraryID, s.ID, "paused", recent
 			m.Generation = repo.Generation
 			return writeMember(m) // the snapshot and time it last matched stay
 		}
 		return nil
 	}
 
-	member := memberRecord{LibraryID: repo.LibraryID, Replica: s.ID, State: "copying", Generation: repo.Generation}
+	// Changes the user approved were reviewed, so the day starts again
+	// after them; others join the day's count, recorded before they are
+	// made so a sync cut short still counts them.
+	switch {
+	case changes > 0 && sig == approved:
+		recent = nil
+	case counted > 0:
+		recent = append(recent, recentChange{At: now, Changes: counted})
+	}
+	member := memberRecord{LibraryID: repo.LibraryID, Replica: s.ID, State: "copying", Generation: repo.Generation,
+		Recent: recent}
 	if len(copies)+changes > 0 || t.member.State != "synced" || t.member.Snapshot != snapName ||
 		t.member.Generation != repo.Generation {
 		if err := writeMember(member); err != nil {
@@ -858,7 +941,7 @@ func (c *Core) mirror(ctx context.Context, f fs.Fs, src *listing, repo *repoReco
 	}
 	c.setMirror(s.ID, func(m *mirrorState) {
 		m.state, m.err, m.synced, m.pending, m.version = MirrorSynced, "", time.Now().UTC(), "", version
-		m.copies, m.replaces, m.deletes = len(copies), len(replaces), len(deletes)
+		m.copies, m.replaces, m.deletes, m.tagOnly = len(copies), len(replaces), len(deletes), len(tagOnly)
 	})
 	return nil
 }

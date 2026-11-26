@@ -721,3 +721,138 @@ func TestPickedSecondaryRefused(t *testing.T) {
 		t.Errorf("sync = %v, want a refusal", err)
 	}
 }
+
+func TestDailyLimit(t *testing.T) {
+	for files, want := range map[int]int{0: 0, 19: 0, 20: 1, 64: 3, 619: 30, 599: 29, 600: 30, 20_000: 30} {
+		if got := dailyLimit(files); got != want {
+			t.Errorf("dailyLimit(%d) = %v, want %v", files, got, want)
+		}
+	}
+}
+
+func readMember(t *testing.T, sec string) memberRecord {
+	t.Helper()
+	var m memberRecord
+	b, err := os.ReadFile(filepath.Join(sec, ".medialayer/member.json"))
+	if err == nil {
+		err = json.Unmarshal(b, &m)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return m
+}
+
+func TestMirrorCountsChangesOverADay(t *testing.T) {
+	ctx := context.Background()
+	c, lib, sec := newMirrorCore(t) // 64 files: 3 changes a day go ahead
+	if err := c.sync(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for i := range 3 {
+		if err := os.Remove(filepath.Join(lib, fmt.Sprintf("Extras/%02d.txt", i))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := c.sync(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if s := mirrorOf(t, c, "sec1"); s.State != MirrorSynced || s.Deletes != 3 {
+		t.Fatalf("secondary = %+v, want synced with 3 deletes", s)
+	}
+	if m := readMember(t, sec); len(m.Recent) != 1 || m.Recent[0].Changes != 3 {
+		t.Fatalf("member.json recent = %+v, want one entry of 3", m.Recent)
+	}
+	// One more the same day passes the limit.
+	write(t, filepath.Join(sec, "Extras/10.txt"), []byte("edited on the secondary"))
+	if err := c.sync(ctx); err != nil {
+		t.Fatal(err)
+	}
+	s := mirrorOf(t, c, "sec1")
+	if s.State != MirrorPaused || s.Replaces != 1 || s.Recent != 3 || s.Limit == nil || *s.Limit != 3 {
+		t.Fatalf("secondary = %+v, want paused with 1 replace after 3 today, limit 3", s)
+	}
+	// Approving it starts the day again.
+	c.mu.Lock()
+	c.mirrors["sec1"].approved = c.mirrors["sec1"].pending
+	c.mu.Unlock()
+	if err := c.sync(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if s := mirrorOf(t, c, "sec1"); s.State != MirrorSynced || s.Replaces != 1 {
+		t.Fatalf("approved secondary = %+v, want synced with 1 replace", s)
+	}
+	if m := readMember(t, sec); len(m.Recent) != 0 {
+		t.Fatalf("member.json recent = %+v after an approval, want none", m.Recent)
+	}
+	// Changes older than a day no longer count.
+	m := readMember(t, sec)
+	m.Recent = []recentChange{{At: time.Now().UTC().Add(-25 * time.Hour), Changes: 3}}
+	b, _ := json.Marshal(m)
+	write(t, filepath.Join(sec, ".medialayer/member.json"), b)
+	if err := os.Remove(filepath.Join(lib, "Extras/20.txt")); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.sync(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if s := mirrorOf(t, c, "sec1"); s.State != MirrorSynced || s.Deletes != 1 {
+		t.Fatalf("secondary = %+v, want synced with 1 delete", s)
+	}
+	if m := readMember(t, sec); len(m.Recent) != 1 || m.Recent[0].Changes != 1 {
+		t.Fatalf("member.json recent = %+v, want only today's 1", m.Recent)
+	}
+}
+
+func TestMirrorDoesNotCountTagEdits(t *testing.T) {
+	ctx := context.Background()
+	c, lib, sec := newMirrorCore(t)
+	for i := range 8 {
+		write(t, filepath.Join(lib, fmt.Sprintf("Rip/%02d.flac", i)), testFLAC([]string{"TITLE=Old"}, nil, 20_000))
+	}
+	if err := c.sync(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// Retagging all eight, with a cover, changes no audio.
+	for i := range 8 {
+		write(t, filepath.Join(lib, fmt.Sprintf("Rip/%02d.flac", i)),
+			testFLAC([]string{"TITLE=New title", "ARTIST=Someone"}, []byte("a cover"), 20_000))
+	}
+	if err := c.sync(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if s := mirrorOf(t, c, "sec1"); s.State != MirrorSynced || s.Replaces != 8 || s.TagOnly != 8 {
+		t.Fatalf("secondary = %+v, want synced with 8 tag-only replaces", s)
+	}
+	got, _ := os.ReadFile(filepath.Join(sec, "Rip/03.flac"))
+	if want, _ := os.ReadFile(filepath.Join(lib, "Rip/03.flac")); !bytes.Equal(got, want) {
+		t.Error("the retagged file wasn't copied")
+	}
+	if m := readMember(t, sec); len(m.Recent) != 0 {
+		t.Errorf("member.json recent = %+v, want tag edits not counted", m.Recent)
+	}
+	// The primary's hashes are in the index, and on this device.
+	var n int
+	if err := c.currentDB().SQL().QueryRow(
+		`SELECT count(*) FROM file WHERE path LIKE 'Rip/%' AND length(audio_sha256) = 32`).Scan(&n); err != nil || n != 8 {
+		t.Errorf("%d retagged files have audio_sha256 in the index (%v), want 8", n, err)
+	}
+	if b, err := os.ReadFile(filepath.Join(c.dataDir, audioHashFile)); err != nil || !strings.Contains(string(b), "Rip/03.flac") {
+		t.Errorf("%s = %.200s (%v)", audioHashFile, b, err)
+	}
+
+	// New audio in four files is a real change: past the limit, it pauses.
+	for i := range 4 {
+		write(t, filepath.Join(lib, fmt.Sprintf("Rip/%02d.flac", i)),
+			testFLAC([]string{"TITLE=New title", "ARTIST=Someone"}, []byte("a cover"), 30_000))
+	}
+	// And a tag edit in another, which is counted as one only for the
+	// pause's review.
+	write(t, filepath.Join(lib, "Rip/07.flac"), testFLAC([]string{"TITLE=Again"}, nil, 20_000))
+	if err := c.sync(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if s := mirrorOf(t, c, "sec1"); s.State != MirrorPaused || s.Replaces != 5 || s.TagOnly != 1 {
+		t.Fatalf("secondary = %+v, want paused with 5 replaces, 1 of them tag-only", s)
+	}
+}

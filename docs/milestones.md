@@ -33,7 +33,8 @@ the primary. No command line.
   iPhone included, and resumes if interrupted.
 - The primary is the truth. Changes flow one way, primary to secondaries.
   Deletes go to a `.medialayer/trash` folder on secondaries for 30 days; a
-  mass change (over 5% of files in a day) pauses sync; a file changed on a
+  mass change (over 5% of files or 30 files in a day, whichever is
+  smaller, not counting tag edits) pauses sync; a file changed on a
   secondary outside MediaLayer is moved to trash and replaced from the
   primary. One device syncs at a time, holding a lease in the primary's
   `.medialayer`.
@@ -88,8 +89,10 @@ and work on it continues after the AppKit table.
    scratch matches the primary file for file, a mass change pauses and
    asks, and switching the primary works. The proof of concept does the
    one-way sync, trash, pause, generation check and switching the primary
-   (Make Primary) and holds the sync lease; the 5% limit counted per
-   day, and Proton and SMB sources come next. How it
+   (Make Primary), holds the sync lease, and counts the daily limit
+   (the smaller of 5% and 30 files over a rolling 24 hours, with tag
+   edits told apart by an audio hash made only near the limit); Proton
+   and SMB sources come next. How it
    works now: [sync.md](sync.md).
 5. **macOS desktop features.** Menu bar control, cache cap with offline
    albums, write-mode toggle, the optional Tauon mount, a notarized build
@@ -121,7 +124,7 @@ and work on it continues after the AppKit table.
      their own paths.
    - What the added folder becomes afterwards. As a secondary, any file
      not first copied to the primary would go to trash, and the merge
-     would trip the 5% pause.
+     would trip the daily limit.
    - What happens to the other library's secondaries, and to devices
      holding its index, since both name a library id that no longer
      exists.

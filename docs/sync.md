@@ -164,13 +164,65 @@ The result is a list of copies (missing on the secondary), replacements
 edited on the secondary directly) and removals (not on the primary, plus
 extra Drive duplicates of one name).
 
-## The 5% pause
+## The daily limit
 
-If replacements and removals together exceed 5% of the library's files,
-the sync of that secondary pauses before changing anything. Its chip shows
-a pause badge; clicking it shows the counts and asks to apply. An approval
-covers exactly the changes it showed, for one sync. New copies don't
-count.
+Each secondary may take a limited number of removals and replacements a
+day without asking: 5% of the library's files (rounded down) or 30 files,
+whichever is smaller. So 5% applies below 600 files and 30 from there up;
+a 20,000-track library can't lose 1,000 files in one go.
+
+- **Counted over a rolling day.** The last 24 hours, not a calendar day,
+  so there is no midnight to time a burst around and no time zone to
+  agree on. The count lives in the secondary's `member.json` as `recent`,
+  one entry per sync with its time and how many changes counted, so any
+  device syncing that folder sees the same count. Entries older than a day
+  are dropped when the record is next written. A sync's entry is written
+  with the `copying` record, before any change is made, so a sync cut
+  short still counts.
+- **What counts.** Removals (including extra Drive duplicates) and
+  replacements. New copies don't count. A replacement that only changed
+  tags doesn't count either (see "Tag edits" below).
+- **The pause.** If this sync's counted changes plus the day's would pass
+  the limit, the sync of that secondary pauses before changing anything.
+  Its chip shows a pause badge; clicking it shows what this sync would
+  do, how many of the replacements are only retagged, how many changes
+  the day already had, and the limit. An approval covers exactly the
+  changes it showed, for one sync. Approved changes were reviewed, so
+  the day starts again after them: `recent` is cleared.
+- **A demoted primary** still asks before any removal or replacement,
+  tag edits included (see "Sync after the switch").
+
+### Tag edits
+
+A file's audio hash (`audio_sha256` in the index) is the SHA-256 of its
+audio bytes: the file without the tags at either end (for FLAC, the
+STREAMINFO block is hashed too, as audio frames can rely on it). At the start that
+is any ID3v2 tags and, for FLAC, the `fLaC` marker and every metadata
+block (tags, pictures, padding); at the end an ID3v1, APEv2 or Lyrics3 v2
+tag. Retagging a file, or changing its cover, leaves the hash as it was.
+It is built in `internal/media/audiospan.go` and
+`internal/core/audiohash.go`.
+
+Indexing never reads audio, so hashes are made only when sync needs
+them: when a sync would pass the limit, its removals alone would not,
+and some of its changes are replacements of FLAC or MP3 files. For each, both copies (the primary's
+and the secondary's) are read in full and hashed. Where the two match,
+the replacement is a tag edit: it is still made, but doesn't count. A
+file that can't be read or parsed counts as a real change. This costs a
+download of both copies of each replaced file, paid only near the limit.
+
+Hashes are kept so a file is read once:
+
+- On the device, in `audio-hashes.json` in the app's data folder, by the
+  file's MD5 where the cloud lists one (Drive), so the primary's file is
+  known again once it is on a secondary; on a local disk by folder, path,
+  size and modification time. Up to 50,000 are kept.
+- In the index, for the primary's file, as `audio_sha256`. This doesn't
+  make a new index version: the hash goes out with the next one. A file
+  indexed again because it changed loses its hash until sync makes it
+  again. Sync doesn't read these back, as a file rewritten with its size
+  and time kept would still match its row; they are for later features
+  such as tag editing and merging.
 
 ## Applying changes, and the write order
 
@@ -274,7 +326,7 @@ primary, and "the index" is the device's SQLite database of the library.
    index, and nothing more (except the paths listed under Known gaps). Files added to the primary since the last
    sync are copied. Files removed or edited on the target are put back.
 5. The job checks the target's sync result from step 4. If the sync
-   failed, or paused at the 5% limit, the job stops with the reason. The
+   failed, or paused at the daily limit, the job stops with the reason. The
    primary stays the primary. The sync in step 4 has still run.
 
 ### Check the target
@@ -398,7 +450,10 @@ become synced, and you can't switch back until it has space.
   restart meanwhile.
 - A full primary blocks syncing and Make Primary; there is no way yet to
   move the library off a full primary from the app.
-- The 5% limit is counted per sync, not per day.
+- The daily limit's count is kept on the secondary, so a change made
+  there outside MediaLayer to `member.json` resets it.
+- Tag edits are told apart only for FLAC and MP3 files; other files that
+  differ always count.
 - Each device lists its own secondaries in the primary's `repo.json`, so
   two devices with different secondaries overwrite each other's list.
 - Other members' `repo.json` is rewritten only by their next sync.

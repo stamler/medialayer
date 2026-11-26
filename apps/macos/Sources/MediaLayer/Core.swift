@@ -26,6 +26,9 @@ struct CoreStatus: Decodable, Equatable {
         var copies = 0
         var replaces = 0
         var deletes = 0
+        var tagOnly: Int? // of replaces, files only retagged (same audio)
+        var recent: Int? // when paused: files removed or replaced in the last day
+        var limit: Int? // when paused: how many a day allows without asking
         var error: String?
         var synced: String?
         var version: Int? // the index version a synced secondary matches
