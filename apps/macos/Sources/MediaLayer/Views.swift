@@ -14,6 +14,8 @@ struct MediaLayerApp: App {
                 .frame(minWidth: 900, minHeight: 560)
         }
         .commands {
+            SidebarCommands()
+            PlaylistCommands(model: model)
             CommandMenu("Library") {
                 Button("Update Library") { model.resync() }
                     .keyboardShortcut("r")
@@ -192,22 +194,40 @@ struct LibraryView: View {
 
     var body: some View {
         let visible = model.visibleTracks
-        VSplitView {
-            ColumnBrowser()
-                .frame(minHeight: 120, idealHeight: 190, maxHeight: 400)
-            SongsTable(tracks: visible, selection: $selection)
-                .frame(minHeight: 200)
-                .onChange(of: selection) { _, ids in
-                    // Look up the selected track's cloud file now, so pressing
-                    // play doesn't wait for it.
-                    if ids.count == 1, let id = ids.first { Core.prepare(id) }
+        NavigationSplitView(columnVisibility: $model.sidebarVisibility) {
+            SidebarView()
+                .navigationSplitViewColumnWidth(min: 150, ideal: 190, max: 320)
+        } detail: {
+            VSplitView {
+                if model.selectedPlaylistID == nil { // playlists show without the browser, as in iTunes
+                    ColumnBrowser()
+                        .frame(minHeight: 120, idealHeight: 190, maxHeight: 400)
                 }
+                SongsTable(tracks: visible, selection: $selection)
+                    .frame(minHeight: 200)
+                    .onChange(of: selection) { _, ids in
+                        // Look up the selected track's cloud file now, so pressing
+                        // play doesn't wait for it.
+                        if ids.count == 1, let id = ids.first { Core.prepare(id) }
+                    }
+                    .onDeleteCommand(perform: removeFromPlaylist)
+            }
+            .safeAreaInset(edge: .bottom, spacing: 0) { StatusBar(tracks: visible) }
         }
-        .safeAreaInset(edge: .bottom, spacing: 0) { StatusBar(tracks: visible) }
+        .onChange(of: model.sidebarSelection) { selection = [] }
         .sheet(isPresented: $model.addingSource) { AddSourceSheet() }
         .toolbar {
             ToolbarItemGroup(placement: .navigation) { TransportControls() }
             NowPlayingItem()
+        }
+    }
+
+    /// Delete in a playlist removes the selected rows from it; Songs has no
+    /// Delete.
+    private var removeFromPlaylist: (() -> Void)? {
+        guard let p = model.selectedPlaylist else { return nil }
+        return { [selection] in
+            model.remove(model.visibleTracks.filter { selection.contains($0.id) }.map(\.id), from: p.id)
         }
     }
 }
@@ -421,7 +441,7 @@ struct SongsTable: View {
     @Binding var selection: Set<Track.ID>
 
     var body: some View {
-        Table(tracks, selection: $selection, sortOrder: $model.sortOrder) {
+        Table(of: Track.self, selection: $selection, sortOrder: $model.sortOrder) {
             TableColumn("") { t in
                 ZStack {
                     ArtView(sha: t.artSHA, size: 18)
@@ -447,14 +467,28 @@ struct SongsTable: View {
             }
             .width(30)
             TableColumn("Kind", value: \.format) { t in Text(kind(t)) }.width(min: 60, ideal: 90)
+        } rows: {
+            // Rows drag to a sidebar playlist, or within a playlist to reorder.
+            ForEach(tracks) { t in
+                TableRow(t).draggable(TrackDrag(ids: dragged(t), playlist: model.selectedPlaylistID))
+            }
+            .dropDestination(for: TrackDrag.self) { drops, offset in
+                model.dropOnTable(drops, at: offset, rows: tracks)
+            }
         }
         .contextMenu(forSelectionType: Track.ID.self) { ids in
             if let id = ids.first, let t = tracks.first(where: { $0.id == id }) {
                 Button("Play") { model.play(t) }
             }
+            PlaylistMenuItems(ids: tracks.filter { ids.contains($0.id) }.map(\.id))
         } primaryAction: { ids in
             if let id = ids.first, let t = tracks.first(where: { $0.id == id }) { model.play(t) }
         }
+    }
+
+    /// A drag of a selected row takes the whole selection, in table order.
+    private func dragged(_ t: Track) -> [String] {
+        selection.contains(t.id) ? tracks.filter { selection.contains($0.id) }.map(\.id) : [t.id]
     }
 
     private func kind(_ t: Track) -> String {

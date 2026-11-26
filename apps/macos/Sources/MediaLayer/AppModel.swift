@@ -11,7 +11,11 @@ final class AppModel: ObservableObject {
     @Published private(set) var startError: String?
     /// The last failure reading the index; cleared by the next good read.
     @Published private(set) var libraryError: String?
-    @Published private(set) var tracks: [Track] = []
+    @Published private(set) var tracks: [Track] = [] {
+        didSet { trackByID = Dictionary(tracks.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a }) }
+    }
+    /// The library's present tracks by file id, for playlists.
+    private(set) var trackByID: [String: Track] = [:]
     @Published var choosingFolder = false
 
     // Column browser: nil means "All".
@@ -19,8 +23,26 @@ final class AppModel: ObservableObject {
     @Published var composer: String? { didSet { if composer != oldValue { artist = nil; album = nil } } }
     @Published var artist: String? { didSet { if artist != oldValue { album = nil } } }
     @Published var album: String?
-    @Published var sortOrder = [KeyPathComparator(\Track.browseArtist), KeyPathComparator(\Track.album),
-                                KeyPathComparator(\Track.discNumber), KeyPathComparator(\Track.trackNumber)]
+    @Published var librarySortOrder = [KeyPathComparator(\Track.browseArtist), KeyPathComparator(\Track.album),
+                                       KeyPathComparator(\Track.discNumber), KeyPathComparator(\Track.trackNumber)]
+    /// A playlist's sort; empty means playlist order, the only order in
+    /// which its rows can be dragged to reorder them.
+    @Published var playlistSortOrder: [KeyPathComparator<Track>] = []
+    /// The table's sort: the library's, or the playlist's when one is shown.
+    var sortOrder: [KeyPathComparator<Track>] {
+        get { selectedPlaylistID == nil ? librarySortOrder : playlistSortOrder }
+        set { if selectedPlaylistID == nil { librarySortOrder = newValue } else { playlistSortOrder = newValue } }
+    }
+
+    // Sidebar and playlists (see Playlists.swift).
+    @Published var sidebarVisibility = NavigationSplitViewVisibility.all
+    @Published var sidebarSelection = SidebarItem.songs {
+        didSet { if sidebarSelection != oldValue { playlistSortOrder = [] } }
+    }
+    @Published var playlists: [Playlist] = []
+    /// The playlist whose name is being edited in the sidebar.
+    @Published var renamingPlaylist: String?
+    @Published var playlistError: String?
 
     let art = ArtCache()
     let player = Player()
@@ -96,6 +118,7 @@ final class AppModel: ObservableObject {
                 art.artDir = status.artDir
             }
             tracks = try db?.tracks() ?? []
+            try reloadPlaylists()
             loadedEpoch = status.dbEpoch
             loadedCount = status.tracks
             loadedFinish = status.job.finished
@@ -105,6 +128,15 @@ final class AppModel: ObservableObject {
             libraryError = error.localizedDescription
         }
         lastLoad = Date()
+    }
+
+    /// Rereads the playlists, after the core changed them or the index
+    /// changed. A playlist shown that no longer exists goes back to Songs.
+    func reloadPlaylists() throws {
+        playlists = try db?.playlists() ?? []
+        if let id = selectedPlaylistID, !playlists.contains(where: { $0.id == id }) {
+            sidebarSelection = .songs
+        }
     }
 
     // MARK: Setup
@@ -119,6 +151,8 @@ final class AppModel: ObservableObject {
         db = nil
         art.db = nil
         tracks = []
+        playlists = []
+        sidebarSelection = .songs
         loadedEpoch = -1
         try Core.setFolder(folder)
         refresh()
@@ -170,8 +204,12 @@ final class AppModel: ObservableObject {
 
     /// The tracks the browser selects, in the table's order.
     var visibleTracks: [Track] {
+        if let id = selectedPlaylistID {
+            let list = playlistTracks(id)
+            return playlistSortOrder.isEmpty ? list : list.sorted(using: playlistSortOrder)
+        }
         let selected = album.map { a in byArtist.filter { $0.album == a } } ?? byArtist
-        return selected.sorted(using: sortOrder)
+        return selected.sorted(using: librarySortOrder)
     }
 
     func play(_ track: Track) {

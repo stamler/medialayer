@@ -98,6 +98,38 @@ final class LibraryDB {
         guard sqlite3_step(stmt) == SQLITE_ROW, let pack = sqlite3_column_text(stmt, 0) else { return nil }
         return (String(cString: pack), sqlite3_column_int64(stmt, 1), sqlite3_column_int64(stmt, 2))
     }
+
+    /// Every playlist, by name, with its items' file ids in position order.
+    /// Items whose file is missing are included; the app skips them. One
+    /// statement, so it reads one consistent state of the index.
+    func playlists() throws -> [Playlist] {
+        let sql = """
+            SELECT p.id, p.name, i.file_id FROM playlist p
+            LEFT JOIN playlist_item i ON i.playlist_id = p.id
+            ORDER BY p.id, i.pos
+            """
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+            throw CoreError(message: String(cString: sqlite3_errmsg(db)))
+        }
+        defer { sqlite3_finalize(stmt) }
+        func text(_ i: Int32) -> String? {
+            sqlite3_column_text(stmt, i).map { String(cString: $0) }
+        }
+        var out: [Playlist] = []
+        var rc = sqlite3_step(stmt)
+        while rc == SQLITE_ROW {
+            let id = text(0) ?? ""
+            if out.last?.id != id { out.append(Playlist(id: id, name: text(1) ?? "", items: [])) }
+            if let file = text(2) { out[out.count - 1].items.append(file) }
+            rc = sqlite3_step(stmt)
+        }
+        guard rc == SQLITE_DONE else { throw CoreError(message: String(cString: sqlite3_errmsg(db))) }
+        return out.sorted {
+            let order = $0.name.localizedStandardCompare($1.name)
+            return order == .orderedSame ? $0.id < $1.id : order == .orderedAscending
+        }
+    }
 }
 
 /// Loads covers from the art packs and keeps small thumbnails in memory.
