@@ -490,9 +490,7 @@ struct ArtView: View {
             let px = Int(size * 2) // Retina
             if let hit = model.art.cached(sha, size: px) { image = hit; return }
             image = nil
-            let loaded = await withCheckedContinuation { done in
-                model.art.load(sha, size: px) { done.resume(returning: $0) }
-            }
+            let loaded = await model.art.image(sha, size: px)
             if !Task.isCancelled { image = loaded } // not a cover since replaced
         }
     }

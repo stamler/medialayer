@@ -101,46 +101,106 @@ final class LibraryDB {
 }
 
 /// Loads covers from the art packs and keeps small thumbnails in memory.
+/// The cache is bounded by the bytes of its decoded images. Requests for
+/// one image at one size share a single decode, and a request nobody
+/// waits for any more (its row scrolled away) is cancelled before it runs.
+@MainActor
 final class ArtCache {
-    private let cache = NSCache<NSString, NSImage>()
+    private let cache: NSCache<NSString, NSImage> = {
+        let c = NSCache<NSString, NSImage>()
+        c.totalCostLimit = 32 << 20 // decoded bytes; a 36-pixel thumbnail is about 5 KB
+        c.countLimit = 4000
+        return c
+    }()
     private let queue: OperationQueue = {
         let q = OperationQueue()
         q.maxConcurrentOperationCount = 4
         q.qualityOfService = .userInitiated
         return q
     }()
+
+    /// A decode under way and the callers waiting for it.
+    private struct Request {
+        let op: Operation
+        var waiters: [Int: CheckedContinuation<NSImage?, Never>]
+    }
+    private var requests: [NSString: Request] = [:]
+    private var nextWaiter = 0
+
     var db: LibraryDB?
     var artDir = ""
 
+    private static func key(_ sha: String, _ size: Int) -> NSString { "\(sha)-\(size)" as NSString }
+
     func cached(_ sha: String, size: Int) -> NSImage? {
-        cache.object(forKey: "\(sha)-\(size)" as NSString)
+        cache.object(forKey: Self.key(sha, size))
     }
 
-    /// Loads a thumbnail at most `size` pixels on its long side.
-    func load(_ sha: String, size: Int, done: @escaping (NSImage?) -> Void) {
-        let key = "\(sha)-\(size)" as NSString
-        if let image = cache.object(forKey: key) { return done(image) }
-        guard let db, !artDir.isEmpty else { return done(nil) }
+    /// A thumbnail at most `size` pixels on its long side, or nil if there
+    /// is none or the calling task was cancelled.
+    func image(_ sha: String, size: Int) async -> NSImage? {
+        let key = Self.key(sha, size)
+        if let hit = cache.object(forKey: key) { return hit }
+        guard let db, !artDir.isEmpty else { return nil }
         let dir = artDir
-        queue.addOperation { [cache] in
-            var image: NSImage?
-            if let loc = db.artLocation(sha: sha),
-               let fh = FileHandle(forReadingAtPath: (dir as NSString).appendingPathComponent(loc.pack)) {
-                defer { try? fh.close() }
-                try? fh.seek(toOffset: UInt64(loc.offset))
-                if let data = try? fh.read(upToCount: Int(loc.length)),
-                   let src = CGImageSourceCreateWithData(data as CFData, nil),
-                   let cg = CGImageSourceCreateThumbnailAtIndex(src, 0, [
-                       kCGImageSourceCreateThumbnailFromImageAlways: true,
-                       kCGImageSourceThumbnailMaxPixelSize: size,
-                       kCGImageSourceCreateThumbnailWithTransform: true,
-                   ] as CFDictionary) {
-                    image = NSImage(cgImage: cg, size: .zero)
-                    cache.setObject(image!, forKey: key)
+        let waiter = nextWaiter
+        nextWaiter += 1
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { (done: CheckedContinuation<NSImage?, Never>) in
+                if Task.isCancelled { return done.resume(returning: nil) }
+                if requests[key] != nil {
+                    requests[key]!.waiters[waiter] = done
+                    return
                 }
+                let op = BlockOperation()
+                op.addExecutionBlock { [cache, weak op] in
+                    guard let op, !op.isCancelled else { return }
+                    let image = Self.decode(db: db, dir: dir, sha: sha, size: size)
+                    if let image { cache.setObject(image, forKey: key, cost: size * size * 4) } // at most
+                    DispatchQueue.main.async {
+                        MainActor.assumeIsolated { self.finish(key, op: op, image: image) }
+                    }
+                }
+                requests[key] = Request(op: op, waiters: [waiter: done])
+                queue.addOperation(op)
             }
-            DispatchQueue.main.async { done(image) }
+        } onCancel: {
+            Task { @MainActor in self.cancel(key, waiter: waiter) }
         }
+    }
+
+    private func finish(_ key: NSString, op: Operation, image: NSImage?) {
+        guard let r = requests[key], r.op === op else { return } // cancelled, or replaced since
+        requests[key] = nil
+        for done in r.waiters.values { done.resume(returning: image) }
+    }
+
+    private func cancel(_ key: NSString, waiter: Int) {
+        guard var r = requests[key], let done = r.waiters.removeValue(forKey: waiter) else { return }
+        done.resume(returning: nil)
+        if r.waiters.isEmpty {
+            r.op.cancel()
+            requests[key] = nil
+        } else {
+            requests[key] = r
+        }
+    }
+
+    nonisolated private static func decode(db: LibraryDB, dir: String, sha: String, size: Int) -> NSImage? {
+        guard let loc = db.artLocation(sha: sha),
+              let fh = FileHandle(forReadingAtPath: (dir as NSString).appendingPathComponent(loc.pack))
+        else { return nil }
+        defer { try? fh.close() }
+        try? fh.seek(toOffset: UInt64(loc.offset))
+        guard let data = try? fh.read(upToCount: Int(loc.length)),
+              let src = CGImageSourceCreateWithData(data as CFData, nil),
+              let cg = CGImageSourceCreateThumbnailAtIndex(src, 0, [
+                  kCGImageSourceCreateThumbnailFromImageAlways: true,
+                  kCGImageSourceThumbnailMaxPixelSize: size,
+                  kCGImageSourceCreateThumbnailWithTransform: true,
+              ] as CFDictionary)
+        else { return nil }
+        return NSImage(cgImage: cg, size: .zero)
     }
 }
 
