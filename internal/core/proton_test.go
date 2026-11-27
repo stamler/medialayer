@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/rclone/Proton-API-Bridge/common"
+	"github.com/rclone/go-proton-api"
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/config"
 	"github.com/rclone/rclone/fs/hash"
@@ -215,5 +216,22 @@ func TestIndexKeepsFilesOnCoarseTimes(t *testing.T) {
 	// On a cloud with fine times, a time off by under a second is a change.
 	if withinPrecision(f, whole.UnixMilli(), base.UnixMilli()) {
 		t.Error("a local folder's times count as the same within a second")
+	}
+}
+
+func TestProtonAppVersionIsStable(t *testing.T) {
+	if !strings.HasPrefix(protonAppVersion, "external-drive-rclone@") || !strings.HasSuffix(protonAppVersion, "-stable") {
+		t.Errorf("protonAppVersion = %q", protonAppVersion)
+	}
+}
+
+func TestProtonScopeError(t *testing.T) {
+	err := protonScopeError(fmt.Errorf("wrapped: %w", &proton.APIError{Code: 9100, Status: 403, Message: "Access token does not have sufficient scope"}),
+		proton.Auth{Scope: "self", TwoFA: proton.TwoFAInfo{Enabled: proton.HasFIDO2}})
+	if !strings.Contains(err.Error(), "limited access") || !strings.Contains(err.Error(), `"self"`) {
+		t.Errorf("protonScopeError = %v", err)
+	}
+	if err := protonScopeError(errors.New("offline"), proton.Auth{}); strings.Contains(err.Error(), "limited access") {
+		t.Errorf("an unrelated error explained as scope: %v", err)
 	}
 }

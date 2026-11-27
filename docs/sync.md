@@ -508,7 +508,13 @@ become synced, and you can't switch back until it has space.
 A folder on Proton Drive can be a secondary, with the same rules as a
 Google Drive one. Add Source signs in with the Proton username and
 password, then a 2FA code or the mailbox password if the account uses
-one. The password goes to Proton only: the core keeps the session Proton
+one. The core signs in itself (rclone's backend handles a 2FA code from
+an authenticator app only, and would leave an account whose two-step
+sign-in is a security key half signed in) and hands the session to
+rclone's backend. An account with only a security key or passkey for
+two-step sign-in can't sign in from a third-party app; adding an
+authenticator app in Proton's settings lets it. The core identifies
+itself to Proton with the app version a release of rclone sends. The password goes to Proton only: the core keeps the session Proton
 returns, in its own rclone config. That session includes the salted key
 password that unlocks the account's keys. The Mac app encrypts the whole
 config (Google's tokens too) with rclone's config encryption, under a

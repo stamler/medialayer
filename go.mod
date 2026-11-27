@@ -6,6 +6,7 @@ require (
 	github.com/mewkiz/flac v1.0.14
 	github.com/oklog/ulid/v2 v2.1.2
 	github.com/rclone/Proton-API-Bridge v1.0.5
+	github.com/rclone/go-proton-api v1.0.4
 	github.com/rclone/rclone v1.76.0
 	golang.org/x/text v0.43.0
 	modernc.org/sqlite v1.53.0
@@ -195,7 +196,6 @@ require (
 	github.com/prometheus/procfs v0.22.0 // indirect
 	github.com/putdotio/go-putio/putio v0.0.0-20200123120452-16d982cac2b8 // indirect
 	github.com/rasky/go-xdr v0.0.0-20170124162913-1a41d1a06c93 // indirect
-	github.com/rclone/go-proton-api v1.0.4 // indirect
 	github.com/rclone/gofakes3 v0.0.12 // indirect
 	github.com/relvacode/iso8601 v1.7.0 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
