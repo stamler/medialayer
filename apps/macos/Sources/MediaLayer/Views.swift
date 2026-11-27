@@ -92,14 +92,52 @@ struct ContentView: View {
 
 struct ConnectView: View {
     @EnvironmentObject var model: AppModel
+    @EnvironmentObject var core: StatusModel
     @State private var working = false
+    @State private var smb = false
     @State private var error: String?
 
+    /// The primary is on an SMB server and only its password is missing.
+    private var smbPrimary: CoreStatus.SMBServer? {
+        let primary = core.status.sources?.first { $0.primary }?.remote
+        return core.status.smbServers?.first { $0.remote == primary }
+    }
+
     var body: some View {
+        Group {
+            if let server = smbPrimary {
+                signInAgain(server)
+            } else {
+                welcome
+            }
+        }
+        .sheet(isPresented: $smb) { SMBPrimarySheet() }
+    }
+
+    private func signInAgain(_ server: CoreStatus.SMBServer) -> some View {
+        VStack(spacing: 16) {
+            Image(systemName: "server.rack").font(.system(size: 56)).foregroundStyle(.secondary)
+            Text("Sign in to \(server.host)").font(.largeTitle)
+            Text("Your library is on this network share, and MediaLayer needs the password for \(server.user).")
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 460)
+            Button {
+                smb = true
+            } label: {
+                Label("Sign In", systemImage: "server.rack").frame(minWidth: 220)
+            }
+            .controlSize(.large)
+            .buttonStyle(.borderedProminent)
+        }
+        .padding(40)
+    }
+
+    private var welcome: some View {
         VStack(spacing: 16) {
             Image(systemName: "music.note.house").font(.system(size: 56)).foregroundStyle(.secondary)
             Text("Welcome to MediaLayer").font(.largeTitle)
-            Text("Connect the cloud that holds your music. Your browser opens to sign in.")
+            Text("Connect the cloud or the network share that holds your music.")
                 .foregroundStyle(.secondary)
             Button {
                 working = true
@@ -115,23 +153,86 @@ struct ConnectView: View {
             .controlSize(.large)
             .buttonStyle(.borderedProminent)
             .disabled(working)
+            Button {
+                error = nil
+                smb = true
+            } label: {
+                Label("Use a network share (SMB)", systemImage: "server.rack").frame(minWidth: 220)
+            }
+            .controlSize(.large)
+            .disabled(working)
             if let error { Text(error).foregroundStyle(.red).textSelection(.enabled) }
         }
         .padding(40)
     }
 }
 
+/// Makes a folder on an SMB share the primary: signs in to the server,
+/// then picks the folder. When the primary is on a share already and
+/// only its password is missing, signing in is all it takes.
+struct SMBPrimarySheet: View {
+    @EnvironmentObject var model: AppModel
+    @EnvironmentObject var core: StatusModel
+    @Environment(\.dismiss) private var dismiss
+    @State private var server: CoreStatus.SMBServer?
+
+    var body: some View {
+        if let server {
+            DriveFolderPicker(
+                remote: server.remote,
+                rootName: server.host,
+                title: "Pick your music folder",
+                message: "Pick a folder inside one of the server's shares. MediaLayer reads tags and covers from it and keeps its index in a hidden .medialayer folder inside it.",
+                onCancel: { self.server = nil }
+            ) { folder in
+                try model.useFolder(folder, on: server.remote)
+                dismiss()
+            }
+            .frame(width: 560, height: 480)
+        } else {
+            // The primary's server when the primary is on a share and only
+            // its password is missing; otherwise the first one known.
+            let primary = core.status.sources?.first { $0.primary }?.remote
+            let saved = core.status.smbServers?.first { $0.remote == primary } ?? core.status.smbServers?.first
+            SMBSignInView(host: saved?.host ?? "", port: saved?.port ?? 445, user: saved?.user ?? "",
+                          domain: saved?.domain ?? "", onCancel: { dismiss() }) { remote in
+                let s = Core.status()
+                if s.connected && !s.folder.isEmpty {
+                    // The primary was on this server: back to the library,
+                    // with the sync launch skipped while it couldn't open.
+                    model.resync()
+                    dismiss()
+                } else {
+                    server = s.smbServers?.first { $0.remote == remote }
+                        ?? CoreStatus.SMBServer(remote: remote, host: "Network share", user: "")
+                }
+            }
+            .frame(width: 460)
+        }
+    }
+}
+
 /// Picks the primary music folder.
 struct FolderPicker: View {
     @EnvironmentObject var model: AppModel
+    @EnvironmentObject var core: StatusModel
+
+    /// The primary's SMB server, if it is on one: the folder is picked
+    /// there, not in Google Drive.
+    private var smb: CoreStatus.SMBServer? {
+        let primary = core.status.sources?.first { $0.primary }?.remote
+        return core.status.smbServers?.first { $0.remote == primary }
+    }
 
     var body: some View {
         DriveFolderPicker(
+            remote: smb?.remote ?? "",
+            rootName: smb?.host ?? "My Drive",
             title: "Pick your music folder",
             message: "MediaLayer reads tags and covers from this folder and keeps its index in a hidden .medialayer folder inside it.",
             onCancel: model.choosingFolder ? { model.choosingFolder = false } : nil
         ) { folder in
-            try model.useFolder(folder)
+            try model.useFolder(folder, on: smb?.remote)
             model.choosingFolder = false
         }
     }
@@ -977,22 +1078,25 @@ struct AddSourceSheet: View {
     @Environment(\.dismiss) private var dismiss
     /// The service picked in the first step, whose accounts the second
     /// step lists.
-    private enum Service { case google, proton }
+    private enum Service { case google, proton, smb }
     @State private var service: Service?
     @State private var account: String? // the remote whose folders to browse
     /// Signing in to Proton, with this username filled in.
     @State private var protonSignIn: String?
     /// The account being browsed is a Proton one.
     @State private var browsingProton = false
+    /// Signing in to an SMB server, with these filled in.
+    @State private var smbSignIn: CoreStatus.SMBServer?
     @State private var working = false
     @State private var error: String?
 
     var body: some View {
         if let account {
             let proton = browsingProton || (core.status.protonAccounts?.contains { $0.remote == account } ?? false)
+            let smbHost = core.status.smbServers?.first { $0.remote == account }?.host
             DriveFolderPicker(
                 remote: account,
-                rootName: proton ? "Proton Drive" : "My Drive",
+                rootName: smbHost ?? (proton ? "Proton Drive" : "My Drive"),
                 title: "Pick the folder for the copy",
                 message: "MediaLayer copies the library here and keeps it in step with the primary, one way. Files it removes or replaces go to the folder's .medialayer/trash for 30 days.",
                 onCancel: { self.account = nil; browsingProton = false },
@@ -1010,10 +1114,19 @@ struct AddSourceSheet: View {
                 account = remote
             }
             .frame(width: 460)
+        } else if let server = smbSignIn {
+            SMBSignInView(host: server.host, port: server.port, user: server.user, domain: server.domain ?? "",
+                          onCancel: { smbSignIn = nil }) { remote in
+                smbSignIn = nil
+                service = .smb
+                account = remote
+            }
+            .frame(width: 460)
         } else {
             switch service {
             case .google: googleStep.frame(width: 460)
             case .proton: protonStep.frame(width: 460)
+            case .smb: smbStep.frame(width: 460)
             case nil: chooser.frame(width: 460)
             }
         }
@@ -1038,6 +1151,14 @@ struct AddSourceSheet: View {
                     protonSignIn = "" // none connected yet: sign in first
                 } else {
                     service = .proton
+                }
+            }
+            option(icon: "smb", title: "A network share (SMB)", detail: "A folder on a server or NAS, at home or over Tailscale") {
+                error = nil
+                if core.status.smbServers?.isEmpty ?? true {
+                    smbSignIn = CoreStatus.SMBServer(remote: "", host: "", user: "") // none yet: sign in first
+                } else {
+                    service = .smb
                 }
             }
             option(icon: "local", title: "A folder on this Mac or a disk", detail: "Such as an external drive") {
@@ -1105,6 +1226,31 @@ struct AddSourceSheet: View {
         .padding(24)
     }
 
+    /// The second step for SMB: the servers signed in to before, and
+    /// another one.
+    private var smbStep: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Network share").font(.title2)
+            Text("Pick the server that holds the folder for the copy.")
+                .foregroundStyle(.secondary)
+            ForEach(core.status.smbServers ?? [], id: \.self) { s in
+                option(icon: "smb", title: "\(s.user) on \(s.host)",
+                       detail: s.hasPassword ? "Signed in" : "Needs its password") {
+                    if s.hasPassword {
+                        account = s.remote
+                    } else {
+                        smbSignIn = s
+                    }
+                }
+            }
+            option(icon: "smb", title: "Another server or user", detail: "Sign in with a user name and password") {
+                smbSignIn = CoreStatus.SMBServer(remote: "", host: "", user: "")
+            }
+            footer(back: true)
+        }
+        .padding(24)
+    }
+
     @ViewBuilder private func footer(back: Bool) -> some View {
         if let error { Text(error).foregroundStyle(.red).textSelection(.enabled) }
         HStack {
@@ -1146,6 +1292,94 @@ struct AddSourceSheet: View {
             try model.addSecondary(remote: "", folder: url.path)
             dismiss()
         } catch { self.error = error.localizedDescription }
+    }
+}
+
+/// Signs in to an SMB server. The core checks the password by listing
+/// the server's shares; the app keeps it in the login keychain and gives
+/// it to the core at each launch.
+struct SMBSignInView: View {
+    @EnvironmentObject var model: AppModel
+    @State var host: String
+    @State var port: Int
+    @State var user: String
+    @State var domain: String
+    let onCancel: () -> Void
+    let onSignedIn: (String) -> Void
+
+    @State private var password = ""
+    @State private var more = false
+    @State private var working = false
+    @State private var error: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Sign in to a network share").font(.title2)
+            Text("Use a user that can read the music, and write too if this share gets a copy or is the primary. MediaLayer keeps the password in your login keychain. For a server on your tailnet, Tailscale must be connected on this Mac.")
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Form {
+                TextField("Server", text: $host, prompt: Text("nas.local or nas.example.ts.net"))
+                TextField("User name", text: $user)
+                    .textContentType(.username)
+                SecureField("Password", text: $password)
+                    .textContentType(.password)
+                DisclosureGroup("More options", isExpanded: $more) {
+                    TextField("Port", value: $port, format: .number.grouping(.never))
+                    TextField("Domain", text: $domain, prompt: Text("Usually empty"))
+                }
+            }
+            .disabled(working)
+            HStack {
+                Button("Use the Password Finder Saved") {
+                    error = nil
+                    let h = trimmedHost
+                    if let p = SMBPassword.load(host: h, port: port, user: user, finder: true) {
+                        password = p
+                    } else {
+                        error = "The keychain has no password for \(user) on \(h)."
+                    }
+                }
+                .buttonStyle(.link)
+                .disabled(working || trimmedHost.isEmpty || user.isEmpty)
+            }
+            if working { Text("Signing in…").foregroundStyle(.secondary) }
+            if let error { Text(error).foregroundStyle(.red).textSelection(.enabled) }
+            HStack {
+                Button("Cancel", action: onCancel).keyboardShortcut(.cancelAction)
+                Spacer()
+                Button("Sign In") { signIn() }
+                    .buttonStyle(.borderedProminent)
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(working || trimmedHost.isEmpty || user.isEmpty || password.isEmpty || !(1...65535).contains(port))
+            }
+        }
+        .padding(24)
+        .frame(minWidth: 460)
+    }
+
+    /// The server as typed, without smb:// or a share after it.
+    private var trimmedHost: String {
+        var h = host.trimmingCharacters(in: .whitespacesAndNewlines)
+        if h.lowercased().hasPrefix("smb://") { h = String(h.dropFirst(6)) }
+        return h.split(separator: "/").first.map(String.init) ?? ""
+    }
+
+    private func signIn() {
+        working = true
+        error = nil
+        Task {
+            do {
+                let remote = try await model.addSMBServer(host: trimmedHost, port: port, user: user,
+                                                          domain: domain, password: password)
+                password = ""
+                working = false
+                onSignedIn(remote)
+            } catch {
+                self.error = error.localizedDescription
+                working = false
+            }
+        }
     }
 }
 

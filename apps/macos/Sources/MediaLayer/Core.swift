@@ -77,6 +77,18 @@ struct CoreStatus: Decodable, Equatable {
         var signedIn = false // false once Proton ended the session
     }
 
+    var smbServers: [SMBServer]? = []
+    /// An SMB server and user the core has a remote for. The password is
+    /// in the keychain (SMBPassword), and given to the core at launch.
+    struct SMBServer: Decodable, Equatable, Hashable {
+        var remote: String
+        var host: String
+        var port = 445
+        var user: String
+        var domain: String?
+        var hasPassword = false
+    }
+
     struct AudioHashes: Decodable, Equatable {
         var running = false
         var hashed: Int64 = 0
@@ -220,6 +232,47 @@ enum Core {
 
     static func setFolder(_ folder: String) throws {
         try check(folder.withCString { MLSetFolder(UnsafeMutablePointer(mutating: $0)) })
+    }
+
+    /// Picks the library folder on a connected remote, such as an SMB
+    /// server's ("share/path").
+    static func setFolder(_ folder: String, on remote: String) throws {
+        try check(remote.withCString { r in
+            folder.withCString { f in
+                MLSetFolderOn(UnsafeMutablePointer(mutating: r), UnsafeMutablePointer(mutating: f))
+            }
+        })
+    }
+
+    /// Connects to an SMB server (port 0 for 445), checking the user
+    /// name and password; returns the remote's name. The core keeps the
+    /// password in memory only.
+    static func addSMBServer(host: String, port: Int, user: String, domain: String, password: String) async throws -> String {
+        struct Reply: Decodable { var remote: String?; var error: String? }
+        return try await Task.detached {
+            let json = host.withCString { h in
+                user.withCString { u in
+                    domain.withCString { d in
+                        password.withCString { p in
+                            take(MLAddSMBServer(UnsafeMutablePointer(mutating: h), Int32(port), UnsafeMutablePointer(mutating: u),
+                                                UnsafeMutablePointer(mutating: d), UnsafeMutablePointer(mutating: p)))
+                        }
+                    }
+                }
+            } ?? "{}"
+            let reply = try JSONDecoder().decode(Reply.self, from: Data(json.utf8))
+            if let error = reply.error { throw CoreError(message: error) }
+            return reply.remote ?? ""
+        }.value
+    }
+
+    /// Gives the core an SMB remote's password for this session.
+    static func setSMBPassword(remote: String, password: String) {
+        remote.withCString { r in
+            password.withCString { p in
+                MLSetSMBPassword(UnsafeMutablePointer(mutating: r), UnsafeMutablePointer(mutating: p))
+            }
+        }
     }
 
     /// Adds a secondary: a folder on a connected account, or with an empty

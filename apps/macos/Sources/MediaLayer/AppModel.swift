@@ -166,6 +166,12 @@ final class AppModel: ObservableObject {
             startError = error.localizedDescription
             return
         }
+        // The core keeps no SMB password: hand it the saved ones.
+        for s in Core.status().smbServers ?? [] {
+            if let p = SMBPassword.load(host: s.host, port: s.port, user: s.user) {
+                Core.setSMBPassword(remote: s.remote, password: p)
+            }
+        }
         refresh()
         if !status.folder.isEmpty, status.connected {
             try? Core.startSync() // pick up changes made elsewhere since the last run
@@ -327,14 +333,16 @@ final class AppModel: ObservableObject {
         refresh()
     }
 
-    func useFolder(_ folder: String) throws {
+    /// Picks the library folder: in the first Google account (remote
+    /// nil), or on a connected remote such as an SMB server.
+    func useFolder(_ folder: String, on remote: String? = nil) throws {
         // Only the read connection closes first, so the core never deletes
         // the index file under it. What the window shows stays until the
         // core has agreed to the change.
         db = nil
         art.db = nil
         do {
-            try Core.setFolder(folder)
+            if let remote { try Core.setFolder(folder, on: remote) } else { try Core.setFolder(folder) }
         } catch {
             // Refused (unsaved playlist changes, say): reopen the index.
             reload()
@@ -354,6 +362,18 @@ final class AppModel: ObservableObject {
     // MARK: Sources
 
     @Published var addingSource = false
+
+    /// Connects to an SMB server and saves its password in the keychain;
+    /// returns the remote's name.
+    func addSMBServer(host: String, port: Int, user: String, domain: String, password: String) async throws -> String {
+        let remote = try await Core.addSMBServer(host: host, port: port, user: user, domain: domain, password: password)
+        let server = Core.status().smbServers?.first { $0.remote == remote }
+        // As the core saved them, trimmed, so the launch finds the item.
+        try SMBPassword.save(host: server?.host ?? host, port: server?.port ?? (port == 0 ? 445 : port),
+                             user: server?.user ?? user, domain: server?.domain ?? "", password: password)
+        refresh()
+        return remote
+    }
 
     func addSecondary(remote: String, folder: String) throws {
         try Core.addSecondary(remote: remote, folder: folder)
