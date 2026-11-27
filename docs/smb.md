@@ -178,16 +178,24 @@ own is better for SMB:
   `kSecAttrProtocolSMB`, `kSecAttrPort` when it isn't 445,
   `kSecAttrSecurityDomain` for a Windows domain, and a label such as
   "MediaLayer: dean on studio". The user can see, change or delete it.
-- **Which keychain.** macOS has two. The config key (`Keychain.swift`)
-  and Finder's saved SMB passwords are in the older file-based login
-  keychain, shown in Keychain Access. iCloud Keychain sync
-  (`kSecAttrSynchronizable`) works only in the data-protection keychain
+- **Which keychain: the login keychain.** macOS has two. The config key
+  (`Keychain.swift`) and Finder's saved SMB passwords are in the older
+  file-based login keychain, shown in Keychain Access, and that is where
+  the SMB items go. iCloud Keychain sync (`kSecAttrSynchronizable`)
+  works only in the data-protection keychain
   (`kSecUseDataProtectionKeychain`), which needs a
-  `keychain-access-groups` entitlement and so a provisioning profile,
-  even for the Developer ID build; the iOS app must share that access
-  group. Which items the Passwords app shows is to be checked. So the
-  choice of keychain is made once: starting in the login keychain and
-  turning sync on later means moving the items. An open choice below.
+  `keychain-access-groups` entitlement and so a provisioning profile from
+  the paid Apple Developer Program, which MediaLayer doesn't use (see
+  [milestones.md](milestones.md)). So the password doesn't follow the
+  user to the iPhone: the iOS app asks for it once and keeps it in its
+  own keychain. The keychain code stays in one small Swift type, so
+  moving to the data-protection keychain later, if that decision
+  changes, means moving the items in one place.
+- **Signing.** The login keychain trusts an item's app by its code
+  signature. An ad hoc signature changes with every build, so macOS
+  would ask "MediaLayer wants to use your confidential information"
+  again after each update. The app is signed with one stable
+  self-signed identity, so it asks once.
 - **Finder's saved password.** Add Source can offer "Use the password
   saved for this server", reading Finder's item in the login keychain
   and saving a copy as MediaLayer's own item; macOS asks the user
@@ -460,12 +468,9 @@ its own sign-ins) and isn't part of this design.
 2. **SMB as the primary in milestone 4.** I'd allow it from the start,
    since that is where the helper pays off and where Dean's music already
    is. It means adding SMB to Choose Music Folder.
-3. **Which keychain.** The login keychain, as the config key is today,
-   with no entitlement needed; or the data-protection keychain with
-   iCloud sync, so the iPhone app finds the password the Mac saved, at
-   the cost of a provisioning profile and keychain access group for the
-   Mac build. I'd go to the data-protection keychain now if the iOS app
-   is coming, rather than move items later.
+3. **Which keychain.** Decided: the login keychain, as the config key
+   is today, since iCloud Keychain sync needs the paid Apple Developer
+   Program.
 4. **The helper's output: files in the share, or a service on the
    tailnet.** I'd write files in `.medialayer/host/`: no port, no
    pairing, no second set of credentials, and it works through any route

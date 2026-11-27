@@ -14,8 +14,22 @@ https://claude.ai/artifact/4F35w22KCPz88bmpWkrhjK
 - macOS only: Consolidate, write mode and full-file audio hashing, a menu
   bar control, the 10% cache cap with offline albums, the optional
   mount for Tauon and the localhost Subsonic endpoint. It ships as a
-  notarized download with Sparkle updates, because the Mac App Store
-  sandbox does not allow the mount or the local server.
+  download with Sparkle updates, because the Mac App Store sandbox does
+  not allow the mount or the local server.
+- No paid Apple Developer Program. MediaLayer is open source and its
+  builds don't depend on that membership, so: the Mac download isn't
+  notarized (a first launch needs Open Anyway in System Settings,
+  Privacy & Security), nothing uses an entitlement that needs a
+  provisioning profile (such as iCloud Keychain sync), and the iPhone
+  and iPad app is installed from Xcode with a free Apple ID (which
+  expires after 7 days and must be installed again) rather than through
+  TestFlight or the App Store. The Mac app is always free and stays
+  this way. If the iPhone app is ever sold, the paid program may be
+  joined for it then, which would bring TestFlight, the App Store and
+  iCloud Keychain sync to iOS.
+  Builds are signed with one stable self-signed identity rather than
+  ad hoc, so the keychain keeps trusting the app across updates instead
+  of asking again after each one.
 - Later: Android in Kotlin with Jetpack Compose, using a gomobile AAR and
   Media3. Windows and Linux are decided when we get there, leaning toward
   one shared Go desktop app (such as Wails) with libmpv.
@@ -108,11 +122,11 @@ and work on it continues after the AppKit table.
    noticing changes on the share as they happen. The design, with
    Tailscale and the keychain: [smb.md](smb.md).
 5. **macOS desktop features.** Menu bar control, cache cap with offline
-   albums, write-mode toggle, the optional Tauon mount, a notarized build
-   with Sparkle updates.
+   albums, write-mode toggle, the optional Tauon mount, a signed (not
+   notarized) build with Sparkle updates.
 6. **Sharing a library read-only.** The owner shares the library folder
    view-only with another account, such as a child's, and that person's
-   copy of the app plays it: the notarized build from milestone 5 on a
+   copy of the app plays it: the build from milestone 5 on a
    Mac, and the iOS app of milestone 7, which has this mode from its first
    version. Setup offers "Open a library shared with me", which lists the
    account's shared folders. The core opens the folder through a wrapper
@@ -181,7 +195,8 @@ and work on it continues after the AppKit table.
    write. Make Primary on the owner's device doesn't stop the reader
    playing.
 7. **iOS from the same project.** The iOS player check (framework size, 30
-   minutes of locked-screen playback, a TestFlight upload), then the
+   minutes of locked-screen playback, an install from Xcode with a free
+   Apple ID, as there is no TestFlight without the paid program), then the
    iPhone and iPad app, which can open a library a Mac built or set one up
    on its own.
 8. **Tag editing with MusicBrainz (desktop, write mode).** Look up a
