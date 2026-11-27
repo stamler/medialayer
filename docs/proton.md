@@ -264,13 +264,23 @@ What MediaLayer does about it:
   (`runtime/debug.SetCrashOutput`), as stderr is lost for an app opened
   from Finder.
 
-To send upstream (go-proton-api and Proton-API-Bridge, not yet filed):
+Upstream (rclone's forks of go-proton-api and Proton-API-Bridge have
+issues turned off, so bugs go to rclone/rclone):
 - **Nil response.** `CreateFile` and `CreateFolder` should check `resp`
   before reading its status, or `doRes` should return the response with
-  its error.
+  its error. Filed as
+  [rclone#10468](https://github.com/rclone/rclone/issues/10468) (the
+  same stack trace as the closed
+  [rclone#7561](https://github.com/rclone/rclone/issues/7561)).
 - **Empty retry.** `UploadBlock` should give resty a reader it can
-  rewind, or turn on `RetryResetReaders`.
-- **Leaked goroutines.** In Proton-API-Bridge `uploadPendingBlocks`,
+  rewind, or turn on `RetryResetReaders` (resty v2.16.4 or newer for
+  `SetMultipartField` readers). An open fix exists:
+  [go-proton-api#9](https://github.com/rclone/go-proton-api/pull/9). It
+  may not cover the second attempt after a 401 refresh in `doRes`.
+- **Leaked goroutines.** Already reported as
+  [rclone#10224](https://github.com/rclone/rclone/issues/10224), with a
+  fix in
+  [Proton-API-Bridge#8](https://github.com/rclone/Proton-API-Bridge/pull/8). In Proton-API-Bridge `uploadPendingBlocks`,
   `errChan` is unbuffered and the function returns on the first error.
   The other block goroutines then block forever and keep their semaphore
   permits. Also, a failed `Acquire` doesn't return, so `Release` is
