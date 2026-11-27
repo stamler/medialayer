@@ -138,7 +138,9 @@ func (c *Core) index(ctx context.Context, f fs.Fs) error {
 	pack := &artPack{dir: c.artDir(), db: db}
 	defer pack.close()
 	if len(todo) > 0 {
-		if err := c.indexFiles(ctx, db, pack, todo); err != nil {
+		// Tags and art the host helper already read, if it runs.
+		inv := loadHostIndex(ctx, f)
+		if err := c.indexFiles(ctx, db, pack, todo, inv); err != nil {
 			return err
 		}
 	}
@@ -262,7 +264,7 @@ func hasSHA(known map[string]index.Known, paths []string) bool {
 }
 
 // indexFiles reads and indexes the given files, several at a time.
-func (c *Core) indexFiles(ctx context.Context, db *index.DB, pack *artPack, todo []fs.Object) error {
+func (c *Core) indexFiles(ctx context.Context, db *index.DB, pack *artPack, todo []fs.Object, inv *hostIndex) error {
 	if err := db.MarkFilesChanged(); err != nil {
 		return err
 	}
@@ -276,7 +278,7 @@ func (c *Core) indexFiles(ctx context.Context, db *index.DB, pack *artPack, todo
 			defer wg.Done()
 			for o := range work {
 				c.setJob(func(j *jobStatus) { j.Current = o.Remote() })
-				err := indexFile(ctx, db, pack, o)
+				err := indexFile(ctx, db, pack, o, inv)
 				if err == nil {
 					c.countTracks(db)
 				}
@@ -557,49 +559,23 @@ func (c *Core) currentDB() *index.DB {
 	return c.db
 }
 
-// indexFile reads one file's header with range requests and writes it to
-// the index.
-func indexFile(ctx context.Context, db *index.DB, pack *artPack, o fs.Object) error {
-	fetch := func(offset, length int64) ([]byte, error) {
-		if length <= 0 {
-			return nil, nil
-		}
-		rc, err := o.Open(ctx, &fs.RangeOption{Start: offset, End: offset + length - 1})
-		if err != nil {
-			return nil, err
-		}
-		defer func() { _ = rc.Close() }()
-		return readSpan(io.LimitReader(rc, length), spanLen(o, offset, length))
-	}
-	var info *media.Info
-	var err error
-	switch mediaFormat(o.Remote()) {
-	case "flac":
-		var header []byte
-		header, _, err = media.FLACHeader(fetch, o.Size(), maxHeader)
-		if err == nil {
-			info, err = media.ParseFLAC(header)
-		}
-	case "mp3":
-		info, err = media.ParseMP3(fetch, o.Size())
-	case "m4a":
-		info, err = media.ParseMP4(fetch, o.Size())
-	case "caf":
-		info, err = media.ParseCAF(fetch, o.Size())
-	case "oga":
-		info, err = media.ParseOggFLAC(fetch, o.Size(), maxHeader)
-	}
-	if err != nil {
-		return err
-	}
-
-	var arts []index.FileArt
-	for _, p := range info.Pictures {
-		sum := sha256.Sum256(p.Data)
-		if err := pack.store(sum[:], p); err != nil {
+// indexFile writes one file to the index: its tags and art from the
+// host helper's inventory when inv has a row for this very file, and
+// otherwise read from its header with range requests.
+func indexFile(ctx context.Context, db *index.DB, pack *artPack, o fs.Object, inv *hostIndex) error {
+	info, arts, ok := inv.info(ctx, db, pack, o)
+	if !ok {
+		var err error
+		if info, err = readInfo(ctx, o); err != nil {
 			return err
 		}
-		arts = append(arts, index.FileArt{SHA256: sum[:], Role: p.Type})
+		for _, p := range info.Pictures {
+			sum := sha256.Sum256(p.Data)
+			if err := pack.store(sum[:], p); err != nil {
+				return err
+			}
+			arts = append(arts, index.FileArt{SHA256: sum[:], Role: p.Type})
+		}
 	}
 	sha, _ := o.Hash(ctx, hash.SHA256) // "" where the cloud has none
 	var cloudID string
@@ -607,7 +583,7 @@ func indexFile(ctx context.Context, db *index.DB, pack *artPack, o fs.Object) er
 		cloudID = ider.ID()
 	}
 	info.Pictures = nil // stored in the pack; don't hold them in memory
-	_, err = db.PutFile(index.File{
+	_, err := db.PutFile(index.File{
 		Path:    o.Remote(),
 		Size:    o.Size(),
 		MTime:   o.ModTime(ctx).UnixMilli(),
@@ -618,6 +594,30 @@ func indexFile(ctx context.Context, db *index.DB, pack *artPack, o fs.Object) er
 		Art:     arts,
 	})
 	return err
+}
+
+// readInfo reads a media file's header, with range requests. The host
+// helper reads with it too, so its rows are what indexing here would
+// make; a change to what it returns bumps media.ParserVersion.
+func readInfo(ctx context.Context, o fs.Object) (*media.Info, error) {
+	fetch := objectFetch(ctx, o)
+	switch mediaFormat(o.Remote()) {
+	case "flac":
+		header, _, err := media.FLACHeader(fetch, o.Size(), maxHeader)
+		if err != nil {
+			return nil, err
+		}
+		return media.ParseFLAC(header)
+	case "mp3":
+		return media.ParseMP3(fetch, o.Size())
+	case "m4a":
+		return media.ParseMP4(fetch, o.Size())
+	case "caf":
+		return media.ParseCAF(fetch, o.Size())
+	case "oga":
+		return media.ParseOggFLAC(fetch, o.Size(), maxHeader)
+	}
+	return nil, fmt.Errorf("%s: %w", path.Base(o.Remote()), media.ErrUnsupported)
 }
 
 // readSpan reads r until n bytes or its end, in one buffer of n bytes.

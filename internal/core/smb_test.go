@@ -217,3 +217,43 @@ func TestSMBPrimary(t *testing.T) {
 		t.Errorf("a sync with nothing changed published %v", again)
 	}
 }
+
+// The host helper's rows fit the files as a device lists them over SMB:
+// every path, size and time matches, so indexing takes them all.
+func TestSMBHostHelper(t *testing.T) {
+	srv := smbServerForTest(t)
+	ctx := context.Background()
+	folder, local := srv.folder(t)
+	if err := os.CopyFS(local, os.DirFS(writeHostLibrary(t, bytes.Repeat([]byte("cover"), 2000)))); err != nil {
+		t.Fatal(err)
+	}
+	write(t, filepath.Join(local, "D/Odd name, ünïcode & spaces/01 – track.flac"), encodedFLAC(t, "Odd", 3, 4096))
+	runHostOnce(t, local)
+	c, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+	remote, err := c.AddSMBServer(ctx, srv.host, srv.port, srv.user, "", srv.pass)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := openSMB(ctx, remote, folder)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inv := loadHostIndex(ctx, f)
+	if inv == nil || !inv.tags || !inv.hashes || len(inv.files) != 5 {
+		t.Fatalf("inventory over SMB: %+v", inv)
+	}
+	for p, r := range inv.files {
+		o, err := f.NewObject(ctx, p)
+		if err != nil {
+			t.Errorf("%s: %v", p, err)
+			continue
+		}
+		if inv.row(o.Remote(), o.Size(), o.ModTime(ctx).UnixMilli()) == nil {
+			t.Errorf("%s over SMB: size %d time %d; the helper's %d %d", p, o.Size(), o.ModTime(ctx).UnixMilli(), r.Size, r.MTime)
+		}
+	}
+}

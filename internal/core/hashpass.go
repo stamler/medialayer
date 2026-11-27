@@ -148,6 +148,12 @@ func (c *Core) hashPass(ctx context.Context, db *index.DB) error {
 			h.failed = map[string]bool{}
 		}
 	})
+	// Hashes the host helper made on the server's own disk, if it runs:
+	// they go into the index only (see host.go).
+	var inv *hostIndex
+	if len(todo) > 0 {
+		inv = loadHostIndex(ctx, f)
+	}
 	defer func() {
 		if err := c.saveAudioHashes(nil); err != nil {
 			fs.Errorf(nil, "save %s: %v", audioHashFile, err)
@@ -168,6 +174,31 @@ func (c *Core) hashPass(ctx context.Context, db *index.DB) error {
 		if skip {
 			continue
 		}
+		// store records sha for the file at p, as listed with size and mtime.
+		store := func(p string, size, mtime int64, sha []byte) error {
+			stored := false
+			if _, err := c.hashWriteOK(ctx, func() error {
+				var err error
+				if stored, err = db.SetAudioSHA(p, size, mtime, sha); err != nil || !stored || marked {
+					return err
+				}
+				// The hashes go out with the next index version.
+				marked = true
+				return db.SetMeta("dirty", "1")
+			}); err != nil {
+				return err
+			}
+			if stored {
+				update(func(h *hashState) { h.status.Hashed++ })
+			}
+			return nil
+		}
+		if sha := inv.audioSHA(t.Path, t.Size, t.MTime); sha != nil {
+			if err := store(t.Path, t.Size, t.MTime, sha); err != nil {
+				return err
+			}
+			continue
+		}
 		o, err := f.NewObject(ctx, t.Path)
 		if err != nil || o.Size() != t.Size || !sameTime(f, t.MTime, o.ModTime(ctx).UnixMilli()) {
 			continue // changed since it was indexed: the next sync indexes it again
@@ -184,20 +215,8 @@ func (c *Core) hashPass(ctx context.Context, db *index.DB) error {
 			})
 			continue
 		}
-		stored := false
-		if _, err := c.hashWriteOK(ctx, func() error {
-			var err error
-			if stored, err = storeAudioSHA(ctx, db, o, sha); err != nil || !stored || marked {
-				return err
-			}
-			// The hashes go out with the next index version.
-			marked = true
-			return db.SetMeta("dirty", "1")
-		}); err != nil {
+		if err := store(o.Remote(), o.Size(), o.ModTime(ctx).UnixMilli(), sha); err != nil {
 			return err
-		}
-		if stored {
-			update(func(h *hashState) { h.status.Hashed++ })
 		}
 		if i%50 == 49 {
 			if err := c.saveAudioHashes(nil); err != nil {

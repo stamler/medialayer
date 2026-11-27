@@ -2,6 +2,12 @@ package media
 
 import "errors"
 
+// ParserVersion names what the parsers return for a file. The host
+// helper's rows (core's host.go) are used by a device only when its
+// parser version is the device's, so any change to the tags, the
+// audio properties or the pictures a file gives bumps it.
+const ParserVersion = "1"
+
 // Info is what MediaLayer indexes about one audio file.
 type Info struct {
 	Format     string // "flac", "mp3", "m4a", "caf" or "oga"
