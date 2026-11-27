@@ -317,7 +317,7 @@ func findKey() (*device.Device, error) {
 // closeKey closes a key, on the HID thread: closing ends hidapi's device
 // manager (hid_exit), which belongs to that thread.
 func closeKey(dev *device.Device) {
-	onHIDThread(func() { closeKey(dev) })
+	onHIDThread(func() { _ = dev.Close() })
 }
 
 // hidapi on macOS schedules its device manager on the run loop of the

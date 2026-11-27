@@ -30,8 +30,16 @@ func TestKeyFromManyThreads(t *testing.T) {
 			_, err := assertWithKey(ctx, req, "", func(bool) {})
 			done <- err
 		}()
-		err := <-done
+		var err error
+		select {
+		case err = <-done:
+		case <-time.After(time.Minute):
+			t.Fatalf("try %d hung", i)
+		}
 		t.Logf("try %d: %v", i, err)
+		if errors.Is(err, context.DeadlineExceeded) {
+			t.Fatal("the key waited for a touch: this test needs a key with a PIN")
+		}
 		if errors.Is(err, ErrProtonNoKey) {
 			t.Fatal("plug in a security key")
 		}
