@@ -516,9 +516,12 @@ signs in with the key plugged in over USB, as Proton's Bridge does: the
 core reads the WebAuthn options Proton sends with the first step, has
 the key sign Proton's challenge (a touch, after its PIN when the key has
 one, as Bridge asks), and sends the signature back as the second step.
-The app asks for the PIN in a secure field, and it goes to the key only:
-nothing keeps it. The app shows "Touch your security key" while the key
-waits. With an authenticator app as well, a code entered is used
+The app asks for the PIN on a step of its own, sent only by clicking
+Continue (a YubiKey touched early types a one-time code and presses
+Return), and refuses one that looks like such a code before the key or
+Proton sees it; the PIN goes to the key only, and nothing keeps it. The
+app then shows "Touch your security key now" on a screen with no fields
+while the key waits. With an authenticator app as well, a code entered is used
 instead. One key at a time; a passkey kept in iCloud Keychain (which only
 Proton's own apps and website may use) can't sign in. The core identifies
 itself to Proton with the app version a release of rclone sends. The password goes to Proton only: the core keeps the session Proton

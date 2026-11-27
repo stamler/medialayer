@@ -8,8 +8,10 @@ import (
 	"fmt"
 	"log/slog"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/go-ctap/ctaphid/pkg/ctaphid"
 	"github.com/go-ctap/ctaphid/pkg/ctaptypes"
@@ -34,6 +36,20 @@ var ErrProtonNoKey = errors.New("plug in your security key, then sign in again (
 
 // ErrProtonNeedsPIN: the security key has a PIN, which it wants first.
 var ErrProtonNeedsPIN = errors.New("your security key has a PIN: enter it, then touch the key when it blinks")
+
+// pinProblem says why pin can't be a security key's PIN, so it never
+// reaches the key, where a wrong PIN costs one of a few tries: a YubiKey
+// touched early types a one-time code (44 modhex letters) into whatever
+// field has the cursor.
+func pinProblem(pin string) error {
+	if len(pin) >= 32 && strings.Trim(pin, "cbdefghijklnrtuv") == "" {
+		return needError{msg: "that's the code your key types when touched, not its PIN: type the PIN, and touch the key only when MediaLayer asks", need: ErrProtonNeedsPIN}
+	}
+	if n := utf8.RuneCountInString(pin); n < 4 || len(pin) > 63 {
+		return needError{msg: "a security key PIN has 4 to 63 characters", need: ErrProtonNeedsPIN}
+	}
+	return nil
+}
 
 // needError is a message that still tells the app what to ask for, and
 // what else it may ask for (also, if not nil).

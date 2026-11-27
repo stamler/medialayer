@@ -107,6 +107,11 @@ func (c *Core) ConnectProton(ctx context.Context, user, password, mailbox, code,
 	if user == "" || password == "" {
 		return "", errors.New("enter your Proton username and password")
 	}
+	if pin != "" {
+		if err := pinProblem(pin); err != nil {
+			return "", err // before Proton or the key sees anything
+		}
+	}
 	name := protonRemote
 	if accounts := protonAccounts(); len(accounts) > 0 {
 		a := accounts[0]

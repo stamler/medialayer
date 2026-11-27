@@ -361,3 +361,20 @@ func TestNoKeyAsksForCode(t *testing.T) {
 		t.Errorf("needError with also = %v", both)
 	}
 }
+
+func TestPINProblem(t *testing.T) {
+	otp := "cccccbcgfkjrhvnlbkvhdnlbvrgnhlnrefdibijevklt" // a YubiKey's typed code
+	for pin, ok := range map[string]bool{"1234": true, "my pin 42": true, otp: false, "123": false, "": false} {
+		err := pinProblem(pin)
+		if (err == nil) != ok {
+			t.Errorf("pinProblem(%q) = %v", pin, err)
+		}
+		if err != nil && !errors.Is(err, ErrProtonNeedsPIN) {
+			t.Errorf("pinProblem(%q) doesn't ask for the PIN again", pin)
+		}
+	}
+	c := newTestCore(t, t.TempDir())
+	if _, err := c.ConnectProton(context.Background(), "a@proton.me", "pw", "", "", otp); !errors.Is(err, ErrProtonNeedsPIN) {
+		t.Errorf("a typed code went on as a PIN: %v", err)
+	}
+}

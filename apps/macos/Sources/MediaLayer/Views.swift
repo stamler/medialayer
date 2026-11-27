@@ -1070,13 +1070,20 @@ struct ProtonSignInView: View {
     let onCancel: () -> Void
     let onSignedIn: (String) -> Void
 
+    /// The sign-in's steps. A security key's PIN has a step of its own,
+    /// with no Return shortcut, and the touch a screen with no fields at
+    /// all: a YubiKey touched early types a one-time code and presses
+    /// Return, which must never land in a field or press a button.
+    private enum Step { case account, pin }
+
+    @State private var step = Step.account
     @State private var password = ""
     @State private var mailbox = ""
     @State private var code = ""
     @State private var askCode = false
     @State private var askMailbox = false
     @State private var pin = "" // the security key's; cleared after each try
-    @State private var askPin = false
+    @State private var codeInstead = false // the account has a 2FA code too
     @State private var working = false
     @State private var touchKey = false
     @State private var error: String?
@@ -1084,30 +1091,14 @@ struct ProtonSignInView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Sign in to Proton Drive").font(.title2)
-            Text("Your password goes to Proton only. MediaLayer keeps the session Proton gives it, which unlocks your files until Proton ends it. One Proton account can be connected at a time.")
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-            Form {
-                TextField("Username or email", text: $user)
-                    .textContentType(.username)
-                SecureField("Password", text: $password)
-                    .textContentType(.password)
-                if askMailbox {
-                    SecureField("Mailbox password", text: $mailbox)
-                }
-                if askPin {
-                    SecureField("Security key PIN", text: $pin)
-                        .textContentType(.oneTimeCode) // not a password to save
-                }
-                if askCode {
-                    // Left empty, a security key signs in, if the account has one.
-                    TextField("2FA code", text: $code, prompt: Text("Leave empty to use a security key"))
-                        .textContentType(.oneTimeCode)
-                }
-            }
             if touchKey {
-                Label("Touch your security key now.", systemImage: "key.fill").font(.headline)
-            } else if working {
+                touchScreen
+            } else if step == .pin {
+                pinStep
+            } else {
+                accountStep
+            }
+            if working && !touchKey {
                 Text("Signing in…").foregroundStyle(.secondary)
             }
             if let error { Text(error).foregroundStyle(.red).textSelection(.enabled) }
@@ -1117,14 +1108,11 @@ struct ProtonSignInView: View {
                     onCancel()
                 }.keyboardShortcut(.cancelAction)
                 Spacer()
-                Button("Sign In", action: signIn)
-                    .buttonStyle(.borderedProminent)
-                    .keyboardShortcut(.defaultAction)
-                    .disabled(working || user.trimmingCharacters(in: .whitespaces).isEmpty || password.isEmpty
-                              || (askMailbox && mailbox.isEmpty) || (askPin && pin.isEmpty && code.isEmpty))
+                if !touchKey { primaryButton }
             }
         }
         .padding(24)
+        .frame(minWidth: 460)
         .onDisappear { if working { Core.cancelProtonSignIn() } }
         // A sign-in with a security key waits for its touch.
         .task(id: working) {
@@ -1136,12 +1124,95 @@ struct ProtonSignInView: View {
         }
     }
 
+    private var accountStep: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Your password goes to Proton only. MediaLayer keeps the session Proton gives it, which unlocks your files until Proton ends it. One Proton account can be connected at a time.")
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Form {
+                TextField("Username or email", text: $user)
+                    .textContentType(.username)
+                SecureField("Password", text: $password)
+                    .textContentType(.password)
+                if askMailbox {
+                    SecureField("Mailbox password", text: $mailbox)
+                }
+                if askCode {
+                    TextField("2FA code", text: $code, prompt: Text("From your authenticator app"))
+                        .textContentType(.oneTimeCode)
+                }
+            }
+            .disabled(working)
+        }
+    }
+
+    private var pinStep: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Your security key has a PIN. Type it here and click Continue. Don't touch the key yet: MediaLayer will tell you when.")
+                .fixedSize(horizontal: false, vertical: true)
+            Form {
+                SecureField("Security key PIN", text: $pin)
+                    .textContentType(.oneTimeCode) // not a password to save
+                    .onSubmit {} // Return does nothing here
+            }
+            .disabled(working)
+            if codeInstead {
+                Button("Use a code from your authenticator app instead") {
+                    pin = ""
+                    error = nil
+                    askCode = true
+                    step = .account
+                }
+                .buttonStyle(.link)
+                .disabled(working)
+            }
+        }
+    }
+
+    private var touchScreen: some View {
+        VStack(spacing: 12) {
+            Image(systemName: "key.fill").font(.system(size: 40))
+            Text("Touch your security key now").font(.title3.bold())
+            Text("Touch the key while it blinks.").foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 24)
+    }
+
+    @ViewBuilder private var primaryButton: some View {
+        switch step {
+        case .account:
+            Button("Sign In", action: signIn)
+                .buttonStyle(.borderedProminent)
+                .keyboardShortcut(.defaultAction)
+                .disabled(working || user.trimmingCharacters(in: .whitespaces).isEmpty || password.isEmpty
+                          || (askMailbox && mailbox.isEmpty))
+        case .pin:
+            // No Return shortcut: only a click sends the PIN.
+            Button("Continue", action: sendPIN)
+                .buttonStyle(.borderedProminent)
+                .disabled(working || pin.isEmpty)
+        }
+    }
+
+    /// Checks the PIN before it goes to the key, where a wrong one costs
+    /// one of the key's few tries.
+    private func sendPIN() {
+        if let problem = Core.securityKeyPINProblem(pin) {
+            pin = ""
+            error = problem
+            return
+        }
+        signIn()
+    }
+
     private func signIn() {
         working = true
         error = nil
+        let pinNow = step == .pin ? pin : ""
         Task {
             do {
-                let remote = try await Core.connectProton(user: user, password: password, mailbox: mailbox, code: code, pin: pin)
+                let remote = try await Core.connectProton(user: user, password: password, mailbox: mailbox, code: code, pin: pinNow)
                 pin = ""
                 working = false
                 onSignedIn(remote)
@@ -1151,9 +1222,12 @@ struct ProtonSignInView: View {
                 code = "" // each try signs in afresh, and a code is good once
                 pin = ""
                 switch e.need {
-                case .twoFA: askCode = true
-                case .mailbox: askMailbox = true
-                case .pin: askPin = true; if e.or == .twoFA { askCode = true }
+                case .twoFA: askCode = true; step = .account
+                case .mailbox: askMailbox = true; step = .account
+                case .pin:
+                    codeInstead = e.or == .twoFA
+                    if step != .pin { error = nil } // the step says it
+                    step = .pin
                 case nil: break
                 }
             } catch {
