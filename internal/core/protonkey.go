@@ -525,17 +525,9 @@ func touchToPick(ctx context.Context, path string) error {
 	if err != nil {
 		return fmt.Errorf("couldn't open the security key: %w", err)
 	}
-	defer onHIDThread(func() { _ = raw.Close() })
-	nonce := make([]byte, 8)
-	if _, err := rand.Read(nonce); err != nil {
-		return err
-	}
-	ch, err := ctaphid.Init(raw, ctaphid.BROADCAST_CID, nonce)
-	if err != nil {
-		return fmt.Errorf("the security key didn't answer: %w", err)
-	}
 	enc, err := cbor.CTAP2EncOptions().EncMode()
 	if err != nil {
+		onHIDThread(func() { _ = raw.Close() })
 		return err
 	}
 	req, err := enc.Marshal(map[int]any{
@@ -547,20 +539,40 @@ func touchToPick(ctx context.Context, path string) error {
 		9: 1,        // PIN protocol one
 	})
 	if err != nil {
+		onHIDThread(func() { _ = raw.Close() })
 		return err
 	}
+	// The talk with the key runs, and closes the handle, on a goroutine of
+	// its own: a read can't be cut short, and the handle must outlive it.
+	cid := make(chan ctaphid.ChannelID, 1)
 	errc := make(chan error, 1)
 	go func() {
-		_, err := ctaphid.CBOR(raw, ch.CID, append([]byte{byte(ctaptypes.AuthenticatorMakeCredential)}, req...))
+		defer onHIDThread(func() { _ = raw.Close() })
+		nonce := make([]byte, 8)
+		if _, err := rand.Read(nonce); err != nil {
+			errc <- err
+			return
+		}
+		ch, err := ctaphid.Init(raw, ctaphid.BROADCAST_CID, nonce)
+		if err != nil {
+			errc <- fmt.Errorf("the security key didn't answer: %w", err)
+			return
+		}
+		cid <- ch.CID
+		_, err = ctaphid.CBOR(raw, ch.CID, append([]byte{byte(ctaptypes.AuthenticatorMakeCredential)}, req...))
 		errc <- err
 	}()
 	select {
 	case err = <-errc:
 	case <-ctx.Done():
-		_ = ctaphid.Cancel(raw, ch.CID)
 		select {
-		case <-errc:
-		case <-time.After(keyAnswerTimeout):
+		case c := <-cid:
+			_ = ctaphid.Cancel(raw, c)
+			select { // the key answers a cancel at once
+			case <-errc:
+			case <-time.After(keyAnswerTimeout):
+			}
+		default: // still saying hello: it ends, and closes, by itself
 		}
 		return ctx.Err()
 	}
@@ -569,6 +581,10 @@ func touchToPick(ctx context.Context, path string) error {
 		switch ce.StatusCode {
 		case ctaphid.CTAP2_ERR_PIN_INVALID, ctaphid.CTAP2_ERR_PIN_AUTH_INVALID, ctaphid.CTAP2_ERR_PIN_NOT_SET:
 			return nil // touched, then refused for the PIN, as asked
+		case ctaphid.CTAP2_ERR_PIN_BLOCKED:
+			return errors.New("the security key is locked after too many wrong PINs: it needs a reset (in Yubico Authenticator), which removes its sign-ins")
+		case ctaphid.CTAP2_ERR_PIN_AUTH_BLOCKED:
+			return errors.New("the security key stopped taking PINs after several wrong ones: unplug it, plug it in again, and sign in again")
 		}
 	}
 	if err == nil {
