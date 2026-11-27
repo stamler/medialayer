@@ -54,16 +54,16 @@ func TestConnectProtonRefusesSecondAccountInUse(t *testing.T) {
 	c := newTestCore(t, t.TempDir())
 	fakeProton(t, protonRemote, "a@proton.me")
 	ctx := context.Background()
-	if _, err := c.ConnectProton(ctx, " ", "pw", "", ""); err == nil {
+	if _, err := c.ConnectProton(ctx, " ", "pw", "", "", ""); err == nil {
 		t.Error("signed in without a username")
 	}
-	if _, err := c.ConnectProton(ctx, "b@proton.me", "", "", ""); err == nil {
+	if _, err := c.ConnectProton(ctx, "b@proton.me", "", "", "", ""); err == nil {
 		t.Error("signed in without a password")
 	}
 	c.mu.Lock()
 	c.settings.Secondaries = []source{{ID: "p", Remote: protonRemote, Folder: "Music"}}
 	c.mu.Unlock()
-	_, err := c.ConnectProton(ctx, "b@proton.me", "pw", "", "")
+	_, err := c.ConnectProton(ctx, "b@proton.me", "pw", "", "", "")
 	if err == nil || !strings.Contains(err.Error(), "one Proton account") {
 		t.Errorf("a second account replaced the one in use: %v", err)
 	}
@@ -303,14 +303,16 @@ func TestProtonKeyStepSendsAssertion(t *testing.T) {
 	old := assertWithKey
 	defer func() { assertWithKey = old }()
 	var waited []bool
-	assertWithKey = func(_ context.Context, req fidoRequest, waiting func(bool)) (fidoAssertion, error) {
+	var gotPIN string
+	assertWithKey = func(_ context.Context, req fidoRequest, pin string, waiting func(bool)) (fidoAssertion, error) {
+		gotPIN = pin
 		waiting(true)
 		waiting(false)
 		return fidoAssertion{credentialID: []byte{9, 8, 7}, authData: []byte("auth"), signature: []byte("sig")}, nil
 	}
 	opts := protonFidoOptions(t)
 	auth := proton.Auth{TwoFA: proton.TwoFAInfo{Enabled: proton.HasFIDO2, FIDO2: proton.FIDO2Info{AuthenticationOptions: opts}}}
-	if err := protonKeyStep(context.Background(), c, auth, func(w bool) { waited = append(waited, w) }); err != nil {
+	if err := protonKeyStep(context.Background(), c, auth, "1234", func(w bool) { waited = append(waited, w) }); err != nil {
 		t.Fatal(err)
 	}
 	f := got["FIDO2"]
@@ -327,6 +329,9 @@ func TestProtonKeyStepSendsAssertion(t *testing.T) {
 	if fmt.Sprint(f["AuthenticationOptions"]) != fmt.Sprint(opts) {
 		t.Errorf("options sent back = %v", f["AuthenticationOptions"])
 	}
+	if gotPIN != "1234" {
+		t.Errorf("the key got PIN %q", gotPIN)
+	}
 	if fmt.Sprint(waited) != "[true false]" {
 		t.Errorf("waiting = %v", waited)
 	}
@@ -338,6 +343,7 @@ func TestKeyError(t *testing.T) {
 		ctaphid.CTAP2_ERR_USER_ACTION_TIMEOUT: "touched in time",
 		ctaphid.CTAP2_ERR_PUAT_REQUIRED:       "PIN",
 	} {
+
 		err := keyError(fmt.Errorf("x: %w", &ctaphid.CTAPError{StatusCode: code}))
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("keyError(%v) = %v", code, err)
@@ -346,8 +352,12 @@ func TestKeyError(t *testing.T) {
 }
 
 func TestNoKeyAsksForCode(t *testing.T) {
-	err := needError{"plug in your key", ErrProtonNeeds2FA}
+	err := needError{msg: "plug in your key", need: ErrProtonNeeds2FA}
 	if !errors.Is(err, ErrProtonNeeds2FA) || err.Error() != "plug in your key" {
 		t.Errorf("needError = %v", err)
+	}
+	both := needError{msg: "pin", need: ErrProtonNeedsPIN, also: ErrProtonNeeds2FA}
+	if !errors.Is(both, ErrProtonNeedsPIN) || !errors.Is(both, ErrProtonNeeds2FA) {
+		t.Errorf("needError with also = %v", both)
 	}
 }

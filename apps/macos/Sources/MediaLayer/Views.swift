@@ -1075,6 +1075,8 @@ struct ProtonSignInView: View {
     @State private var code = ""
     @State private var askCode = false
     @State private var askMailbox = false
+    @State private var pin = "" // the security key's; cleared after each try
+    @State private var askPin = false
     @State private var working = false
     @State private var touchKey = false
     @State private var error: String?
@@ -1092,6 +1094,10 @@ struct ProtonSignInView: View {
                     .textContentType(.password)
                 if askMailbox {
                     SecureField("Mailbox password", text: $mailbox)
+                }
+                if askPin {
+                    SecureField("Security key PIN", text: $pin)
+                        .textContentType(.oneTimeCode) // not a password to save
                 }
                 if askCode {
                     // Left empty, a security key signs in, if the account has one.
@@ -1115,7 +1121,7 @@ struct ProtonSignInView: View {
                     .buttonStyle(.borderedProminent)
                     .keyboardShortcut(.defaultAction)
                     .disabled(working || user.trimmingCharacters(in: .whitespaces).isEmpty || password.isEmpty
-                              || (askMailbox && mailbox.isEmpty))
+                              || (askMailbox && mailbox.isEmpty) || (askPin && pin.isEmpty && code.isEmpty))
             }
         }
         .padding(24)
@@ -1135,21 +1141,25 @@ struct ProtonSignInView: View {
         error = nil
         Task {
             do {
-                let remote = try await Core.connectProton(user: user, password: password, mailbox: mailbox, code: code)
+                let remote = try await Core.connectProton(user: user, password: password, mailbox: mailbox, code: code, pin: pin)
+                pin = ""
                 working = false
                 onSignedIn(remote)
             } catch let e as Core.ProtonSignInError {
                 working = false
                 error = e.message
                 code = "" // each try signs in afresh, and a code is good once
+                pin = ""
                 switch e.need {
                 case .twoFA: askCode = true
                 case .mailbox: askMailbox = true
+                case .pin: askPin = true; if e.or == .twoFA { askCode = true }
                 case nil: break
                 }
             } catch {
                 working = false
                 code = ""
+                pin = ""
                 self.error = error.localizedDescription
             }
         }

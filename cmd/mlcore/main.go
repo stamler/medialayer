@@ -119,24 +119,32 @@ func MLAddGoogleAccount() *C.char {
 }
 
 // MLConnectProton signs in to Proton Drive with a username, password,
-// mailbox password and 2FA code (the last two may be empty). It blocks
+// mailbox password, 2FA code and security key PIN (the last three may be
+// empty). It blocks
 // until Proton answers and returns {"remote": "..."} or {"error": "..."},
-// with "need": "2fa" or "mailbox" when the account needs that too. An
+// with "need": "2fa", "mailbox" or "pin" (the security key's) when the
+// sign-in needs that too, and "or": "2fa" when a 2FA code would do
+// instead of the PIN. An
 // account with a security key signs in with the key plugged in when no
 // code is given (see MLProtonKeyWaiting).
 //
 //export MLConnectProton
-func MLConnectProton(user, password, mailbox, code *C.char) *C.char {
+func MLConnectProton(user, password, mailbox, code, pin *C.char) *C.char {
 	c, err := get()
 	if err == nil {
 		var remote string
-		remote, err = c.ConnectProton(context.Background(), C.GoString(user), C.GoString(password), C.GoString(mailbox), C.GoString(code))
+		remote, err = c.ConnectProton(context.Background(), C.GoString(user), C.GoString(password), C.GoString(mailbox), C.GoString(code), C.GoString(pin))
 		if err == nil {
 			return jsonStr(map[string]string{"remote": remote})
 		}
 	}
 	out := map[string]string{"error": err.Error()}
 	switch {
+	case errors.Is(err, core.ErrProtonNeedsPIN):
+		out["need"] = "pin"
+		if errors.Is(err, core.ErrProtonNeeds2FA) {
+			out["or"] = "2fa" // a code would do instead
+		}
 	case errors.Is(err, core.ErrProtonNeeds2FA):
 		out["need"] = "2fa"
 	case errors.Is(err, core.ErrProtonNeedsMailbox):

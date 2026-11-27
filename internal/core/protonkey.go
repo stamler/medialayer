@@ -23,20 +23,30 @@ import (
 // Proton's own apps do it: Proton sends WebAuthn options with the first
 // step, the key signs Proton's challenge when touched, and the signature
 // goes back as the second step. MediaLayer talks to a key plugged in over
-// USB itself; a passkey kept by the system (iCloud Keychain) needs the
+// USB itself, with its PIN if it has one (passed to the key, never
+// kept); a passkey kept by the system (iCloud Keychain) needs the
 // system's passkey prompt, which an app may only use for its own website.
 
 // ErrProtonNoKey: no security key is plugged in.
 var ErrProtonNoKey = errors.New("plug in your security key, then sign in again (MediaLayer can use a key plugged in over USB, not a passkey kept in iCloud Keychain)")
 
-// needError is a message that still tells the app what to ask for.
+// ErrProtonNeedsPIN: the security key has a PIN, which it wants first.
+var ErrProtonNeedsPIN = errors.New("your security key has a PIN: enter it, then touch the key when it blinks")
+
+// needError is a message that still tells the app what to ask for, and
+// what else it may ask for (also, if not nil).
 type needError struct {
-	msg  string
-	need error
+	msg        string
+	need, also error
 }
 
 func (e needError) Error() string { return e.msg }
-func (e needError) Unwrap() error { return e.need }
+func (e needError) Unwrap() []error {
+	if e.also == nil {
+		return []error{e.need}
+	}
+	return []error{e.need, e.also}
+}
 
 // fidoRequest is what a security key signs: Proton's options, read.
 type fidoRequest struct {
@@ -138,13 +148,13 @@ func newFido2Body(opts any, req fidoRequest, a fidoAssertion) fido2Body {
 // protonKeyStep signs Proton's challenge with a security key and sends
 // the signature as the second step. waiting is told while the key waits
 // for a touch.
-func protonKeyStep(ctx context.Context, c *proton.Client, auth proton.Auth, waiting func(bool)) error {
+func protonKeyStep(ctx context.Context, c *proton.Client, auth proton.Auth, pin string, waiting func(bool)) error {
 	opts := auth.TwoFA.FIDO2.AuthenticationOptions
 	req, err := fidoOptions(opts)
 	if err != nil {
 		return err
 	}
-	a, err := assertWithKey(ctx, req, waiting)
+	a, err := assertWithKey(ctx, req, pin, waiting)
 	if err != nil {
 		return err
 	}
@@ -171,9 +181,11 @@ const keyTouchTimeout = time.Minute
 // keyBusy is held while a sign-in uses the key.
 var keyBusy = make(chan struct{}, 1)
 
-// assertWithKey asks the one security key plugged in to sign req. A
-// variable so tests can stand in for a key.
-var assertWithKey = func(ctx context.Context, req fidoRequest, waiting func(bool)) (fidoAssertion, error) {
+// assertWithKey asks the one security key plugged in to sign req. A key
+// with a PIN is unlocked with pin first, as Proton's Bridge does; with
+// no pin, the error is ErrProtonNeedsPIN. The PIN goes to the key only.
+// A variable so tests can stand in for a key.
+var assertWithKey = func(ctx context.Context, req fidoRequest, pin string, waiting func(bool)) (fidoAssertion, error) {
 	// One sign-in at a time uses the key: macOS opens it for one user,
 	// and closing it ends hidapi for the whole process. A cancelled
 	// sign-in's key keeps it until the key gives up.
@@ -210,6 +222,21 @@ var assertWithKey = func(ctx context.Context, req fidoRequest, waiting func(bool
 		_ = dev.Close()
 		return fidoAssertion{}, errors.New("this security key is too old for MediaLayer to use (it has no PIN support): sign in with an authenticator app code")
 	}
+	var token []byte
+	// A key that can't use its PIN for sign-ins (noMcGa...) signs in with
+	// a touch, as before.
+	if info := dev.GetInfo(); info.Options[ctaptypes.OptionClientPIN] && !info.Options[ctaptypes.OptionNoMcGaPermissionsWithClientPin] {
+		if pin == "" {
+			_ = dev.Close()
+			return fidoAssertion{}, ErrProtonNeedsPIN
+		}
+		token, err = dev.GetPinUvAuthTokenUsingPIN(pin, ctaptypes.PermissionGetAssertion, req.rpID)
+		if err != nil {
+			err = pinError(dev, err)
+			_ = dev.Close()
+			return fidoAssertion{}, err
+		}
+	}
 	allow := make([]webauthntypes.PublicKeyCredentialDescriptor, len(req.allow))
 	for i, id := range req.allow {
 		allow[i] = webauthntypes.PublicKeyCredentialDescriptor{Type: webauthntypes.PublicKeyCredentialTypePublicKey, ID: id}
@@ -233,9 +260,8 @@ var assertWithKey = func(ctx context.Context, req fidoRequest, waiting func(bool
 			}
 		}()
 		r := result{err: errors.New("the security key gave no answer")}
-		// User presence only (a touch), no PIN, as Proton's web sign-in
-		// asks for.
-		for resp, err := range dev.GetAssertion(nil, req.rpID, req.clientData, allow, nil,
+		// A touch, and the PIN's token when the key has one.
+		for resp, err := range dev.GetAssertion(token, req.rpID, req.clientData, allow, nil,
 			map[ctaptypes.Option]bool{ctaptypes.OptionUserPresence: true}) {
 			if err != nil {
 				r = result{err: keyError(err)}
@@ -262,19 +288,41 @@ var assertWithKey = func(ctx context.Context, req fidoRequest, waiting func(bool
 	}
 }
 
+// pinError explains a key's refusal of its PIN.
+func pinError(dev *device.Device, err error) error {
+	var ce *ctaphid.CTAPError
+	if errors.As(err, &ce) {
+		switch ce.StatusCode {
+		case ctaphid.CTAP2_ERR_PIN_INVALID:
+			msg := "that isn't the security key's PIN"
+			if n, _, rerr := dev.GetPINRetries(); rerr == nil {
+				msg += fmt.Sprintf(" (%d tries left before the key locks)", n)
+			}
+			return needError{msg: msg, need: ErrProtonNeedsPIN}
+		case ctaphid.CTAP2_ERR_PIN_AUTH_BLOCKED:
+			return errors.New("the security key stopped taking PINs after several wrong ones: unplug it, plug it in again, and sign in again")
+		case ctaphid.CTAP2_ERR_PIN_BLOCKED:
+			return errors.New("the security key is locked after too many wrong PINs: it needs a reset (in Yubico Authenticator), which removes its sign-ins")
+		case ctaphid.CTAP2_ERR_PIN_POLICY_VIOLATION:
+			return needError{msg: "that PIN is too short for the security key", need: ErrProtonNeedsPIN}
+		}
+	}
+	return fmt.Errorf("the security key couldn't check its PIN: %w", err)
+}
+
 // keyError explains a security key's refusal.
 func keyError(err error) error {
 	var ce *ctaphid.CTAPError
 	if errors.As(err, &ce) {
 		switch ce.StatusCode {
 		case ctaphid.CTAP2_ERR_NO_CREDENTIALS:
-			return errors.New("this security key isn't one registered with this Proton account, or it asks for its PIN for this account, which MediaLayer can't enter yet: plug in the right key and sign in again")
+			return errors.New("this security key isn't one registered with this Proton account: plug in the right key and sign in again")
 		case ctaphid.CTAP2_ERR_OPERATION_DENIED:
 			return errors.New("the security key refused to sign in: sign in again, and touch it when it blinks")
 		case ctaphid.CTAP2_ERR_USER_ACTION_TIMEOUT, ctaphid.CTAP2_ERR_ACTION_TIMEOUT, ctaphid.CTAP2_ERR_KEEPALIVE_CANCEL:
 			return errors.New("the security key wasn't touched in time: sign in again, and touch it when it blinks")
 		case ctaphid.CTAP2_ERR_PUAT_REQUIRED:
-			return errors.New("this security key asks for its PIN for every sign-in, which MediaLayer can't enter yet: turn off \"always require verification\" for it (in Yubico Authenticator) or sign in with an authenticator app code")
+			return errors.New("your security key wants a PIN for every sign-in, but has none set: set one (in Yubico Authenticator), then sign in again")
 		}
 	}
 	return fmt.Errorf("the security key couldn't sign in: %w", err)

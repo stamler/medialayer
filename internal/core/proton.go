@@ -96,11 +96,13 @@ func (c *Core) remoteInUse(remote string) bool {
 // ConnectProton signs in to Proton Drive and returns the remote's name.
 // code is the 2FA code, and mailbox the mailbox password; either may be
 // empty, and the error is ErrProtonNeeds2FA or ErrProtonNeedsMailbox when
-// the account needs it. With no code, an account with a security key signs
+// the account needs it. pin is the security key's PIN, which the key
+// alone sees; the error is ErrProtonNeedsPIN when the key wants it. With
+// no code, an account with a security key signs
 // in with the key plugged in (ProtonKeyWaiting is true while it waits for
 // a touch). Signing in to the connected account again renews
 // its session; another account replaces it, unless the library uses it.
-func (c *Core) ConnectProton(ctx context.Context, user, password, mailbox, code string) (string, error) {
+func (c *Core) ConnectProton(ctx context.Context, user, password, mailbox, code, pin string) (string, error) {
 	user = strings.TrimSpace(user)
 	if user == "" || password == "" {
 		return "", errors.New("enter your Proton username and password")
@@ -125,7 +127,7 @@ func (c *Core) ConnectProton(ctx context.Context, user, password, mailbox, code 
 	}
 	c.protonCancel = cancel
 	c.mu.Unlock()
-	session, err := protonLogin(ctx, user, password, mailbox, code, c.protonKeyWait.Store)
+	session, err := protonLogin(ctx, user, password, mailbox, code, pin, c.protonKeyWait.Store)
 	if err != nil {
 		return "", err
 	}
@@ -177,7 +179,7 @@ var protonAppVersion = func() string {
 // the password, or the mailbox password of a two-password account. It
 // returns the session for the config, under protonSessionKeys. A sign-in
 // that can't finish is signed out at Proton.
-func protonLogin(ctx context.Context, user, password, mailbox, code string, waiting func(bool)) (map[string]string, error) {
+func protonLogin(ctx context.Context, user, password, mailbox, code, pin string, waiting func(bool)) (map[string]string, error) {
 	m := proton.New(
 		proton.WithAppVersion(protonAppVersion),
 		proton.WithUserAgent(fs.GetConfig(ctx).UserAgent),
@@ -216,13 +218,17 @@ func protonLogin(ctx context.Context, user, password, mailbox, code string, wait
 				return fail(fmt.Errorf("Proton didn't accept the 2FA code (codes change every 30 seconds): %w", err))
 			}
 		case tfa&proton.HasFIDO2 != 0:
-			if err := protonKeyStep(ctx, c, auth, waiting); err != nil {
+			if err := protonKeyStep(ctx, c, auth, pin, waiting); err != nil {
 				if tfa&proton.HasTOTP != 0 && ctx.Err() == nil {
 					msg := err.Error() + ". Or enter the code from your authenticator app"
-					if errors.Is(err, ErrProtonNoKey) {
-						msg = "plug in your security key and sign in again, or enter the code from your authenticator app"
+					switch {
+					case errors.Is(err, ErrProtonNoKey):
+						err = needError{msg: "plug in your security key and sign in again, or enter the code from your authenticator app", need: ErrProtonNeeds2FA}
+					case errors.Is(err, ErrProtonNeedsPIN):
+						err = needError{msg: msg, need: ErrProtonNeedsPIN, also: ErrProtonNeeds2FA}
+					default:
+						err = needError{msg: msg, need: ErrProtonNeeds2FA}
 					}
-					err = needError{msg, ErrProtonNeeds2FA}
 				}
 				return fail(err)
 			}

@@ -127,33 +127,39 @@ enum Core {
 
     /// What a Proton sign-in asks for next, besides the username and
     /// password.
-    enum ProtonNeed: String { case twoFA = "2fa", mailbox }
+    enum ProtonNeed: String { case twoFA = "2fa", mailbox, pin }
 
     struct ProtonSignInError: LocalizedError {
         let message: String
         let need: ProtonNeed?
+        var or: ProtonNeed? = nil // asked for instead of need, if given
         var errorDescription: String? { message }
     }
 
     /// Signs in to Proton Drive; returns the remote's name. Throws
     /// ProtonSignInError, whose `need` says when a 2FA code or the
     /// mailbox password is needed too.
-    static func connectProton(user: String, password: String, mailbox: String, code: String) async throws -> String {
-        struct Reply: Decodable { var remote: String?; var error: String?; var need: String? }
+    /// pin is the security key's, and goes to the key only; nothing keeps it.
+    static func connectProton(user: String, password: String, mailbox: String, code: String, pin: String) async throws -> String {
+        struct Reply: Decodable { var remote: String?; var error: String?; var need: String?; var or: String? }
         return try await Task.detached {
             let json = user.withCString { u in
                 password.withCString { p in
                     mailbox.withCString { m in
                         code.withCString { c in
-                            take(MLConnectProton(UnsafeMutablePointer(mutating: u), UnsafeMutablePointer(mutating: p),
-                                                 UnsafeMutablePointer(mutating: m), UnsafeMutablePointer(mutating: c)))
+                            pin.withCString { k in
+                                take(MLConnectProton(UnsafeMutablePointer(mutating: u), UnsafeMutablePointer(mutating: p),
+                                                     UnsafeMutablePointer(mutating: m), UnsafeMutablePointer(mutating: c),
+                                                     UnsafeMutablePointer(mutating: k)))
+                            }
                         }
                     }
                 }
             } ?? "{}"
             let reply = try JSONDecoder().decode(Reply.self, from: Data(json.utf8))
             if let error = reply.error {
-                throw ProtonSignInError(message: error, need: reply.need.flatMap(ProtonNeed.init(rawValue:)))
+                throw ProtonSignInError(message: error, need: reply.need.flatMap(ProtonNeed.init(rawValue:)),
+                                        or: reply.or.flatMap(ProtonNeed.init(rawValue:)))
             }
             return reply.remote ?? ""
         }.value
