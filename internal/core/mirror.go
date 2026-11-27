@@ -902,8 +902,11 @@ func (c *Core) mirror(ctx context.Context, f fs.Fs, src *listing, repo *repoReco
 	}
 	member := memberRecord{LibraryID: repo.LibraryID, Replica: s.ID, State: "copying", Generation: repo.Generation,
 		Recent: recent}
-	if len(copies)+changes > 0 || t.member.State != "synced" || t.member.Snapshot != snapName ||
-		t.member.Generation != repo.Generation {
+	// With no file to change, the old record stays true until the one
+	// written at the end (on Proton each write is several seconds): a sync
+	// cut short leaves it naming the old snapshot and generation, which
+	// Make Primary refuses, as it would refuse "copying".
+	if len(copies)+changes > 0 {
 		if err := writeMember(member); err != nil {
 			return err
 		}
@@ -997,7 +1000,8 @@ func (c *Core) mirror(ctx context.Context, f fs.Fs, src *listing, repo *repoReco
 	if err := c.mirrorRepo(ctx, dst, repo, version, t.theirs); err != nil {
 		return fmt.Errorf("copy .medialayer: %w", err)
 	}
-	if t.member.State != "synced" || t.member.Snapshot != snapName {
+	if t.member.State != "synced" || t.member.Snapshot != snapName || t.member.Version != version ||
+		t.member.Generation != repo.Generation {
 		member.State, member.Snapshot, member.Version, member.SyncedAt = "synced", snapName, version, time.Now().UTC()
 		if err := writeMember(member); err != nil {
 			return err

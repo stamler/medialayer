@@ -292,7 +292,10 @@ Hashes are kept so a file is read once:
 ## Applying changes, and the write order
 
 1. `.medialayer/member.json` is written with state `copying`: which library
-   this folder is a copy of, and that a sync is under way.
+   this folder is a copy of, and that a sync is under way. A sync with no
+   file to copy, replace or remove skips this write; the record it leaves
+   until step 5 names the older snapshot or generation, which Make Primary
+   refuses just as it refuses `copying`.
 2. Removals and replacements: the secondary's file is moved to
    `.medialayer/trash/<time>/<path>` first. Trash folders are emptied after
    30 days.
@@ -560,8 +563,9 @@ session, Add Source, "Proton Drive, sign in again" fixes it.
   folder links, and the core opens a fresh client for each sync, so that
   cache lasts one sync. Proton keeps modification times to the second,
   so after the switch each indexed file whose time differs by less than
-  a second is the same file, keeping its id, and takes Proton's time;
-  nothing is read again. Each renewal of the sync lock adds a revision
+  a second is the same file, keeping its id and its time; nothing is read
+  again. Back on Drive, a row whose time is a whole second matches a time
+  within that second, so the switch back reads nothing again either. Each renewal of the sync lock adds a revision
   of its small claim file on Proton. Choose Music Folder still browses
   Google Drive only, so a Proton primary is reached by Make Primary.
 - **One account at a time.** rclone's Proton backend keeps the config
