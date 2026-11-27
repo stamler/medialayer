@@ -192,7 +192,7 @@ func objectFetch(ctx context.Context, o fs.Object) media.FetchFunc {
 			return nil, err
 		}
 		defer func() { _ = rc.Close() }()
-		return io.ReadAll(io.LimitReader(ctxReader{ctx, rc}, length))
+		return readSpan(io.LimitReader(ctxReader{ctx, rc}, length), spanLen(o, offset, length))
 	}
 }
 
@@ -225,7 +225,8 @@ func hashAudioBytes(ctx context.Context, o fs.Object, format string) ([]byte, er
 	}
 	defer func() { _ = rc.Close() }()
 	h := sha256.New()
-	n, err := io.Copy(h, io.LimitReader(ctxReader{ctx, rc}, end-start))
+	// In 1 MB reads: on SMB each read is a round trip.
+	n, err := io.CopyBuffer(h, io.LimitReader(ctxReader{ctx, rc}, end-start), make([]byte, 1<<20))
 	if err != nil {
 		return nil, err
 	}

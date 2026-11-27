@@ -462,7 +462,15 @@ func (c *Core) folderArt(ctx context.Context, db *index.DB, pack *artPack, image
 				return err
 			}
 			defer func() { _ = rc.Close() }()
-			data, err := io.ReadAll(io.LimitReader(rc, maxFolderImage+1))
+			// The listed size in one read; a file that grew since is
+			// read on, so the size check below still holds.
+			lim := io.LimitReader(rc, maxFolderImage+1)
+			data, err := readSpan(lim, spanLen(o, 0, maxFolderImage+1))
+			if err == nil && int64(len(data)) == o.Size() {
+				var more []byte
+				more, err = io.ReadAll(lim)
+				data = append(data, more...)
+			}
 			if err != nil {
 				return err
 			}
@@ -561,7 +569,7 @@ func indexFile(ctx context.Context, db *index.DB, pack *artPack, o fs.Object) er
 			return nil, err
 		}
 		defer func() { _ = rc.Close() }()
-		return io.ReadAll(io.LimitReader(rc, length))
+		return readSpan(io.LimitReader(rc, length), spanLen(o, offset, length))
 	}
 	var info *media.Info
 	var err error
@@ -610,6 +618,44 @@ func indexFile(ctx context.Context, db *index.DB, pack *artPack, o fs.Object) er
 		Art:     arts,
 	})
 	return err
+}
+
+// readSpan reads r until n bytes or its end, in one buffer of n bytes.
+// On SMB every Read is a round trip to the server, and io.ReadAll's
+// small, growing buffer makes a dozen or more of them for a 64 KB read;
+// one buffer makes as few as the backend allows. Only r's own io.EOF
+// ends it early without an error, so a transfer cut short (net/http's
+// io.ErrUnexpectedEOF) is still an error, as with io.ReadAll. A
+// negative n (a size not known) reads to the end as io.ReadAll does;
+// callers bound r with io.LimitReader.
+func readSpan(r io.Reader, n int64) ([]byte, error) {
+	if n < 0 {
+		return io.ReadAll(r)
+	}
+	b := make([]byte, n)
+	got := 0
+	for got < len(b) {
+		k, err := r.Read(b[got:])
+		got += k
+		if err == io.EOF {
+			return b[:got], nil
+		}
+		if err != nil {
+			return b[:got], err
+		}
+	}
+	return b, nil
+}
+
+// spanLen is how much of o a read of length bytes from offset can get:
+// length, or less at the end of the file, so the buffer for a read near
+// the end isn't the whole length asked for; -1 when o's size isn't known.
+func spanLen(o fs.Object, offset, length int64) int64 {
+	size := o.Size()
+	if size < 0 {
+		return -1
+	}
+	return max(min(length, size-offset), 0)
 }
 
 // artPack appends new images to one pack file per indexing run. Packs are

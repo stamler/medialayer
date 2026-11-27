@@ -313,6 +313,45 @@ Tailscale: time to list, time to index from scratch, and the round trip
 time. If listing a few thousand folders takes seconds, not minutes,
 level 2 isn't needed.
 
+**Measured** (27 November 2026, `cmd/smbtime`, read-only): Dean's music
+folder on OpenMediaVault 7 (Debian 12, Samba), from a MacBook over
+Tailscale, as a read-only SMB user.
+
+| | Result |
+|---|---|
+| Library | 2,058 folders, 22,808 files, 16,821 tracks, 483 GB |
+| Round trip | about 33 ms (a lookup, open and close, took 66 ms) |
+| Listing everything, 8 folders at once | 45 s |
+| Track headers, 8 at once | 17.6 a second, 383 ms each, 278 KB a track (embedded art) |
+| So a first index | about 16 minutes |
+| Starting a track (first 256 KB) | 337 ms |
+| Reading a track in full | 1.5 MB/s |
+| So the audio hash pass | about 90 hours |
+
+What follows from it:
+- Level 1 is worth building: it takes the hash pass from days to the
+  disk's speed (an hour or two for 478 GB) and the first index from 16
+  minutes to about one.
+- Level 2 isn't needed yet: 45 s of listing a sync is tolerable.
+- The server is about 2,000 km from the Mac, so the 33 ms is distance,
+  and 1.5 MB/s (about 12 Mbit/s) is most likely the upload speed at the
+  server's site; a direct Tailscale path wouldn't change either. So for
+  this library, anything that reads every file must run on the server:
+  the hash pass (helper level 1), and copies to a cloud secondary, which
+  through the Mac would take as long as the hash pass and which the
+  helper can't help. The server uploading itself (the headless device
+  under "What it could do later") moves up from an idea to the way to
+  give this library a Drive or Proton secondary. High-resolution files
+  (24-bit/192 kHz, about 1.2 MB/s) would be at the edge of playing
+  smoothly from this server.
+- The indexer read headers with `io.ReadAll`, whose growing buffer makes
+  a dozen or more reads for one range, each a round trip on SMB; it now
+  reads a range in one buffer, as `smbtime` does. Playback still copies
+  in 32 KB reads, which on SMB is a round trip each (about 1 MB/s at
+  33 ms); an SMB source needs read-ahead there.
+- A read-only user only sees files whose permissions let others read
+  them; two folders and some files were left out.
+
 ### What it is
 
 `mlhost`, a single Go binary from this repo (`cmd/mlhost`), using the
