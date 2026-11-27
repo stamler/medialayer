@@ -685,15 +685,24 @@ struct StatusBar: View {
     var body: some View {
         let s = model.visibleSummary
         HStack(spacing: 10) {
-            // Chips keep their names on one line and the job text gives way. Many
-            // sources could still crowd out the rest of a narrow bar.
-            SourcesBar().fixedSize()
             jobText.foregroundStyle(.secondary).lineLimit(1)
             if let ts = core.status.throttled, !ts.isEmpty {
                 Label("\(ts.map(\.service).joined(separator: " and ")) \(ts.count == 1 ? "is" : "are") slowing us down", systemImage: "tortoise")
                     .foregroundStyle(.orange).lineLimit(1)
                     .help(ts.map { "\($0.service) asked MediaLayer to slow down \($0.count == 1 ? "once" : "\($0.count) times") since it opened. Each request is retried after a wait, so syncing goes on, more slowly." }
                         .joined(separator: "\n"))
+            }
+            // The sources are in the sidebar; with it hidden, one that needs
+            // attention still shows here, and a click brings the sidebar back.
+            if model.sidebarVisibility == .detailOnly,
+               let attention = core.status.sources?.first(where: { $0.state == "paused" || $0.state == "error" }) {
+                Button { model.sidebarVisibility = .all } label: {
+                    Image(systemName: attention.state == "paused" ? "pause.circle.fill" : "exclamationmark.triangle.fill")
+                        .foregroundStyle(attention.state == "paused" ? Color.orange : Color.red)
+                }
+                .buttonStyle(.borderless)
+                .help("“\(attention.name)” \(attention.state == "paused" ? "is waiting for you to review its changes" : "couldn't sync"). Click to show the sources.")
+                .accessibilityLabel("Show Sources")
             }
             if let n = core.status.notice, !core.status.isBusy {
                 Image(systemName: "exclamationmark.circle").foregroundStyle(.orange).help(n)
@@ -769,9 +778,10 @@ func formatLong(_ ms: Int64) -> String {
 
 // MARK: - Sources
 
-/// The library's folders, in the status bar: an icon for each folder's
-/// cloud, the primary highlighted, and the state of each secondary.
-struct SourcesBar: View {
+/// The library's folders, stacked at the bottom of the sidebar: an icon
+/// for each folder's cloud, the primary highlighted, the state of each
+/// secondary, and a + to add one last.
+struct SourcesList: View {
     @EnvironmentObject var model: AppModel
     @EnvironmentObject var core: StatusModel
     @State private var approving: CoreStatus.Source?
@@ -779,18 +789,30 @@ struct SourcesBar: View {
     @State private var error: String?
 
     var body: some View {
-        HStack(spacing: 4) {
+        if !(core.status.sources ?? []).isEmpty || !core.status.folder.isEmpty { list }
+    }
+
+    private var list: some View {
+        VStack(alignment: .leading, spacing: 2) {
             ForEach(core.status.sources ?? []) { source in
-                chip(source)
+                row(source).font(.callout)
             }
-            Button { model.addingSource = true } label: {
-                Image(systemName: "plus").font(.caption.weight(.semibold))
+            if !core.status.folder.isEmpty {
+                // Its own +, centred under the sources as the playlists' is
+                // above them.
+                Button { model.addingSource = true } label: { Image(systemName: "plus") }
+                    .buttonStyle(.borderless)
+                    .frame(maxWidth: .infinity)
+                    .padding(.top, 4)
+                    .disabled(core.status.isBusy)
+                    .help("Add Source: a folder that keeps a copy of the library")
+                    .accessibilityLabel("Add Source")
             }
-            .buttonStyle(.borderless)
-            .foregroundStyle(.secondary)
-            .disabled(core.status.isBusy)
-            .help("Add a folder that keeps a copy of the library")
         }
+        .padding(.horizontal, 10)
+        .padding(.top, 6)
+        .padding(.bottom, 10)
+        .overlay(alignment: .top) { Divider().padding(.horizontal, 10) }
         .confirmationDialog(approving.map { "Apply changes to “\($0.name)”?" } ?? "",
                             isPresented: Binding(get: { approving != nil }, set: { if !$0 { approving = nil } }),
                             presenting: approving) { source in
@@ -813,19 +835,21 @@ struct SourcesBar: View {
         } message: { Text(error ?? "") }
     }
 
-    private func chip(_ source: CoreStatus.Source) -> some View {
-        HStack(spacing: 4) {
-            SourceIcon(type: source.type)
+    private func row(_ source: CoreStatus.Source) -> some View {
+        HStack(spacing: 6) {
+            SourceIcon(type: source.type).frame(width: 16)
             Text(source.name).fontWeight(source.primary ? .semibold : .regular)
+                .lineLimit(1).truncationMode(.middle)
+            Spacer(minLength: 4)
             if !source.primary { badge(source) }
         }
         .padding(.horizontal, 7)
-        .padding(.vertical, 2)
+        .padding(.vertical, 3)
         .foregroundStyle(source.primary ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary))
         .background {
-            if source.primary { Capsule().fill(.tint.opacity(0.15)) }
+            if source.primary { RoundedRectangle(cornerRadius: 6, style: .continuous).fill(.tint.opacity(0.15)) }
         }
-        .contentShape(Capsule())
+        .contentShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
         .help(help(source))
         .contextMenu {
             if source.state == "paused" {

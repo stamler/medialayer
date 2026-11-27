@@ -6,7 +6,8 @@ import SwiftUI
 
 /// The core's status, polled every half second. It is apart from AppModel
 /// so that a poll redraws only the views that show it: the status bar, the
-/// source chips and the menus. During a sync it changes on most polls.
+/// sidebar's sources and new-playlist button, and the menus. During a sync
+/// it changes on most polls.
 @MainActor
 final class StatusModel: ObservableObject {
     @Published var status = CoreStatus()

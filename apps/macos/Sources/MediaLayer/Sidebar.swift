@@ -1,6 +1,7 @@
 import SwiftUI
 
-/// The collapsible sidebar: the library's Songs, then the playlists.
+/// The collapsible sidebar: the library's Songs, then the playlists, and
+/// the library's sources at the bottom.
 /// Drop tracks from the table on a playlist to add them.
 struct SidebarView: View {
     @EnvironmentObject var model: AppModel
@@ -43,13 +44,17 @@ struct SidebarView: View {
         }
         .listStyle(.sidebar)
         .onDeleteCommand { if let p = model.selectedPlaylist { deleting = p } }
+        // The new-playlist + centred, then the library's sources stacked
+        // at the bottom.
         .safeAreaInset(edge: .bottom, spacing: 0) {
-            HStack {
+            VStack(spacing: 0) {
                 NewPlaylistButton()
-                Spacer()
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 6)
+                SourcesList()
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
+            // Playlists scroll under it, so it needs a backing.
+            .background(.bar)
         }
         .confirmationDialog(deleting.map { "Delete the playlist “\($0.name)”?" } ?? "",
                             isPresented: Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } }),
@@ -72,6 +77,7 @@ private struct NewPlaylistButton: View {
         Button { model.newPlaylist() } label: { Image(systemName: "plus") }
             .buttonStyle(.borderless)
             .help("New Playlist")
+            .accessibilityLabel("New Playlist")
             .disabled(!model.showsLibrary)
     }
 }
