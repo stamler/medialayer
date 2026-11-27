@@ -172,8 +172,13 @@ enum Core {
     /// Why a security key PIN can't be right, or nil. A YubiKey touched
     /// early types a 44-letter one-time code, which would cost a PIN try.
     static func securityKeyPINProblem(_ pin: String) -> String? {
-        if pin.count >= 32 && pin.allSatisfy({ "cbdefghijklnrtuv".contains($0) }) {
-            return "That's the code your key types when touched, not its PIN. Type the PIN, then click Continue, and touch the key only when MediaLayer asks."
+        // A run of 32 or more modhex letters, in either case, anywhere in it.
+        var run = 0
+        for c in pin.lowercased() {
+            run = "cbdefghijklnrtuv".contains(c) ? run + 1 : 0
+            if run >= 32 {
+                return "That has the code your key types when touched in it. Type the PIN alone, click Continue, and touch the key only when MediaLayer asks."
+            }
         }
         if pin.count < 4 { return "A security key PIN has at least 4 characters." }
         return nil

@@ -3,6 +3,7 @@ module github.com/stamler/medialayer
 go 1.26.0
 
 require (
+	github.com/fxamacker/cbor/v2 v2.9.1
 	github.com/go-ctap/ctaphid v0.8.5
 	github.com/go-resty/resty/v2 v2.17.2
 	github.com/mewkiz/flac v1.0.14
@@ -104,7 +105,6 @@ require (
 	github.com/emersion/go-vcard v0.0.0-20260618161152-d854b7e0e2d3 // indirect
 	github.com/felixge/httpsnoop v1.1.0 // indirect
 	github.com/flynn/noise v1.1.0 // indirect
-	github.com/fxamacker/cbor/v2 v2.9.1 // indirect
 	github.com/gabriel-vasile/mimetype v1.4.15 // indirect
 	github.com/gdamore/encoding v1.0.1 // indirect
 	github.com/gdamore/tcell/v3 v3.6.0 // indirect

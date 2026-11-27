@@ -8,3 +8,5 @@ func setHIDLocale() {}
 
 // setHIDShared: only macOS's hidapi seizes devices by default.
 func setHIDShared() {}
+
+func hidInitShared() {}

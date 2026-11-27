@@ -364,7 +364,8 @@ func TestNoKeyAsksForCode(t *testing.T) {
 
 func TestPINProblem(t *testing.T) {
 	otp := "cccccbcgfkjrhvnlbkvhdnlbvrgnhlnrefdibijevklt" // a YubiKey's typed code
-	for pin, ok := range map[string]bool{"1234": true, "my pin 42": true, otp: false, "123": false, "": false} {
+	for pin, ok := range map[string]bool{"1234": true, "my pin 42": true, otp: false, "123": false, "": false,
+		"1234" + otp: false, strings.ToUpper(otp): false, strings.Repeat("9", 64): false} {
 		err := pinProblem(pin)
 		if (err == nil) != ok {
 			t.Errorf("pinProblem(%q) = %v", pin, err)

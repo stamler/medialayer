@@ -20,3 +20,10 @@ func setHIDLocale() { C.mlHIDLocale() }
 // setHIDShared has hidapi open devices without seizing them, as other
 // FIDO clients (libfido2, browsers) do.
 func setHIDShared() { hid.SetOpenExclusive(false) }
+
+// hidInitShared starts hidapi's manager, if the last close ended it, and
+// keeps devices opened shared after (hid_init sets exclusive again).
+func hidInitShared() {
+	_ = hid.Init()
+	hid.SetOpenExclusive(false)
+}

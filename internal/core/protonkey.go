@@ -2,10 +2,12 @@ package core
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"runtime"
 	"strings"
@@ -13,6 +15,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/fxamacker/cbor/v2"
 	"github.com/go-ctap/ctaphid/pkg/ctaphid"
 	"github.com/go-ctap/ctaphid/pkg/ctaptypes"
 	"github.com/go-ctap/ctaphid/pkg/device"
@@ -42,13 +45,30 @@ var ErrProtonNeedsPIN = errors.New("your security key has a PIN: enter it, then 
 // touched early types a one-time code (44 modhex letters) into whatever
 // field has the cursor.
 func pinProblem(pin string) error {
-	if len(pin) >= 32 && strings.Trim(pin, "cbdefghijklnrtuv") == "" {
-		return needError{msg: "that's the code your key types when touched, not its PIN: type the PIN, and touch the key only when MediaLayer asks", need: ErrProtonNeedsPIN}
+	if hasTypedCode(pin) {
+		return needError{msg: "that has the code your key types when touched in it, not only the PIN: type the PIN alone, and touch the key only when MediaLayer asks", need: ErrProtonNeedsPIN}
 	}
 	if n := utf8.RuneCountInString(pin); n < 4 || len(pin) > 63 {
 		return needError{msg: "a security key PIN has 4 to 63 characters", need: ErrProtonNeedsPIN}
 	}
 	return nil
+}
+
+// hasTypedCode reports whether s holds a YubiKey's typed one-time code:
+// a run of 32 or more modhex letters, in either case (Caps Lock), as
+// when the key is touched after the PIN is typed.
+func hasTypedCode(s string) bool {
+	run := 0
+	for _, r := range strings.ToLower(s) {
+		if strings.ContainsRune("cbdefghijklnrtuv", r) {
+			if run++; run >= 32 {
+				return true
+			}
+		} else {
+			run = 0
+		}
+	}
+	return false
 }
 
 // needError is a message that still tells the app what to ask for, and
@@ -242,8 +262,7 @@ var assertWithKey = func(ctx context.Context, req fidoRequest, pin string, waiti
 		if pin == "" {
 			// As browsers do: a touch picks the key, then its PIN is asked
 			// for, then a second touch signs.
-			err := selectKey(ctx, dev, waiting)
-			closeKey(dev)
+			err := selectKey(ctx, dev, waiting) // closes dev
 			if err != nil {
 				return fidoAssertion{}, err
 			}
@@ -456,29 +475,106 @@ const (
 	KeyTouchToSign          // the touch that signs in
 )
 
-// selectKey waits for a touch that picks the key (CTAP 2.1's
-// authenticatorSelection). A key without that command is picked without
-// one.
+// selectKey waits for a touch that picks the key, and closes dev. A key
+// with CTAP 2.1 has a command for it (authenticatorSelection); an older
+// one (FIDO 2.0, or 2.1's draft) is asked, as browsers and libfido2 ask
+// it, to make a credential with an empty PIN signature: it waits for a
+// touch, then refuses for the PIN. That costs no PIN try: CTAP defines
+// it for exactly this.
 func selectKey(ctx context.Context, dev *device.Device, waiting func(KeyTouch)) error {
 	ctx, cancel := context.WithTimeout(ctx, keyTouchTimeout)
 	defer cancel()
 	waiting(KeyTouchToPick)
 	defer waiting(KeyNoTouch)
-	err := dev.Selection(ctx)
-	if ctx.Err() != nil { // cancelled at the key: Selection may say nothing
+	var err error
+	selected := false
+	if dev.GetInfo().Versions.Supports(ctaptypes.FIDO_2_1) {
+		err = dev.Selection(ctx)
+		var ce *ctaphid.CTAPError
+		selected = !errors.As(err, &ce) || ce.StatusCode != ctaphid.CTAP1_ERR_INVALID_COMMAND
+	}
+	path := dev.Path
+	closeKey(dev)
+	if !selected && ctx.Err() == nil {
+		err = touchToPick(ctx, path)
+	}
+	if ctx.Err() != nil { // cancelled at the key, which may then say nothing
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			return errors.New("the security key wasn't touched in time: sign in again, and touch it when it blinks")
 		}
 		return ctx.Err()
 	}
-	var ce *ctaphid.CTAPError
-	if errors.As(err, &ce) && (ce.StatusCode == ctaphid.CTAP1_ERR_INVALID_COMMAND || ce.StatusCode == ctaphid.CTAP2_ERR_UNSUPPORTED_OPTION) {
-		return nil
-	}
 	if err != nil {
 		return keyError(err)
 	}
 	return nil
+}
+
+// touchToPick asks the key at path to make a credential with an empty
+// PIN signature, which waits for a touch (see selectKey). It uses a
+// channel of its own, on a handle of its own, closed after.
+func touchToPick(ctx context.Context, path string) error {
+	var raw io.ReadWriteCloser
+	var err error
+	if p := onHIDThread(func() {
+		hidInitShared() // the manager may have ended with the last close
+		raw, err = device.OpenPath(context.Background(), path)
+	}); p != nil {
+		return fmt.Errorf("couldn't open the security key: %v", p)
+	}
+	if err != nil {
+		return fmt.Errorf("couldn't open the security key: %w", err)
+	}
+	defer onHIDThread(func() { _ = raw.Close() })
+	nonce := make([]byte, 8)
+	if _, err := rand.Read(nonce); err != nil {
+		return err
+	}
+	ch, err := ctaphid.Init(raw, ctaphid.BROADCAST_CID, nonce)
+	if err != nil {
+		return fmt.Errorf("the security key didn't answer: %w", err)
+	}
+	enc, err := cbor.CTAP2EncOptions().EncMode()
+	if err != nil {
+		return err
+	}
+	req, err := enc.Marshal(map[int]any{
+		1: make([]byte, 32), // clientDataHash
+		2: map[string]string{"id": ".dummy"},
+		3: map[string]any{"id": []byte{1}, "name": "dummy"},
+		4: []map[string]any{{"alg": -7, "type": "public-key"}},
+		8: []byte{}, // the empty PIN signature
+		9: 1,        // PIN protocol one
+	})
+	if err != nil {
+		return err
+	}
+	errc := make(chan error, 1)
+	go func() {
+		_, err := ctaphid.CBOR(raw, ch.CID, append([]byte{byte(ctaptypes.AuthenticatorMakeCredential)}, req...))
+		errc <- err
+	}()
+	select {
+	case err = <-errc:
+	case <-ctx.Done():
+		_ = ctaphid.Cancel(raw, ch.CID)
+		select {
+		case <-errc:
+		case <-time.After(keyAnswerTimeout):
+		}
+		return ctx.Err()
+	}
+	var ce *ctaphid.CTAPError
+	if errors.As(err, &ce) {
+		switch ce.StatusCode {
+		case ctaphid.CTAP2_ERR_PIN_INVALID, ctaphid.CTAP2_ERR_PIN_AUTH_INVALID, ctaphid.CTAP2_ERR_PIN_NOT_SET:
+			return nil // touched, then refused for the PIN, as asked
+		}
+	}
+	if err == nil {
+		return errors.New("the security key made a credential it wasn't asked for")
+	}
+	return err
 }
 
 // keyError explains a security key's refusal.
