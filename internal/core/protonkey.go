@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"runtime"
 	"sync"
 	"time"
 
@@ -208,7 +209,7 @@ var assertWithKey = func(ctx context.Context, req fidoRequest, pin string, waiti
 	// ctaphid asks for a PIN protocol even without a PIN, and a key with
 	// none (some CTAP 2.0 keys) would crash it.
 	if len(dev.GetInfo().PinUvAuthProtocols) == 0 {
-		_ = dev.Close()
+		closeKey(dev)
 		return fidoAssertion{}, errors.New("this security key is too old for MediaLayer to use (it has no PIN support): sign in with an authenticator app code")
 	}
 	var token []byte
@@ -216,13 +217,13 @@ var assertWithKey = func(ctx context.Context, req fidoRequest, pin string, waiti
 	// a touch, as before.
 	if info := dev.GetInfo(); info.Options[ctaptypes.OptionClientPIN] && !info.Options[ctaptypes.OptionNoMcGaPermissionsWithClientPin] {
 		if pin == "" {
-			_ = dev.Close()
+			closeKey(dev)
 			return fidoAssertion{}, ErrProtonNeedsPIN
 		}
 		token, err = dev.GetPinUvAuthTokenUsingPIN(pin, ctaptypes.PermissionGetAssertion, req.rpID)
 		if err != nil {
 			err = pinError(dev, err)
-			_ = dev.Close()
+			closeKey(dev)
 			return fidoAssertion{}, err
 		}
 	}
@@ -242,7 +243,7 @@ var assertWithKey = func(ctx context.Context, req fidoRequest, pin string, waiti
 	held = false
 	go func() {
 		defer func() { <-keyBusy }()
-		defer dev.Close()
+		defer closeKey(dev)
 		defer func() {
 			if p := recover(); p != nil {
 				done <- result{err: fmt.Errorf("the security key couldn't sign in: %v", p)}
@@ -279,19 +280,21 @@ var assertWithKey = func(ctx context.Context, req fidoRequest, pin string, waiti
 
 var hidLocaleOnce sync.Once
 
-// openKey opens the one security key plugged in. The HID libraries
-// panic on some devices' strings; that is an error here, never a crash
-// of the app.
+// openKey opens the one security key plugged in, on the HID thread. The
+// HID libraries panic on some devices' strings; that is an error here,
+// never a crash of the app.
 func openKey() (dev *device.Device, err error) {
-	hidLocaleOnce.Do(setHIDLocale)
-	defer func() {
-		if p := recover(); p != nil {
-			if dev != nil {
-				_ = dev.Close()
-			}
-			dev, err = nil, fmt.Errorf("couldn't look for a security key: %v", p)
+	if p := onHIDThread(func() { dev, err = findKey() }); p != nil {
+		if dev != nil {
+			closeKey(dev)
 		}
-	}()
+		return nil, fmt.Errorf("couldn't look for a security key: %v", p)
+	}
+	return dev, err
+}
+
+func findKey() (*device.Device, error) {
+	hidLocaleOnce.Do(setHIDLocale)
 	quiet := options.WithLogger(slog.New(slog.DiscardHandler))
 	infos, err := sugar.EnumerateFIDODevices(quiet)
 	if err != nil {
@@ -304,11 +307,51 @@ func openKey() (dev *device.Device, err error) {
 	default:
 		return nil, errors.New("more than one security key is plugged in: leave only the one for this Proton account, then sign in again")
 	}
-	dev, err = device.New(infos[0].Path, quiet)
+	dev, err := device.New(infos[0].Path, quiet)
 	if err != nil {
 		return nil, fmt.Errorf("couldn't open the security key: %w", err)
 	}
 	return dev, nil
+}
+
+// closeKey closes a key, on the HID thread: closing ends hidapi's device
+// manager (hid_exit), which belongs to that thread.
+func closeKey(dev *device.Device) {
+	onHIDThread(func() { closeKey(dev) })
+}
+
+// hidapi on macOS schedules its device manager on the run loop of the
+// thread that first uses it, and runs that run loop when it lists
+// devices. Called from whichever thread a Go call lands on (Swift's
+// cooperative threads, which come and go), a later listing finds the
+// manager on another thread's, or a dead thread's, run loop, and the app
+// crashes in CFRunLoopAddSource. So all of hidapi's manager work (listing,
+// opening, closing) runs on one OS thread kept for the life of the
+// process. Reading and writing a key don't use the manager.
+var (
+	hidStart sync.Once
+	hidCalls = make(chan func())
+)
+
+// onHIDThread runs f on the HID thread and waits for it. A panic in f is
+// returned, not raised.
+func onHIDThread(f func()) (panicked any) {
+	hidStart.Do(func() {
+		go func() {
+			runtime.LockOSThread() // never unlocked: the thread is the HID thread
+			for call := range hidCalls {
+				call()
+			}
+		}()
+	})
+	done := make(chan struct{})
+	hidCalls <- func() {
+		defer close(done)
+		defer func() { panicked = recover() }()
+		f()
+	}
+	<-done
+	return panicked
 }
 
 // pinError explains a key's refusal of its PIN.
