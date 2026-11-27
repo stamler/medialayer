@@ -175,6 +175,35 @@ func MLCancelProtonSignIn() {
 	}
 }
 
+// MLAddSMBServer connects to an SMB server (port 0 for 445), checking
+// the user name and password by listing its shares, and returns
+// {"remote": "..."} or {"error": "..."}. The core keeps the password in
+// memory only: the app saves it in the keychain, and gives it again at
+// each launch with MLSetSMBPassword.
+//
+//export MLAddSMBServer
+func MLAddSMBServer(host *C.char, port C.int, user, domain, password *C.char) *C.char {
+	c, err := get()
+	if err == nil {
+		var remote string
+		remote, err = c.AddSMBServer(context.Background(), C.GoString(host), int(port), C.GoString(user), C.GoString(domain), C.GoString(password))
+		if err == nil {
+			return jsonStr(map[string]string{"remote": remote})
+		}
+	}
+	return jsonStr(map[string]string{"error": err.Error()})
+}
+
+// MLSetSMBPassword gives the core an SMB remote's password for this
+// session (an empty one forgets it).
+//
+//export MLSetSMBPassword
+func MLSetSMBPassword(remote, password *C.char) {
+	if c, err := get(); err == nil {
+		c.SetSMBPassword(C.GoString(remote), C.GoString(password))
+	}
+}
+
 // MLListFolders returns {"folders": [...]} or {"error": "..."} for the
 // folders inside dir ("" for the top of the drive) on a connected
 // account ("" for the primary's).
@@ -204,6 +233,18 @@ func MLSetFolder(folder *C.char) *C.char {
 		return errStr(err)
 	}
 	return errStr(c.SetFolder(C.GoString(folder)))
+}
+
+// MLSetFolderOn picks the library folder on a connected remote (such as
+// an SMB server's, with the folder as "share/path") and starts syncing.
+//
+//export MLSetFolderOn
+func MLSetFolderOn(remote, folder *C.char) *C.char {
+	c, err := get()
+	if err != nil {
+		return errStr(err)
+	}
+	return errStr(c.SetFolderOn(C.GoString(remote), C.GoString(folder)))
 }
 
 // MLAddSecondary adds a folder on a connected account (or, with

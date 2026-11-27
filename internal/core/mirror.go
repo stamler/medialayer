@@ -67,9 +67,6 @@ type source struct {
 	Folder string `json:"folder"` // on the remote, or an absolute local path
 }
 
-// smbType is rclone's SMB backend.
-const smbType = "smb"
-
 // sourceType is the rclone backend, such as "drive", or "local".
 func (s source) sourceType() string {
 	if s.Remote == "" {
@@ -323,17 +320,28 @@ var openSource = func(ctx context.Context, s source) (fs.Fs, error) {
 	if s.Remote == "" || s.Remote == localPrimary {
 		return fs.NewFs(ctx, s.Folder)
 	}
-	if s.sourceType() == protonType {
+	switch s.sourceType() {
+	case protonType:
 		return openProton(ctx, s.Remote, s.Folder)
+	case smbType:
+		return openSMB(ctx, s.Remote, s.Folder)
 	}
 	return fs.NewFs(ctx, s.Remote+":"+s.Folder)
 }
 
 // caseBlind reports whether a secondary's paths are matched ignoring
-// case: on local disks, which may be case-blind, and on Proton Drive,
-// which isn't known to tell names apart by case alone.
+// case: on local disks, which may be case-blind, on Proton Drive, which
+// isn't known to tell names apart by case alone, and on SMB shares
+// unless the remote says the server is case-sensitive (rclone's
+// case_insensitive option, true by default, as on macOS and Windows).
 func (s source) caseBlind() bool {
-	return s.Remote == "" || s.sourceType() == protonType
+	switch s.sourceType() {
+	case protonType:
+		return true
+	case smbType:
+		return config.GetValue(s.Remote, "case_insensitive") != "false"
+	}
+	return s.Remote == ""
 }
 
 // listing is a library folder's files outside .medialayer, by path.

@@ -60,7 +60,9 @@ type Status struct {
 	AccountEmails []GoogleAccount `json:"account_emails,omitempty"`
 	// ProtonAccounts are the connected Proton accounts: at most one.
 	ProtonAccounts []ProtonAccount `json:"proton_accounts"`
-	Notice         string          `json:"notice,omitempty"`
+	// SMBServers are the SMB servers and users connected.
+	SMBServers []SMBServer `json:"smb_servers"`
+	Notice     string      `json:"notice,omitempty"`
 	// AudioHashes is the background pass that hashes every track's audio,
 	// once it has counted them.
 	AudioHashes *AudioHashStatus `json:"audio_hashes,omitempty"`
@@ -94,6 +96,7 @@ func (c *Core) Status() Status {
 		}
 	}
 	s.ProtonAccounts = protonAccounts()
+	s.SMBServers = smbServers()
 	s.Notice = c.notice
 	if s.Notice == "" {
 		s.Notice = c.keyNotice

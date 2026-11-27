@@ -135,6 +135,9 @@ func remoteConnected(remote string) bool {
 		return config.GetValue(remote, "token") != ""
 	case protonType:
 		return protonSignedIn(remote)
+	case smbType:
+		_, ok := smbPassword(remote)
+		return ok
 	}
 	return true
 }
@@ -147,8 +150,11 @@ func (c *Core) ListFolders(ctx context.Context, remote, dir string) ([]string, e
 		remote = remoteName
 	}
 	if !remoteConnected(remote) {
-		if config.GetValue(remote, "type") == protonType {
+		switch config.GetValue(remote, "type") {
+		case protonType:
 			return nil, protonError(common.ErrUsernameAndPasswordRequired)
+		case smbType:
+			return nil, ErrSMBNeedsPassword
 		}
 		return nil, errors.New("not connected to Google Drive")
 	}
@@ -174,10 +180,38 @@ func (c *Core) ListFolders(ctx context.Context, remote, dir string) ([]string, e
 // restored from the folder's .medialayer repository if there is one, then
 // brought up to date by indexing, and published back. Picking a different
 // folder discards the local index of the old one.
-func (c *Core) SetFolder(folder string) error {
+// A folder picked this way is in the first Google account; picking the
+// folder the library already uses keeps the primary where it is.
+func (c *Core) SetFolder(folder string) error { return c.setFolder("", folder, false) }
+
+// SetFolderOn is SetFolder for a folder on remote: "" for the first
+// Google account, or a connected remote such as an SMB server's, where
+// folder is "share/path". The library changes unless both the remote and
+// the folder are the ones it uses.
+func (c *Core) SetFolderOn(remote, folder string) error { return c.setFolder(remote, folder, true) }
+
+func (c *Core) setFolder(remote, folder string, sameRemote bool) error {
 	folder = strings.Trim(folder, "/")
 	if folder == "" {
 		return errors.New("pick a folder, not the top of the drive")
+	}
+	for _, part := range strings.Split(folder, "/") {
+		if part == "" || part == "." || part == ".." {
+			return fmt.Errorf("%q is not a folder path", folder)
+		}
+	}
+	if remote == remoteName {
+		remote = ""
+	}
+	if remote != "" {
+		switch config.GetValue(remote, "type") {
+		case "":
+			return fmt.Errorf("%s is not connected", remote)
+		case smbType:
+			if !strings.Contains(folder, "/") {
+				return errors.New("pick a folder inside the share, not the share itself")
+			}
+		}
 	}
 	// No playlist change may land between the check below and the reset.
 	c.playlistMu.Lock()
@@ -187,7 +221,11 @@ func (c *Core) SetFolder(folder string) error {
 		c.mu.Unlock()
 		return errors.New("the library is being indexed; wait for it to finish")
 	}
-	if folder != c.settings.Folder {
+	want := remote
+	if want == "" {
+		want = remoteName
+	}
+	if folder != c.settings.Folder || (sameRemote && want != c.primaryRemote()) {
 		// The local index goes, so playlist changes only it holds would be
 		// lost.
 		if err := c.folderChangeBlocked(c.db, c.primaryFull); err != nil {
@@ -208,9 +246,9 @@ func (c *Core) SetFolder(folder string) error {
 		}
 		c.settings.Folder = folder
 		c.settings.DBFile = ""
-		c.settings.Secondaries = nil                            // they hold copies of the old library
-		c.settings.PrimaryRemote, c.settings.PrimaryID = "", "" // picked in the first account
-		c.settings.Picked = true                                // the first sync checks for a promoted primary
+		c.settings.Secondaries = nil                                // they hold copies of the old library
+		c.settings.PrimaryRemote, c.settings.PrimaryID = remote, "" // "" is the first Google account
+		c.settings.Picked = true                                    // the first sync checks for a promoted primary
 		c.mirrors = nil
 		c.primaryFull = false
 		c.fsys, c.jobFs = nil, nil
