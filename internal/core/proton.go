@@ -493,6 +493,6 @@ func (c *Core) CancelProtonSignIn() {
 	c.protonPending = nil
 	c.mu.Unlock()
 	if s != nil {
-		s.end() // signed out at Proton
+		go s.end() // signed out at Proton, off the caller's (the UI's) thread
 	}
 }
