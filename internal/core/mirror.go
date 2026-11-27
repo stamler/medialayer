@@ -21,6 +21,7 @@ import (
 	"github.com/rclone/rclone/fs/config"
 	"github.com/rclone/rclone/fs/operations"
 	"github.com/rclone/rclone/fs/walk"
+	"golang.org/x/sync/errgroup"
 	"golang.org/x/text/unicode/norm"
 
 	"github.com/stamler/medialayer/internal/index"
@@ -933,14 +934,31 @@ func (c *Core) mirror(ctx context.Context, f fs.Fs, src *listing, repo *repoReco
 		}
 		step(p)
 	}
+	// New files go up several at a time, as each costs a few round trips
+	// of its own on a cloud secondary (Proton is about 15 seconds a song
+	// one at a time); rclone's dircache keeps folders made once.
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(max(fs.GetConfig(ctx).Transfers, 1))
 	for _, p := range copies {
-		if err := checkLease(ctx); err != nil {
-			return err
+		if gctx.Err() != nil {
+			break
 		}
-		if _, err := operations.Copy(ctx, dst, nil, p, src.files[p]); err != nil {
-			return fmt.Errorf("copy %s: %w", p, err)
-		}
-		step(p)
+		g.Go(func() error {
+			if err := checkLease(gctx); err != nil {
+				return err
+			}
+			if _, err := operations.Copy(gctx, dst, nil, p, src.files[p]); err != nil {
+				return fmt.Errorf("copy %s: %w", p, err)
+			}
+			step(p)
+			return nil
+		})
+	}
+	if err := g.Wait(); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil { // stopped before every copy started
+		return err
 	}
 	if err := c.mirrorRepo(ctx, dst, repo, version, t.theirs); err != nil {
 		return fmt.Errorf("copy .medialayer: %w", err)
