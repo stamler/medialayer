@@ -152,9 +152,33 @@ func (c *Core) swapPrimary(ctx context.Context, id string, dst fs.Fs) error {
 	if err := c.writeRepo(ctx, f, &next); err != nil {
 		fs.Errorf(f, "write the new repo.json to the old primary: %v", err)
 	}
+	return c.adoptSwitch(&next, oldPrimary.ID, dst, true)
+}
 
+// adoptSwitch makes this device follow the switch next records: the
+// target (next's primary, one of this device's secondaries) becomes the
+// primary and the old primary, whose replica id is oldID, a secondary.
+// dst is the client holding the target's lease, or nil. holds says the
+// target holds the index's current version, as step 4 copied it there.
+func (c *Core) adoptSwitch(next *repoRecord, oldID string, dst fs.Fs, holds bool) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	var target source
+	var others []source
+	for _, s := range c.settings.Secondaries {
+		if s.ID == next.Primary.Replica {
+			target = s
+		} else {
+			others = append(others, s)
+		}
+	}
+	if target.ID == "" {
+		return fmt.Errorf("no secondary %s", next.Primary.Replica)
+	}
+	oldPrimary := source{ID: oldID, Remote: c.primaryRemote(), Folder: c.settings.Folder}
+	if oldPrimary.Remote == localPrimary {
+		oldPrimary.Remote = ""
+	}
 	c.settings.PrimaryRemote, c.settings.Folder, c.settings.PrimaryID = target.Remote, target.Folder, target.ID
 	if target.Remote == "" {
 		c.settings.PrimaryRemote = localPrimary
@@ -170,12 +194,64 @@ func (c *Core) swapPrimary(ctx context.Context, id string, dst fs.Fs) error {
 	}
 	if db := c.db; db != nil {
 		_ = db.SetMeta("generation", fmt.Sprint(next.Generation))
-		// The new primary holds this version already.
-		if v, err := metaInt(db, "version"); err == nil {
-			_ = db.SetMeta("primary_version", fmt.Sprint(v))
+		// The new primary holds this version already. After an
+		// interrupted switch it may not (the index can have changed
+		// since), so the next publish checks and uploads what it lacks.
+		v, err := metaInt(db, "version")
+		if err != nil || !holds {
+			v = 0
 		}
+		_ = db.SetMeta("primary_version", fmt.Sprint(v))
 	}
 	return nil
+}
+
+// errSwitchFinished stops a sync that found, and finished, a switch of
+// the primary this device began but was stopped (the app quit) before
+// it saved its settings. A sync from the new primary follows.
+var errSwitchFinished = errors.New("finished switching the primary, which was cut short; syncing from the new primary")
+
+// errSwitchFailed stops a sync that found such a switch but couldn't
+// finish it (its settings couldn't be saved, say).
+var errSwitchFailed = errors.New("couldn't finish switching the primary, which was cut short")
+
+// interruptedSwitch reports whether next, a newer repo.json found on the
+// primary or a secondary, is this device's own switch to one of its
+// secondaries, left unfinished.
+func (c *Core) interruptedSwitch(next *repoRecord, libraryID string, known int64) bool {
+	if next == nil || next.LibraryID != libraryID || next.Generation <= known {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if next.ChangedBy != c.settings.DeviceID || next.Primary.Replica == c.primaryID() {
+		return false
+	}
+	for _, s := range c.settings.Secondaries {
+		if s.ID == next.Primary.Replica {
+			return true
+		}
+	}
+	return false
+}
+
+// finishSwitch completes this device's interrupted switch to next's
+// primary. f is the old primary, which gets next's repo.json if it
+// lacks it; oldID is its replica id.
+func (c *Core) finishSwitch(ctx context.Context, f fs.Fs, next *repoRecord, oldID string, theirs *repoRecord) error {
+	fs.Logf(nil, "finishing a switch of the primary to %s (generation %d) that was cut short", next.Primary.Folder, next.Generation)
+	if theirs == nil || theirs.Generation < next.Generation {
+		if err := c.writeRepo(ctx, f, next); err != nil {
+			fs.Errorf(f, "write the new repo.json to the old primary: %v", err)
+		}
+	}
+	if err := c.adoptSwitch(next, oldID, nil, false); err != nil {
+		return fmt.Errorf("%w: %v", errSwitchFailed, err)
+	}
+	c.mu.Lock()
+	c.resync = true
+	c.mu.Unlock()
+	return errSwitchFinished
 }
 
 // promotable checks that dst is a complete copy of the index's current
@@ -248,4 +324,17 @@ func (c *Core) primaryRemote() string {
 		return remoteName
 	}
 	return c.settings.PrimaryRemote
+}
+
+// knownGeneration is the generation the local index last recorded.
+func (c *Core) knownGeneration() int64 {
+	db := c.currentDB()
+	if db == nil {
+		return 0
+	}
+	g, err := metaInt(db, "generation")
+	if err != nil {
+		return 0
+	}
+	return int64(g)
 }

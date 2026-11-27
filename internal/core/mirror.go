@@ -362,6 +362,7 @@ func systemName(base string) bool {
 // otherwise.
 func listLibrary(ctx context.Context, f fs.Fs, missingOK bool) (*listing, error) {
 	l := &listing{files: map[string]fs.Object{}, dupes: map[string]bool{}, probes: map[string][]string{}}
+	start := time.Now()
 	// Check first, as walk logs a missing folder as an error.
 	if _, err := f.List(ctx, ""); errors.Is(err, fs.ErrorDirNotFound) {
 		if missingOK {
@@ -403,6 +404,9 @@ func listLibrary(ctx context.Context, f fs.Fs, missingOK bool) (*listing, error)
 		}
 		return nil
 	})
+	if err == nil {
+		fs.Logf(f, "listed %d files in %s", len(l.files), time.Since(start).Round(100*time.Millisecond))
+	}
 	return l, err
 }
 
@@ -484,7 +488,7 @@ func (c *Core) mirrorAll(ctx context.Context, f fs.Fs) error {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
-			if errors.Is(err, errLeaseLost) {
+			if errors.Is(err, errLeaseLost) || errors.Is(err, errSwitchFinished) || errors.Is(err, errSwitchFailed) {
 				return err
 			}
 			fail(s, err)
@@ -590,6 +594,12 @@ func (c *Core) check(ctx context.Context, f fs.Fs, s source, repo *repoRecord, d
 		return t, errors.New("this folder isn't empty and isn't a copy of this library; pick an empty folder")
 	case theirs != nil && theirs.LibraryID != repo.LibraryID:
 		return t, errors.New("this folder holds a different MediaLayer library; pick an empty folder or a copy of this library")
+	case theirs != nil && theirs.Generation > repo.Generation && theirs.Primary.Replica == s.ID &&
+		c.interruptedSwitch(theirs, repo.LibraryID, repo.Generation):
+		c.mu.Lock()
+		old := c.primaryID()
+		c.mu.Unlock()
+		return t, c.finishSwitch(ctx, f, theirs, old, repo)
 	case theirs != nil && theirs.Generation > repo.Generation:
 		return t, fmt.Errorf("this folder names a newer primary (generation %d, this device knows %d), so it was left alone",
 			theirs.Generation, repo.Generation)

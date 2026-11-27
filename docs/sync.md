@@ -482,7 +482,7 @@ Do not use Choose Music Folder to switch back. See Known gaps.
 | Steps 4 to 9 | The primary stays the primary. The status bar shows why. The sync in step 4 has run. |
 | Step 11 (write to the target) | Nothing changes. The old primary is still the primary. |
 | Step 12 (write to the old primary) | The switch continues. A later sync writes the old primary's `repo.json`. |
-| Step 13 (saving settings) | The switch is in memory only. After a restart, the device uses the old primary again. If the old primary has the new `repo.json`, its sync stops with "the primary moved"; otherwise it continues as before, and the target is refused as a secondary because it names a newer generation. |
+| Between steps 11 and 13 (the app quits, or saving settings fails) | The next sync finishes the switch. It finds the newer `repo.json` (on the old primary, or on the target when step 12 didn't happen). If that record was written by this device and names one of its secondaries, the sync gives the old primary the new `repo.json` if it lacks it, then does steps 13 and 14 (except that the next publish checks which index version the new primary holds). It stops there, and a sync from the new primary follows, as in step 15. A newer `repo.json` written by another device is still refused, as before. If saving settings fails while the app keeps running, the switch is in effect until the app quits, and the next launch finishes it. |
 | Step 15 (sync after the switch) | The switch is done. The old primary's chip shows the error or the pause. The next sync tries again. |
 
 A full old primary cannot take its `member.json` in step 15, so it can't

@@ -42,6 +42,8 @@ type Core struct {
 	dbEpoch    int64     // raised each time the database file is replaced
 	job        jobStatus
 	jobDone    chan struct{}      // closed when the running job ends; nil if none
+	phaseStart time.Time          // when the job's current phase began
+	resync     bool               // start a sync when the job ends (errSwitchFinished)
 	cancel     context.CancelFunc // stops the running job
 	// tracks is the index's track count, kept here so Status never waits
 	// on the database while the indexer writes.

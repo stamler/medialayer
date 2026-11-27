@@ -108,7 +108,16 @@ func (c *Core) Status() Status {
 // setJob updates the job status under the lock.
 func (c *Core) setJob(update func(j *jobStatus)) {
 	c.mu.Lock()
+	was := c.job.Phase
 	update(&c.job)
+	if now := c.job.Phase; now != was {
+		// Each step's time goes to the log, so a slow sync or switch of
+		// the primary shows where its time went.
+		if was != "" && was != PhaseIdle && was != PhaseDone && was != PhaseError && !c.phaseStart.IsZero() {
+			fs.Logf(nil, "sync: %s took %s", was, time.Since(c.phaseStart).Round(100*time.Millisecond))
+		}
+		c.phaseStart = time.Now()
+	}
 	c.mu.Unlock()
 }
 
@@ -137,6 +146,7 @@ func (c *Core) startJobLocked(work func(context.Context) error) error {
 	c.jobDone, c.cancel = done, cancel
 	c.stopHashPassLocked() // jobs rewrite the index; the pass starts again after
 	c.job = jobStatus{Phase: PhaseOpening, Started: time.Now()}
+	c.phaseStart = c.job.Started
 	c.notice = ""
 	if config.GetValue(c.primaryRemote(), "type") == protonType {
 		// A fresh client each job, with the session as last renewed: a
@@ -160,6 +170,10 @@ func (c *Core) startJobLocked(work func(context.Context) error) error {
 		c.jobDone, c.cancel = nil, nil
 		c.job.Current = ""
 		c.job.Finished = time.Now()
+		fs.Logf(nil, "sync: %s took %s; the job took %s (%v)", c.job.Phase,
+			c.job.Finished.Sub(c.phaseStart).Round(100*time.Millisecond),
+			c.job.Finished.Sub(c.job.Started).Round(100*time.Millisecond), errOrOK(err))
+		c.phaseStart = time.Time{}
 		var busy *leaseBusyError
 		switch {
 		case errors.As(err, &busy):
@@ -169,6 +183,13 @@ func (c *Core) startJobLocked(work func(context.Context) error) error {
 			c.job.Phase = PhaseError
 			c.job.Error = err.Error()
 			c.retryLocked()
+		case errors.Is(err, errSwitchFinished) && c.resync && !c.closed:
+			c.resync = false
+			c.job.Phase = PhaseDone
+			if err := c.startJobLocked(c.sync); err != nil {
+				c.job.Phase, c.job.Error = PhaseError, err.Error()
+			}
+			c.notice = "A switch of the primary to " + c.settings.Folder + " was cut short, so it was finished."
 		case err != nil:
 			c.job.Phase = PhaseError
 			c.job.Error = err.Error()
@@ -305,9 +326,19 @@ func (c *Core) checkPrimary(ctx context.Context, f fs.Fs) error {
 		c.mu.Lock()
 		mine := c.primaryID()
 		c.mu.Unlock()
+		if repo.Primary.Replica != mine && c.interruptedSwitch(repo, repo.LibraryID, c.knownGeneration()) {
+			return c.finishSwitch(ctx, f, repo, mine, repo)
+		}
 		if repo.Primary.Replica != mine {
 			return fmt.Errorf("the library's primary moved to %s on another device; this device doesn't follow a move yet", repo.Primary.Folder)
 		}
 	}
 	return nil
+}
+
+func errOrOK(err error) string {
+	if err != nil {
+		return err.Error()
+	}
+	return "ok"
 }

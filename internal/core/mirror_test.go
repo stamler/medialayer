@@ -898,3 +898,94 @@ func encodedFLAC(t *testing.T, title string, seed int64, blockSize int) []byte {
 	}
 	return b.Bytes()
 }
+
+// A switch of the primary cut short after its new repo.json reached the
+// target (and, in the second case, the old primary too), but before this
+// device saved its settings, is finished by the next sync rather than
+// leaving the library stuck.
+func TestInterruptedSwitchIsFinished(t *testing.T) {
+	for _, bothWritten := range []bool{false, true} {
+		t.Run(fmt.Sprint("old primary written ", bothWritten), func(t *testing.T) {
+			ctx := context.Background()
+			c, lib, sec := newMirrorCore(t)
+			if err := c.sync(ctx); err != nil {
+				t.Fatal(err)
+			}
+			next := readRepoFile(t, lib)
+			next.Generation++
+			next.Primary = member{Replica: "sec1", Type: "local", Folder: sec}
+			next.ChangedBy = c.deviceID()
+			next.Members = []member{next.Primary, {Replica: replica, Type: "local", Folder: lib}}
+			b, _ := json.Marshal(next)
+			dirs := []string{sec}
+			if bothWritten {
+				dirs = append(dirs, lib)
+			}
+			for _, d := range dirs {
+				write(t, filepath.Join(d, ".medialayer/repo.json"), b)
+			}
+			if err := c.sync(ctx); !errors.Is(err, errSwitchFinished) {
+				t.Fatalf("sync = %v, want the switch finished", err)
+			}
+			for _, dir := range []string{sec, lib} {
+				if r := readRepoFile(t, dir); r.Generation != next.Generation || r.Primary.Replica != "sec1" {
+					t.Errorf("%s repo.json = %+v", dir, r)
+				}
+			}
+			st := c.Status()
+			if len(st.Sources) != 2 || !st.Sources[0].Primary || st.Sources[0].Folder != sec || st.Sources[1].ID != replica {
+				t.Fatalf("sources = %+v", st.Sources)
+			}
+			// The sync that follows runs from the new primary.
+			if err := c.sync(ctx); err != nil {
+				t.Fatal(err)
+			}
+			if s := mirrorOf(t, c, replica); s.State != MirrorSynced {
+				t.Fatalf("old primary as a secondary = %+v", s)
+			}
+		})
+	}
+}
+
+// The sync that finds an interrupted switch starts the sync from the new
+// primary by itself.
+func TestInterruptedSwitchSyncsAgain(t *testing.T) {
+	ctx := context.Background()
+	c, lib, sec := newMirrorCore(t)
+	if err := c.sync(ctx); err != nil {
+		t.Fatal(err)
+	}
+	next := readRepoFile(t, lib)
+	next.Generation++
+	next.Primary = member{Replica: "sec1", Type: "local", Folder: sec}
+	next.ChangedBy = c.deviceID()
+	next.Members = []member{next.Primary, {Replica: replica, Type: "local", Folder: lib}}
+	b, _ := json.Marshal(next)
+	write(t, filepath.Join(sec, ".medialayer/repo.json"), b)
+	if err := c.StartSync(); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		c.mu.Lock()
+		done := c.jobDone
+		c.mu.Unlock()
+		if done == nil {
+			break
+		}
+		select {
+		case <-done:
+		case <-time.After(time.Until(deadline)):
+			t.Fatal("syncs didn't end")
+		}
+	}
+	if st := c.Status(); st.Job.Phase != PhaseDone || !strings.Contains(st.Notice, "cut short") {
+		t.Fatalf("job = %+v, notice %q", st.Job, st.Notice)
+	}
+	if s := mirrorOf(t, c, replica); s.State != MirrorSynced {
+		t.Fatalf("old primary as a secondary = %+v", s)
+	}
+	if r := readRepoFile(t, lib); r.Primary.Replica != "sec1" {
+		t.Fatalf("old primary's repo.json = %+v", r)
+	}
+}
