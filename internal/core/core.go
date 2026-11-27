@@ -213,18 +213,31 @@ func (c *Core) connectedLocked() bool {
 
 // libraryFs returns the rclone Fs for the library folder, opening it on
 // first use.
+// The open runs without c.mu, as it can take a while (signing in to
+// Proton, say) and Status and streaming take c.mu.
 func (c *Core) libraryFs(ctx context.Context) (fs.Fs, error) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	if c.fsys != nil {
-		return c.fsys, nil
+		f := c.fsys
+		c.mu.Unlock()
+		return f, nil
 	}
-	if c.settings.Folder == "" {
+	s := source{Remote: c.primaryRemote(), Folder: c.settings.Folder}
+	c.mu.Unlock()
+	if s.Folder == "" {
 		return nil, errors.New("no library folder picked")
 	}
-	f, err := openSource(ctx, source{Remote: c.primaryRemote(), Folder: c.settings.Folder})
+	f, err := openSource(ctx, s)
 	if err != nil {
-		return nil, fmt.Errorf("open %s: %w", c.settings.Folder, err)
+		return nil, fmt.Errorf("open %s: %w", s.Folder, err)
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	switch {
+	case c.primaryRemote() != s.Remote || c.settings.Folder != s.Folder:
+		return nil, errors.New("the library folder changed while it was opening")
+	case c.fsys != nil:
+		return c.fsys, nil // opened meanwhile by another caller
 	}
 	c.fsys = f
 	return f, nil

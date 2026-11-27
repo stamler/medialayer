@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/rclone/rclone/fs"
+	"github.com/rclone/rclone/fs/config"
 )
 
 // Phases of the sync job, as Status reports them.
@@ -128,6 +129,13 @@ func (c *Core) startJobLocked(work func(context.Context) error) error {
 	c.stopHashPassLocked() // jobs rewrite the index; the pass starts again after
 	c.job = jobStatus{Phase: PhaseOpening, Started: time.Now()}
 	c.notice = ""
+	if config.GetValue(c.primaryRemote(), "type") == protonType {
+		// A fresh client each job, with the session as last renewed: a
+		// client kept all day may have lost its session to another client
+		// of the account renewing it (docs/sync.md, Proton Drive).
+		c.fsys = nil
+		c.stream.forgetAll()
+	}
 	go func() {
 		defer close(done)
 		// A write the stopped hash pass had begun ends first.

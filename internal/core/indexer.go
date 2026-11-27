@@ -16,6 +16,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"time"
 	"unicode"
 
 	"github.com/rclone/rclone/fs"
@@ -94,19 +95,31 @@ func (c *Core) index(ctx context.Context, f fs.Fs) error {
 	}
 	var todo []fs.Object
 	var found, gone []string
+	retimed := map[string]int64{} // by id
 	listed := map[string]bool{}
 	for _, o := range objs {
 		listed[o.Remote()] = true
 		k, ok := known[o.Remote()]
-		if ok && k.Size == o.Size() && k.MTime == o.ModTime(ctx).UnixMilli() {
-			if k.Missing {
-				found = append(found, k.ID)
+		if ok && k.Size == o.Size() {
+			mtime := o.ModTime(ctx).UnixMilli()
+			same := k.MTime == mtime
+			if !same && withinPrecision(f, k.MTime, mtime) {
+				// A cloud that keeps times to the second (Proton), now
+				// the primary: the file is unchanged, and its row takes
+				// the time the cloud reports from now on.
+				same = true
+				retimed[k.ID] = mtime
 			}
-			continue
+			if same {
+				if k.Missing {
+					found = append(found, k.ID)
+				}
+				continue
+			}
 		}
 		todo = append(todo, o)
 	}
-	moved, err := matchMoves(ctx, db, known, listed, todo)
+	moved, err := matchMoves(ctx, f, db, known, listed, todo)
 	if err != nil {
 		return err
 	}
@@ -115,8 +128,11 @@ func (c *Core) index(ctx context.Context, f fs.Fs) error {
 			gone = append(gone, k.ID)
 		}
 	}
-	if len(found)+len(gone) > 0 {
+	if len(found)+len(gone)+len(retimed) > 0 {
 		if err := db.MarkFilesChanged(); err != nil {
+			return err
+		}
+		if err := db.SetMTimes(retimed); err != nil {
 			return err
 		}
 		if err := db.SetMissing(found, false); err != nil {
@@ -143,6 +159,18 @@ func (c *Core) index(ctx context.Context, f fs.Fs) error {
 	return ctx.Err()
 }
 
+// withinPrecision reports whether two modification times, in
+// milliseconds, are one time on f, which keeps times no finer than a
+// second (as Proton Drive does). On finer clouds times must match.
+func withinPrecision(f fs.Info, a, b int64) bool {
+	w := f.Precision()
+	if w < time.Second || w == fs.ModTimeNotSupported {
+		return false
+	}
+	d := time.Duration(a-b) * time.Millisecond
+	return d > -w && d < w
+}
+
 // matchMoves finds files that were moved or renamed: a new path in todo
 // whose file matches exactly one indexed file that is gone (from this
 // listing or an earlier one), and that no other new path matches. That
@@ -151,7 +179,7 @@ func (c *Core) index(ctx context.Context, f fs.Fs) error {
 // SHA-256 when the index and the cloud both have one, otherwise by size,
 // modification time and file name (a move to another folder). It returns
 // the old paths that moved.
-func matchMoves(ctx context.Context, db *index.DB, known map[string]index.Known, listed map[string]bool,
+func matchMoves(ctx context.Context, f fs.Info, db *index.DB, known map[string]index.Known, listed map[string]bool,
 	todo []fs.Object) (map[string]bool, error) {
 	bySize := map[int64][]string{} // gone paths
 	for p, k := range known {
@@ -184,7 +212,8 @@ func matchMoves(ctx context.Context, db *index.DB, known map[string]index.Known,
 			if sha != nil && k.SHA256 != nil {
 				same = bytes.Equal(sha, k.SHA256)
 			} else {
-				same = k.MTime == o.ModTime(ctx).UnixMilli() && path.Base(p) == path.Base(o.Remote())
+				mtime := o.ModTime(ctx).UnixMilli()
+				same = (k.MTime == mtime || withinPrecision(f, k.MTime, mtime)) && path.Base(p) == path.Base(o.Remote())
 			}
 			if same {
 				match, n = p, n+1

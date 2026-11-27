@@ -34,12 +34,7 @@ func (c *Core) Promote(id string) error {
 	}
 	found := false
 	for _, s := range c.settings.Secondaries {
-		if s.ID == id {
-			if why := s.cantPromote(); why != "" {
-				return errors.New(why)
-			}
-			found = true
-		}
+		found = found || s.ID == id
 	}
 	if !found {
 		return fmt.Errorf("no secondary %s", id)
@@ -92,7 +87,7 @@ func (c *Core) promoteHeld(ctx context.Context, id string) error {
 	}
 	return c.withLease(ctx, dst, func(ctx context.Context) error {
 		c.setJob(func(j *jobStatus) { j.Phase, j.Done, j.Total, j.Current = PhasePromoting, 0, 0, "" })
-		if err := c.swapPrimary(ctx, id); err != nil {
+		if err := c.swapPrimary(ctx, id, dst); err != nil {
 			return err
 		}
 		return c.syncHeld(ctx)
@@ -101,7 +96,7 @@ func (c *Core) promoteHeld(ctx context.Context, id string) error {
 
 // swapPrimary makes secondary id the primary. It runs inside the job, so
 // nothing else changes the settings meanwhile.
-func (c *Core) swapPrimary(ctx context.Context, id string) error {
+func (c *Core) swapPrimary(ctx context.Context, id string, dst fs.Fs) error {
 	c.mu.Lock()
 	var target source
 	var others []source
@@ -130,10 +125,6 @@ func (c *Core) swapPrimary(ctx context.Context, id string) error {
 	}
 	if repo == nil {
 		return errors.New("the primary has no repo.json")
-	}
-	dst, err := openSource(ctx, target)
-	if err != nil {
-		return err
 	}
 	if err := c.promotable(ctx, dst, repo); err != nil {
 		return err
@@ -171,7 +162,7 @@ func (c *Core) swapPrimary(ctx context.Context, id string) error {
 	c.settings.Secondaries = append(others, oldPrimary)
 	c.settings.ListedMembers = true
 	c.settings.ReviewFirst = oldPrimary.ID
-	c.fsys = nil
+	c.fsys = dst // the client that holds the target's lease, not another
 	delete(c.mirrors, target.ID)
 	c.stream.forgetAll()
 	if err := c.saveSettings(); err != nil {
@@ -234,6 +225,17 @@ func (c *Core) primaryID() string {
 		return replica
 	}
 	return c.settings.PrimaryID
+}
+
+// primaryType is the primary's rclone backend, such as "drive".
+func (c *Core) primaryType() string {
+	c.mu.Lock()
+	r := c.primaryRemote()
+	c.mu.Unlock()
+	if r == localPrimary {
+		return "local"
+	}
+	return source{Remote: r}.sourceType()
 }
 
 // localPrimary is PrimaryRemote for a primary in a local folder.

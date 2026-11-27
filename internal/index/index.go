@@ -390,6 +390,22 @@ func (d *DB) MoveFile(id, path string) error {
 	return tx.Commit()
 }
 
+// SetMTimes sets files' modification times, by id, for files whose
+// time a cloud keeps less finely than the index had it.
+func (d *DB) SetMTimes(mtimes map[string]int64) error {
+	tx, err := d.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	for id, mtime := range mtimes {
+		if _, err := tx.Exec(`UPDATE file SET mtime = ? WHERE id = ?`, mtime, id); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 // SetMissing marks files as missing (true) or present (false) by id.
 func (d *DB) SetMissing(ids []string, missing bool) error {
 	tx, err := d.db.Begin()

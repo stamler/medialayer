@@ -123,9 +123,6 @@ type SourceStatus struct {
 	// CaseBlind is set for a secondary whose paths sync matches ignoring
 	// case, so paths that differ only by case are not kept there.
 	CaseBlind bool `json:"case_blind,omitempty"`
-	// CantPromote says why a secondary can't be made the primary,
-	// whatever its state; "" when it can.
-	CantPromote string `json:"cant_promote,omitempty"`
 }
 
 // sourcesLocked lists the primary and the secondaries. The caller holds
@@ -143,7 +140,7 @@ func (c *Core) sourcesLocked() []SourceStatus {
 	}}
 	for _, s := range c.settings.Secondaries {
 		st := SourceStatus{ID: s.ID, Type: s.sourceType(), Remote: s.Remote, Folder: s.Folder,
-			CaseBlind: s.caseBlind(), CantPromote: s.cantPromote()}
+			CaseBlind: s.caseBlind()}
 		if m := c.mirrors[s.ID]; m != nil {
 			st.State, st.Error, st.Synced = m.state, m.err, m.synced
 			if m.state == MirrorSynced {
@@ -324,14 +321,6 @@ func openSource(ctx context.Context, s source) (fs.Fs, error) {
 		return openProton(ctx, s.Remote, s.Folder)
 	}
 	return fs.NewFs(ctx, s.Remote+":"+s.Folder)
-}
-
-// cantPromote says why the secondary can't be made the primary, or "".
-func (s source) cantPromote() string {
-	if s.sourceType() == protonType {
-		return "Proton Drive can't be the primary yet; it can hold a copy"
-	}
-	return ""
 }
 
 // caseBlind reports whether a secondary's paths are matched ignoring

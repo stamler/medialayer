@@ -14,10 +14,10 @@ import (
 	"github.com/rclone/rclone/fs/config/obscure"
 )
 
-// Proton Drive is a secondary only, for now (see docs/sync.md, Proton
-// Drive). Signing in goes through rclone's backend, with the account's
-// username and password, a 2FA code if the account uses one, and the
-// mailbox password of a two-password account. Only the session the
+// A Proton Drive folder can be a secondary, and be made the primary (see
+// docs/sync.md, Proton Drive). Signing in goes through rclone's backend,
+// with the account's username and password, a 2FA code if the account
+// uses one, and the mailbox password of a two-password account. Only the session the
 // sign-in makes is kept in the core's rclone config, never the password
 // (the session's salted key password does unlock the account's keys):
 // when Proton ends the session, the user signs in again.
@@ -106,7 +106,7 @@ func (c *Core) ConnectProton(ctx context.Context, user, password, mailbox, code 
 		inUse := c.remoteInUse(a.Remote)
 		c.mu.Unlock()
 		if !sameProtonUser(a.User, user) && inUse {
-			return "", fmt.Errorf("MediaLayer connects one Proton account at a time, and the library uses %s. Stop syncing to its folders first", a.User)
+			return "", fmt.Errorf("MediaLayer connects one Proton account at a time, and the library uses %s. Stop syncing to its folders (or make another source the primary) first", a.User)
 		}
 	}
 	// The sign-in runs on a config of its own, so a failed one leaves the
@@ -138,7 +138,7 @@ func (c *Core) ConnectProton(ctx context.Context, user, password, mailbox, code 
 	c.mu.Lock()
 	if old := config.GetValue(name, "username"); old != "" && !sameProtonUser(old, user) && c.remoteInUse(name) {
 		c.mu.Unlock()
-		return "", fmt.Errorf("MediaLayer connects one Proton account at a time, and the library uses %s. Stop syncing to its folders first", old)
+		return "", fmt.Errorf("MediaLayer connects one Proton account at a time, and the library uses %s. Stop syncing to its folders (or make another source the primary) first", old)
 	}
 	session := map[string]string{}
 	for _, k := range protonSessionKeys {

@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/rclone/Proton-API-Bridge/common"
 	"github.com/rclone/rclone/fs"
@@ -71,14 +72,11 @@ func TestProtonSecondaryRules(t *testing.T) {
 	c.settings.Secondaries = append(c.settings.Secondaries, source{ID: "p", Remote: protonRemote, Folder: "Music"})
 	c.mu.Unlock()
 	st := mirrorOf(t, c, "p")
-	if st.Type != protonType || !st.CaseBlind || st.CantPromote == "" {
+	if st.Type != protonType || !st.CaseBlind {
 		t.Errorf("Proton secondary status = %+v", st)
 	}
-	if st := mirrorOf(t, c, "sec1"); !st.CaseBlind || st.CantPromote != "" {
+	if st := mirrorOf(t, c, "sec1"); !st.CaseBlind {
 		t.Errorf("local secondary status = %+v", st)
-	}
-	if err := c.Promote("p"); err == nil || !strings.Contains(err.Error(), "Proton") {
-		t.Errorf("Promote of a Proton secondary = %v", err)
 	}
 }
 
@@ -159,5 +157,63 @@ func TestOpenProtonKeepsSession(t *testing.T) {
 	k.Set("client_access_token", "renewed")
 	if got := config.GetValue(protonRemote, "client_access_token"); got != "renewed" {
 		t.Errorf("a renewed session wasn't saved: %q", got)
+	}
+}
+
+// coarseFs reports times kept to the second, as Proton Drive does.
+type coarseFs struct{ fs.Fs }
+
+func (coarseFs) Precision() time.Duration { return time.Second }
+
+// A primary that keeps times to the second (a Proton folder made the
+// primary) keeps every file's id and doesn't read it again: each row
+// takes the time the cloud reports.
+func TestIndexKeepsFilesOnCoarseTimes(t *testing.T) {
+	ctx := context.Background()
+	lib := writeLibrary(t, nil)
+	base := time.Date(2026, 1, 2, 3, 4, 5, 678_000_000, time.UTC)
+	for _, p := range []string{"A/Album/01.flac", "A/Album/02.flac", "B/Other/01.flac"} {
+		if err := os.Chtimes(filepath.Join(lib, p), base, base); err != nil {
+			t.Fatal(err)
+		}
+	}
+	c := newTestCore(t, lib)
+	f, err := fs.NewFs(ctx, lib)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.index(ctx, f); err != nil {
+		t.Fatal(err)
+	}
+	before := fileIDs(t, c)
+	whole := base.Truncate(time.Second)
+	for p := range before {
+		if err := os.Chtimes(filepath.Join(lib, p), whole, whole); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Unreadable now: indexing it again would fail.
+	if err := os.WriteFile(filepath.Join(lib, "B/Other/01.flac"), make([]byte, fileSize(filepath.Join(lib, "B/Other/01.flac"))), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(filepath.Join(lib, "B/Other/01.flac"), whole, whole); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.index(ctx, coarseFs{f}); err != nil {
+		t.Fatal(err)
+	}
+	known, err := c.currentDB().KnownFiles()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for p, id := range before {
+		k := known[p]
+		if k.ID != id || k.MTime != whole.UnixMilli() {
+			t.Errorf("%s: id %s -> %s, mtime %d (want %d)", p, id, k.ID, k.MTime, whole.UnixMilli())
+		}
+	}
+	// On a cloud with fine times, a time off by under a second is a change.
+	if withinPrecision(f, whole.UnixMilli(), base.UnixMilli()) {
+		t.Error("a local folder's times count as the same within a second")
 	}
 }

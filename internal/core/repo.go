@@ -421,7 +421,7 @@ func (c *Core) publish(ctx context.Context, f fs.Fs) error {
 			Format:     repoFormat,
 			LibraryID:  libraryID,
 			Generation: 1,
-			Primary:    member{Replica: replica, Type: "drive", Folder: c.folder()},
+			Primary:    member{Replica: replica, Type: c.primaryType(), Folder: c.folder()},
 			ChangedAt:  time.Now().UTC(),
 			ChangedBy:  c.settings.DeviceID,
 		}
