@@ -213,7 +213,7 @@ func (c *Core) protonLogin(ctx context.Context, user, password, mailbox, code, p
 	case err == nil && ctx.Err() == nil:
 		s.close()
 	case err == nil: // cancelled as it finished
-		s.end()
+		go s.end()
 		return nil, ctx.Err()
 	case errors.Is(err, ErrProtonNeedsPIN) || errors.Is(err, ErrProtonNeeds2FA) || errors.Is(err, ErrProtonNeedsMailbox):
 		c.keepProtonPending(ctx, s)
