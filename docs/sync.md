@@ -296,7 +296,9 @@ Hashes are kept so a file is read once:
 2. Removals and replacements: the secondary's file is moved to
    `.medialayer/trash/<time>/<path>` first. Trash folders are emptied after
    30 days.
-3. Copies and the replacements' new versions, one file at a time.
+3. The replacements' new versions, one file at a time, then new files,
+   four at a time (rclone's default transfers). On Proton, one at a time
+   left most of the upload line idle; see [proton.md](proton.md#sync-speed).
 4. The library's own files: the art packs the secondary lacks, then the
    index's current version (older snapshots are removed), then `repo.json`
    last.
@@ -504,6 +506,9 @@ become synced, and you can't switch back until it has space.
   primary under the same generation, or when it is the primary.
 
 ## Proton Drive
+
+Why it works this way, the sign-in's history, and the speed work are in
+[proton.md](proton.md).
 
 A folder on Proton Drive can be a secondary, with the same rules as a
 Google Drive one. Add Source signs in with the Proton username and
