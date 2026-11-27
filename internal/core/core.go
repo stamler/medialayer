@@ -50,6 +50,7 @@ type Core struct {
 	// key's touch.
 	protonKeyWait atomic.Int32       // a KeyTouch
 	protonCancel  context.CancelFunc // ends the Proton sign-in under way; under mu
+	protonPending *protonSignIn      // a sign-in waiting for an answer; under mu
 	// badCovers are folder images that failed to read or decode, so later
 	// syncs in this session don't download them again.
 	badCovers map[string]bool

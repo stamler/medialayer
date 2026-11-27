@@ -1104,7 +1104,7 @@ struct ProtonSignInView: View {
             if let error { Text(error).foregroundStyle(.red).textSelection(.enabled) }
             HStack {
                 Button("Cancel") {
-                    if working { Core.cancelProtonSignIn() }
+                    Core.cancelProtonSignIn()
                     onCancel()
                 }.keyboardShortcut(.cancelAction)
                 Spacer()
@@ -1113,7 +1113,8 @@ struct ProtonSignInView: View {
         }
         .padding(24)
         .frame(minWidth: 460)
-        .onDisappear { if working { Core.cancelProtonSignIn() } }
+        // Ends a sign-in under way, or one kept waiting for the PIN.
+        .onDisappear { Core.cancelProtonSignIn() }
         // A sign-in with a security key waits for its touch.
         .task(id: working) {
             while working && !Task.isCancelled {

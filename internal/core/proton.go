@@ -2,6 +2,8 @@ package core
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -132,7 +134,7 @@ func (c *Core) ConnectProton(ctx context.Context, user, password, mailbox, code,
 	}
 	c.protonCancel = cancel
 	c.mu.Unlock()
-	session, err := protonLogin(ctx, user, password, mailbox, code, pin, func(k KeyTouch) { c.protonKeyWait.Store(int32(k)) })
+	session, err := c.protonLogin(ctx, user, password, mailbox, code, pin, func(k KeyTouch) { c.protonKeyWait.Store(int32(k)) })
 	if err != nil {
 		return "", err
 	}
@@ -180,47 +182,141 @@ var protonAppVersion = func() string {
 
 // protonLogin signs in as Proton's own clients do: the password (by SRP),
 // then the second step if the account has one (a 2FA code when given, or
-// else its security key, see protonKeyStep), then the keys are unlocked with
-// the password, or the mailbox password of a two-password account. It
-// returns the session for the config, under protonSessionKeys. A sign-in
-// that can't finish is signed out at Proton.
-func protonLogin(ctx context.Context, user, password, mailbox, code, pin string, waiting func(KeyTouch)) (map[string]string, error) {
+// else its security key, see protonKeyStep), then the keys are unlocked
+// with the password, or the mailbox password of a two-password account.
+// It returns the session for the config, under protonSessionKeys.
+//
+// A sign-in that stops to ask for more (a code, the mailbox password, the
+// key's PIN, or the PIN again after a wrong one) is kept, as pending, so
+// the answer goes on from where it stopped: no new sign-in at Proton (and
+// no new "new sign-in" email), and no new touch to pick the key. One that
+// fails otherwise, or is given up, is signed out at Proton.
+func (c *Core) protonLogin(ctx context.Context, user, password, mailbox, code, pin string, waiting func(KeyTouch)) (map[string]string, error) {
+	c.mu.Lock()
+	s := c.protonPending
+	c.protonPending = nil
+	c.mu.Unlock()
+	if s != nil && !s.matches(user, password) {
+		s.end()
+		s = nil
+	}
+	if s != nil {
+		s.stopExpiry()
+	} else {
+		var err error
+		if s, err = startProtonLogin(ctx, user, password); err != nil {
+			return nil, err
+		}
+	}
+	session, err := s.finish(ctx, password, mailbox, code, pin, waiting)
+	switch {
+	case err == nil:
+		s.close()
+	case ctx.Err() == nil && (errors.Is(err, ErrProtonNeedsPIN) || errors.Is(err, ErrProtonNeeds2FA) || errors.Is(err, ErrProtonNeedsMailbox)):
+		c.keepProtonPending(s)
+	default:
+		s.end()
+	}
+	return session, err
+}
+
+// protonPendingFor is how long a sign-in waits for its next answer.
+const protonPendingFor = 5 * time.Minute
+
+// keepProtonPending keeps s for the next answer, until it expires.
+func (c *Core) keepProtonPending(s *protonSignIn) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if old := c.protonPending; old != nil && old != s {
+		go old.end()
+	}
+	c.protonPending = s
+	s.expiry = time.AfterFunc(protonPendingFor, func() {
+		c.mu.Lock()
+		mine := c.protonPending == s
+		if mine {
+			c.protonPending = nil
+		}
+		c.mu.Unlock()
+		if mine {
+			s.end()
+		}
+	})
+}
+
+// protonSignIn is a sign-in under way at Proton.
+type protonSignIn struct {
+	user     string
+	password [32]byte // its hash, to tell an answer to this sign-in
+	m        *proton.Manager
+	c        *proton.Client
+	auth     proton.Auth
+	stepDone bool // the second step (2FA code or key) is done
+	expiry   *time.Timer
+
+	mu     sync.Mutex
+	tokens proton.Auth // renewals during the sign-in replace them
+}
+
+func startProtonLogin(ctx context.Context, user, password string) (*protonSignIn, error) {
 	m := proton.New(
 		proton.WithAppVersion(protonAppVersion),
 		proton.WithUserAgent(fs.GetConfig(ctx).UserAgent),
 		proton.WithTransport(fshttp.NewTransport(ctx)),
 	)
-	defer m.Close()
 	c, auth, err := m.NewClientWithLogin(ctx, user, []byte(password))
 	if err != nil {
+		m.Close()
 		return nil, fmt.Errorf("Proton sign-in: %w", err)
 	}
-	defer c.Close()
-	// Renewals during the sign-in replace the tokens.
-	var mu sync.Mutex
-	tokens := auth
+	s := &protonSignIn{user: user, password: sha256.Sum256([]byte(password)), m: m, c: c, auth: auth, tokens: auth}
 	c.AddAuthHandler(func(a proton.Auth) {
-		mu.Lock()
-		tokens.UID, tokens.AccessToken, tokens.RefreshToken = a.UID, a.AccessToken, a.RefreshToken
-		mu.Unlock()
+		s.mu.Lock()
+		s.tokens.UID, s.tokens.AccessToken, s.tokens.RefreshToken = a.UID, a.AccessToken, a.RefreshToken
+		s.mu.Unlock()
 	})
-	fail := func(err error) (map[string]string, error) {
-		// Best effort: don't leave the session open at Proton.
-		out, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
-		defer cancel()
-		_ = c.AuthDelete(out)
-		return nil, err
+	return s, nil
+}
+
+func (s *protonSignIn) matches(user, password string) bool {
+	h := sha256.Sum256([]byte(password))
+	return s.user == user && subtle.ConstantTimeCompare(h[:], s.password[:]) == 1
+}
+
+func (s *protonSignIn) stopExpiry() {
+	if s.expiry != nil {
+		s.expiry.Stop()
 	}
+}
+
+// close lets go of the sign-in, keeping its session at Proton.
+func (s *protonSignIn) close() {
+	s.stopExpiry()
+	s.c.Close()
+	s.m.Close()
+}
+
+// end signs the sign-in out at Proton (best effort) and lets go of it.
+func (s *protonSignIn) end() {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_ = s.c.AuthDelete(ctx)
+	s.close()
+}
+
+// finish takes the sign-in on from where it stopped.
+func (s *protonSignIn) finish(ctx context.Context, password, mailbox, code, pin string, waiting func(KeyTouch)) (map[string]string, error) {
+	c, auth := s.c, s.auth
 	// Asked before the 2FA code is spent, as a code is good once.
 	if auth.PasswordMode == proton.TwoPasswordMode && mailbox == "" {
-		return fail(ErrProtonNeedsMailbox)
+		return nil, ErrProtonNeedsMailbox
 	}
 	code = strings.ReplaceAll(strings.TrimSpace(code), " ", "")
-	if tfa := auth.TwoFA.Enabled; tfa != 0 {
+	if tfa := auth.TwoFA.Enabled; tfa != 0 && !s.stepDone {
 		switch {
 		case tfa&proton.HasTOTP != 0 && code != "":
 			if err := c.Auth2FA(ctx, proton.Auth2FAReq{TwoFactorCode: code}); err != nil {
-				return fail(fmt.Errorf("Proton didn't accept the 2FA code (codes change every 30 seconds): %w", err))
+				return nil, fmt.Errorf("Proton didn't accept the 2FA code (codes change every 30 seconds): %w", err)
 			}
 		case tfa&proton.HasFIDO2 != 0:
 			if err := protonKeyStep(ctx, c, auth, pin, waiting); err != nil {
@@ -235,11 +331,12 @@ func protonLogin(ctx context.Context, user, password, mailbox, code, pin string,
 						err = needError{msg: msg, need: ErrProtonNeeds2FA}
 					}
 				}
-				return fail(err)
+				return nil, err
 			}
 		default:
-			return fail(ErrProtonNeeds2FA)
+			return nil, ErrProtonNeeds2FA
 		}
+		s.stepDone = true
 	}
 	keyPass := []byte(password)
 	if auth.PasswordMode == proton.TwoPasswordMode {
@@ -247,22 +344,22 @@ func protonLogin(ctx context.Context, user, password, mailbox, code, pin string,
 	}
 	u, err := c.GetUser(ctx)
 	if err != nil {
-		return fail(protonScopeError(err, auth))
+		return nil, protonScopeError(err, auth)
 	}
 	addrs, err := c.GetAddresses(ctx)
 	if err != nil {
-		return fail(protonScopeError(err, auth))
+		return nil, protonScopeError(err, auth)
 	}
 	salts, err := c.GetSalts(ctx)
 	if err != nil {
-		return fail(protonScopeError(err, auth))
+		return nil, protonScopeError(err, auth)
 	}
 	if len(u.Keys) == 0 {
-		return fail(errors.New("this Proton account has no keys yet: sign in once on proton.me to set it up"))
+		return nil, errors.New("this Proton account has no keys yet: sign in once on proton.me to set it up")
 	}
 	salted, err := salts.SaltForKey(keyPass, u.Keys.Primary().ID)
 	if err != nil {
-		return fail(fmt.Errorf("Proton sign-in: %w", err))
+		return nil, fmt.Errorf("Proton sign-in: %w", err)
 	}
 	userKR, _, err := proton.Unlock(u, addrs, salted, nil)
 	if err != nil || userKR.CountDecryptionEntities(0) == 0 {
@@ -273,18 +370,18 @@ func protonLogin(ctx context.Context, user, password, mailbox, code, pin string,
 		if err == nil {
 			err = errors.New("no key unlocked")
 		}
-		return fail(fmt.Errorf("the %s didn't unlock this Proton account's keys: %w", what, err))
+		return nil, fmt.Errorf("the %s didn't unlock this Proton account's keys: %w", what, err)
 	}
 	// Drive itself must answer too, before anything is saved.
 	if _, err := c.ListVolumes(ctx); err != nil {
-		return fail(protonScopeError(err, auth))
+		return nil, protonScopeError(err, auth)
 	}
-	mu.Lock()
-	defer mu.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	return map[string]string{
-		"client_uid":             tokens.UID,
-		"client_access_token":    tokens.AccessToken,
-		"client_refresh_token":   tokens.RefreshToken,
+		"client_uid":             s.tokens.UID,
+		"client_access_token":    s.tokens.AccessToken,
+		"client_refresh_token":   s.tokens.RefreshToken,
 		"client_salted_key_pass": base64.StdEncoding.EncodeToString(salted),
 	}, nil
 }
@@ -389,8 +486,13 @@ func (c *Core) ProtonKeyWaiting() KeyTouch { return KeyTouch(c.protonKeyWait.Loa
 // while it waits for a security key.
 func (c *Core) CancelProtonSignIn() {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	if c.protonCancel != nil {
 		c.protonCancel()
+	}
+	s := c.protonPending
+	c.protonPending = nil
+	c.mu.Unlock()
+	if s != nil {
+		s.end() // signed out at Proton
 	}
 }
