@@ -3,7 +3,7 @@ module github.com/stamler/medialayer
 go 1.26.0
 
 require (
-	github.com/go-ctap/ctaphid v0.8.3
+	github.com/go-ctap/ctaphid v0.8.5
 	github.com/go-resty/resty/v2 v2.17.2
 	github.com/mewkiz/flac v1.0.14
 	github.com/oklog/ulid/v2 v2.1.2
@@ -104,13 +104,13 @@ require (
 	github.com/emersion/go-vcard v0.0.0-20260618161152-d854b7e0e2d3 // indirect
 	github.com/felixge/httpsnoop v1.1.0 // indirect
 	github.com/flynn/noise v1.1.0 // indirect
-	github.com/fxamacker/cbor/v2 v2.9.0 // indirect
+	github.com/fxamacker/cbor/v2 v2.9.1 // indirect
 	github.com/gabriel-vasile/mimetype v1.4.15 // indirect
 	github.com/gdamore/encoding v1.0.1 // indirect
 	github.com/gdamore/tcell/v3 v3.6.0 // indirect
 	github.com/geoffgarside/ber v1.2.0 // indirect
 	github.com/go-chi/chi/v5 v5.5.0 // indirect
-	github.com/go-ctap/hid v0.3.0 // indirect
+	github.com/go-ctap/hid v0.4.2 // indirect
 	github.com/go-darwin/apfs v0.0.0-20211011131704-f84b94dbf348 // indirect
 	github.com/go-git/go-billy/v5 v5.9.2 // indirect
 	github.com/go-logr/logr v1.4.4 // indirect
@@ -160,7 +160,7 @@ require (
 	github.com/kr/fs v0.1.0 // indirect
 	github.com/kylelemons/godebug v1.1.0 // indirect
 	github.com/lanrat/extsort v1.5.0 // indirect
-	github.com/ldclabs/cose v1.3.2 // indirect
+	github.com/ldclabs/cose v1.3.4 // indirect
 	github.com/leodido/go-urn v1.5.0 // indirect
 	github.com/lpar/calendar v0.2.0 // indirect
 	github.com/lucasb-eyer/go-colorful v1.4.1 // indirect

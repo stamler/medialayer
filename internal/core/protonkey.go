@@ -191,10 +191,14 @@ var assertWithKey = func(ctx context.Context, req fidoRequest, pin string, waiti
 	// One sign-in at a time uses the key: macOS opens it for one user,
 	// and closing it ends hidapi for the whole process. A cancelled
 	// sign-in's key keeps it until the key gives up.
+	wait := time.NewTimer(keyAnswerTimeout)
+	defer wait.Stop()
 	select {
 	case keyBusy <- struct{}{}:
 	case <-ctx.Done():
 		return fidoAssertion{}, ctx.Err()
+	case <-wait.C: // a key that didn't answer before is still held
+		return fidoAssertion{}, errKeyNoAnswer
 	}
 	held := true
 	defer func() {
@@ -325,8 +329,10 @@ func openKey(ctx context.Context, release func()) (_ *device.Device, gaveUp bool
 	if ctx.Err() != nil {
 		return nil, true, ctx.Err()
 	}
-	return nil, true, errors.New("the security key didn't answer: unplug it, plug it in again, and sign in again")
+	return nil, true, errKeyNoAnswer
 }
+
+var errKeyNoAnswer = errors.New("the security key didn't answer: unplug it, plug it in again, and sign in again")
 
 // keyAnswerTimeout is how long a key may take to say what it is, before
 // any touch.
