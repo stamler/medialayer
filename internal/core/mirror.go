@@ -344,6 +344,44 @@ type listing struct {
 	// the probe files seen in those.
 	nested bool
 	probes map[string][]string // file name -> paths
+	// ownProbes are the probe files in the folder's own .medialayer.
+	ownProbes map[string]bool
+}
+
+func newListing() *listing {
+	return &listing{files: map[string]fs.Object{}, dupes: map[string]bool{}, probes: map[string][]string{},
+		ownProbes: map[string]bool{}}
+}
+
+// add files one listed object.
+func (l *listing) add(o fs.Object) {
+	r := o.Remote()
+	if strings.HasPrefix(r, repoDir+"/") {
+		if name, ok := strings.CutPrefix(r, repoDir+"/probe/"); ok && !strings.Contains(name, "/") {
+			l.ownProbes[name] = true
+		}
+		return
+	}
+	parts := strings.Split(r, "/")
+	for i, part := range parts {
+		if part == repoDir {
+			l.nested = true
+			if i+2 < len(parts) && parts[i+1] == "probe" {
+				name := parts[len(parts)-1]
+				l.probes[name] = append(l.probes[name], r)
+			}
+			return
+		}
+		if systemName(part) {
+			return
+		}
+	}
+	if _, ok := l.files[r]; ok {
+		l.dupes[r] = true
+		l.extra = append(l.extra, o)
+		return
+	}
+	l.files[r] = o
 }
 
 // systemName reports names that the operating system keeps in folders,
@@ -360,8 +398,8 @@ func systemName(base string) bool {
 // listLibrary lists a library folder. A missing folder is empty when
 // missingOK, as for a secondary not yet written to, and an error
 // otherwise.
-func listLibrary(ctx context.Context, f fs.Fs, missingOK bool) (*listing, error) {
-	l := &listing{files: map[string]fs.Object{}, dupes: map[string]bool{}, probes: map[string][]string{}}
+var listLibrary = func(ctx context.Context, f fs.Fs, missingOK bool) (*listing, error) {
+	l := newListing()
 	start := time.Now()
 	// Check first, as walk logs a missing folder as an error.
 	if _, err := f.List(ctx, ""); errors.Is(err, fs.ErrorDirNotFound) {
@@ -371,36 +409,10 @@ func listLibrary(ctx context.Context, f fs.Fs, missingOK bool) (*listing, error)
 		return nil, err
 	}
 	err := walk.ListR(ctx, f, "", true, -1, walk.ListObjects, func(entries fs.DirEntries) error {
-	next:
 		for _, e := range entries {
-			o, ok := e.(fs.Object)
-			if !ok {
-				continue
+			if o, ok := e.(fs.Object); ok {
+				l.add(o)
 			}
-			r := o.Remote()
-			if strings.HasPrefix(r, repoDir+"/") {
-				continue
-			}
-			parts := strings.Split(r, "/")
-			for i, part := range parts {
-				if part == repoDir {
-					l.nested = true
-					if i+2 < len(parts) && parts[i+1] == "probe" {
-						name := parts[len(parts)-1]
-						l.probes[name] = append(l.probes[name], r)
-					}
-					continue next
-				}
-				if systemName(part) {
-					continue next
-				}
-			}
-			if _, ok := l.files[r]; ok {
-				l.dupes[r] = true
-				l.extra = append(l.extra, o)
-				continue
-			}
-			l.files[r] = o
 		}
 		return nil
 	})
@@ -421,12 +433,15 @@ func putBytes(ctx context.Context, f fs.Fs, remote string, b []byte) error {
 
 // target is a secondary that passed the checks before syncing.
 type target struct {
-	s      source
-	dst    fs.Fs
-	have   *listing
-	probe  string       // its probe file, under .medialayer/probe/
-	member memberRecord // the folder's member.json, if any
-	theirs *repoRecord  // the folder's repo.json, if any
+	s     source
+	dst   fs.Fs
+	have  *listing
+	probe string // its probe file, under .medialayer/probe/
+	// newProbe is set when this sync wrote the probe for the first time,
+	// so a listing of the primary made before it can't show it.
+	newProbe bool
+	member   memberRecord // the folder's member.json, if any
+	theirs   *repoRecord  // the folder's repo.json, if any
 }
 
 // mirrorAll brings every secondary up to date with the primary f. A
@@ -499,9 +514,23 @@ func (c *Core) mirrorAll(ctx context.Context, f fs.Fs) error {
 	if len(targets) == 0 {
 		return nil
 	}
-	src, err := listLibrary(ctx, f, false)
-	if err != nil {
-		return fmt.Errorf("list %s: %w", f.Root(), err)
+	// The indexer's listing of the primary serves, if it is recent
+	// (listingFresh), unless a probe was written for the first time
+	// since: a secondary inside the primary shows up only in a listing
+	// that has its probe. (A probe already there is listed, and its new
+	// content is read from the primary.) A folder moved into the primary
+	// after the listing is missed, as one moved during the copying always
+	// was; the next sync's listing catches it.
+	src := c.takeListing(f)
+	for _, t := range targets {
+		if t.newProbe {
+			src = nil
+		}
+	}
+	if src == nil {
+		if src, err = listLibrary(ctx, f, false); err != nil {
+			return fmt.Errorf("list %s: %w", f.Root(), err)
+		}
 	}
 	// Secondaries get the local index's current version, which the
 	// primary may not hold yet (when it is full, say).
@@ -611,6 +640,7 @@ func (c *Core) check(ctx context.Context, f fs.Fs, s source, repo *repoRecord, d
 	if err := checkLease(ctx); err != nil {
 		return t, err
 	}
+	t.newProbe = !have.ownProbes[path.Base(t.probe)]
 	if err := putBytes(ctx, dst, t.probe, []byte(run)); err != nil {
 		return t, fmt.Errorf("write a probe file: %w", err)
 	}

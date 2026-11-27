@@ -65,9 +65,13 @@ func (c *Core) index(ctx context.Context, f fs.Fs) error {
 	c.setJob(func(j *jobStatus) { j.Phase, j.Done, j.Total = PhaseListing, 0, 0 })
 	var objs []fs.Object
 	images := map[string][]fs.Object{} // by folder
+	all := newListing()                // for mirroring, which then needn't list again
 	err := walk.ListR(ctx, f, "", true, -1, walk.ListObjects, func(entries fs.DirEntries) error {
 		for _, e := range entries {
 			o, ok := e.(fs.Object)
+			if ok {
+				all.add(o)
+			}
 			if !ok || strings.HasPrefix(o.Remote(), repoDir+"/") {
 				continue
 			}
@@ -87,6 +91,7 @@ func (c *Core) index(ctx context.Context, f fs.Fs) error {
 	if err != nil {
 		return fmt.Errorf("list %s: %w", f.Root(), err)
 	}
+	c.keepListing(f, all)
 
 	db := c.currentDB()
 	known, err := db.KnownFiles()

@@ -139,6 +139,12 @@ A secondary is synced only if it is safe to write:
   file written to the secondary's `.medialayer/probe/` must not be readable
   at the same path in the primary, nor appear anywhere in the primary's
   listing; a folder holding a `.medialayer` below its top is refused.
+  The listing is the indexer's, made earlier in the sync, unless it is
+  over two minutes old or a probe was written for the first time, when
+  the primary is listed again: a probe already there is in the earlier
+  listing, and its new content is read from the primary. That listing is
+  also what is copied, so a file removed from the primary since fails
+  that secondary's sync until the next one.
 - Local folders: not the top of a disk, the home folder, or a folder a
   cloud app syncs (`~/Library/CloudStorage`, `/Volumes/GoogleDrive*`).
 

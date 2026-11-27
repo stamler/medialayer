@@ -39,8 +39,13 @@ type Core struct {
 	settings   settings
 	fsys       fs.Fs            // the library folder, nil until one is picked
 	jobFs      map[string]fs.Fs // folders the running job opened, by fsKey
-	db         *index.DB        // nil until a folder is picked
-	dbEpoch    int64            // raised each time the database file is replaced
+	// listed is the running job's latest listing of the primary, made
+	// by the indexer, for mirroring to take (takeListing).
+	listed     *listing
+	listedFs   fs.Fs
+	listedAt   time.Time
+	db         *index.DB // nil until a folder is picked
+	dbEpoch    int64     // raised each time the database file is replaced
 	job        jobStatus
 	jobDone    chan struct{}      // closed when the running job ends; nil if none
 	phaseStart time.Time          // when the job's current phase began
@@ -262,6 +267,34 @@ func (c *Core) restartJobFsLocked() {
 	if c.jobFs != nil {
 		c.jobFs = map[string]fs.Fs{}
 	}
+}
+
+// keepListing keeps the indexer's listing of f for this job's mirroring.
+func (c *Core) keepListing(f fs.Fs, l *listing) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.jobFs != nil { // in a job
+		c.listed, c.listedFs, c.listedAt = l, f, time.Now()
+	}
+}
+
+// listingFresh is how old a kept listing may be. Mirroring trusts it for
+// what to copy and for where the secondaries are, so it must be about as
+// recent as a listing made for mirroring itself would be by the time the
+// copying ends.
+const listingFresh = 2 * time.Minute
+
+// takeListing returns the listing keepListing kept, once, if it is of f
+// and recent.
+func (c *Core) takeListing(f fs.Fs) *listing {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	l := c.listed
+	if c.listedFs != f || time.Since(c.listedAt) > listingFresh {
+		l = nil
+	}
+	c.listed, c.listedFs = nil, nil
+	return l
 }
 
 // fsKey names a folder for jobFs.

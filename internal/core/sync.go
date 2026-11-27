@@ -155,7 +155,7 @@ func (c *Core) startJobLocked(work func(context.Context) error) error {
 		c.fsys = nil
 		c.stream.forgetAll()
 	}
-	c.jobFs = map[string]fs.Fs{}
+	c.jobFs, c.listed, c.listedFs = map[string]fs.Fs{}, nil, nil
 	if c.fsys != nil {
 		c.jobFs[fsKey(source{Remote: c.primaryRemote(), Folder: c.settings.Folder})] = c.fsys
 	}
@@ -171,7 +171,7 @@ func (c *Core) startJobLocked(work func(context.Context) error) error {
 		c.mu.Lock()
 		defer c.mu.Unlock()
 		cancel()
-		c.jobDone, c.cancel, c.jobFs = nil, nil, nil
+		c.jobDone, c.cancel, c.jobFs, c.listed, c.listedFs = nil, nil, nil, nil, nil
 		c.job.Current = ""
 		c.job.Finished = time.Now()
 		fs.Logf(nil, "sync: %s took %s; the job took %s (%v)", c.job.Phase,
