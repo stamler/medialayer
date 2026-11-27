@@ -92,8 +92,13 @@ enum Core {
         if let message = take(p) { throw CoreError(message: message) }
     }
 
-    static func start(dataDir: URL) throws {
-        try check(dataDir.path.withCString { MLInit(UnsafeMutablePointer(mutating: $0)) })
+    /// Starts the core, its saved sign-ins encrypted with configKey.
+    static func start(dataDir: URL, configKey: String) throws {
+        try check(dataDir.path.withCString { d in
+            configKey.withCString { k in
+                MLInit(UnsafeMutablePointer(mutating: d), UnsafeMutablePointer(mutating: k))
+            }
+        })
     }
 
     static func status() -> CoreStatus {

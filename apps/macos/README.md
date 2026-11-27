@@ -47,6 +47,16 @@ the session Proton returns (which can unlock the account's files until it
 ends), so sign in again when Proton ends it.
 A Proton folder can't be made the primary yet.
 
+## Saved sign-ins and the keychain
+
+The core's rclone config, which holds the Google and Proton sign-ins,
+is encrypted with a key kept in your login keychain (item "MediaLayer
+saved sign-ins"). The build is signed ad hoc, so after each rebuild
+macOS asks once whether MediaLayer may use that item: choose Always
+Allow. Deny it and the app stops with a message, rather than making a
+new key. If the item is deleted, the app sets the old config aside and
+you connect the clouds again.
+
 ## Files
 
 Everything local lives in `~/Library/Application Support/MediaLayer` and

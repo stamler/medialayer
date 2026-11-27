@@ -510,9 +510,12 @@ Google Drive one. Add Source signs in with the Proton username and
 password, then a 2FA code or the mailbox password if the account uses
 one. The password goes to Proton only: the core keeps the session Proton
 returns, in its own rclone config. That session includes the salted key
-password that unlocks the account's keys, so the config file can
-decrypt the account's Drive until Proton ends the session (even after a
-password change). Moving it to the Keychain is still to do.
+password that unlocks the account's keys. The Mac app encrypts the whole
+config (Google's tokens too) with rclone's config encryption, under a
+random key it keeps in the login keychain, as Proton's own Drive app
+keeps its session in the keychain. The file alone opens nothing. If the
+key is lost, the core sets the unreadable file aside and the clouds
+need connecting again.
 
 rclone's backend clears a saved session whenever opening with it fails,
 offline or cancelled as much as when Proton ended it, and then signs in

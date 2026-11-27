@@ -160,7 +160,7 @@ final class AppModel: ObservableObject {
             .appendingPathComponent("MediaLayer", isDirectory: true)
         do {
             try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-            try Core.start(dataDir: dir)
+            try Core.start(dataDir: dir, configKey: ConfigKey.load())
         } catch {
             startError = error.localizedDescription
             return
