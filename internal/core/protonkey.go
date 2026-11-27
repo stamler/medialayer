@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -198,10 +199,14 @@ func protonKeyStep(ctx context.Context, c *proton.Client, auth proton.Auth, pin 
 	}
 	body := newFido2Body(opts, req, a)
 	// Auth2FA's own body can't carry the credential id Proton wants, so
-	// the body is replaced on its way out (on a retry too). The hook is
-	// on this sign-in's client only, which sends no other 2FA request.
+	// the body is replaced on its way out (on a retry too). The client may
+	// be kept for a later answer (a 2FA code), so the hook acts only
+	// during this call.
+	var on atomic.Bool
+	on.Store(true)
+	defer on.Store(false)
 	c.AddPreRequestHook(func(_ *resty.Client, r *resty.Request) error {
-		if _, ok := r.Body.(proton.Auth2FAReq); ok {
+		if _, ok := r.Body.(proton.Auth2FAReq); ok && on.Load() {
 			r.SetBody(body)
 		}
 		return nil

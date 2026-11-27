@@ -1228,7 +1228,7 @@ struct ProtonSignInView: View {
             } catch let e as Core.ProtonSignInError {
                 working = false
                 error = e.message
-                code = "" // each try signs in afresh, and a code is good once
+                code = "" // a code is good once
                 pin = ""
                 switch e.need {
                 case .twoFA: askCode = true; step = .account

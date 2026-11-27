@@ -197,7 +197,7 @@ func (c *Core) protonLogin(ctx context.Context, user, password, mailbox, code, p
 	c.protonPending = nil
 	c.mu.Unlock()
 	if s != nil && !s.matches(user, password) {
-		s.end()
+		go s.end()
 		s = nil
 	}
 	if s != nil {
@@ -210,10 +210,13 @@ func (c *Core) protonLogin(ctx context.Context, user, password, mailbox, code, p
 	}
 	session, err := s.finish(ctx, password, mailbox, code, pin, waiting)
 	switch {
-	case err == nil:
+	case err == nil && ctx.Err() == nil:
 		s.close()
-	case ctx.Err() == nil && (errors.Is(err, ErrProtonNeedsPIN) || errors.Is(err, ErrProtonNeeds2FA) || errors.Is(err, ErrProtonNeedsMailbox)):
-		c.keepProtonPending(s)
+	case err == nil: // cancelled as it finished
+		s.end()
+		return nil, ctx.Err()
+	case errors.Is(err, ErrProtonNeedsPIN) || errors.Is(err, ErrProtonNeeds2FA) || errors.Is(err, ErrProtonNeedsMailbox):
+		c.keepProtonPending(ctx, s)
 	default:
 		s.end()
 	}
@@ -224,16 +227,25 @@ func (c *Core) protonLogin(ctx context.Context, user, password, mailbox, code, p
 const protonPendingFor = 5 * time.Minute
 
 // keepProtonPending keeps s for the next answer, until it expires.
-func (c *Core) keepProtonPending(s *protonSignIn) {
+// A sign-in cancelled meanwhile is signed out instead (CancelProtonSignIn
+// cancels under c.mu, so the check here can't miss it).
+func (c *Core) keepProtonPending(ctx context.Context, s *protonSignIn) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if ctx.Err() != nil {
+		go s.end()
+		return
+	}
 	if old := c.protonPending; old != nil && old != s {
 		go old.end()
 	}
 	c.protonPending = s
+	s.kept++
+	kept := s.kept
 	s.expiry = time.AfterFunc(protonPendingFor, func() {
 		c.mu.Lock()
-		mine := c.protonPending == s
+		// Not if it was taken up, and kept again, since this timer began.
+		mine := c.protonPending == s && s.kept == kept
 		if mine {
 			c.protonPending = nil
 		}
@@ -253,6 +265,7 @@ type protonSignIn struct {
 	auth     proton.Auth
 	stepDone bool // the second step (2FA code or key) is done
 	expiry   *time.Timer
+	kept     int // times kept pending; under the core's mu
 
 	mu     sync.Mutex
 	tokens proton.Auth // renewals during the sign-in replace them
