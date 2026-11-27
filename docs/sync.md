@@ -123,9 +123,33 @@ the primary and to every secondary as `.medialayer/snapshots/NNNNNN.sqlite`
 (NNNNNN is the version). Secondaries get it from the device, not from the
 primary, so they have the newest index even when the primary couldn't take
 it. A secondary keeps only the newest snapshot; the primary keeps two.
-Snapshots are compared by size and MD5, never by name alone, and a version
-waiting for the primary that another device's index took meanwhile is
-renumbered, so one version number always names one index.
+Snapshots are compared by size and MD5 (SHA-1 on Proton), never by name
+alone.
+
+Each version also has an id, `meta.version_id`, new with every version,
+and `meta.version_parent` names the version it was made from. Numbers can
+repeat across devices; ids don't. Every sync lists the primary's
+`snapshots/` (one small listing) and checks that the newest is the one
+this device made or took. When it isn't (another device published a
+newer version, or another index under this device's number, or this
+device's index was restored from an older backup), the device takes the
+primary's snapshot, as a device new to the library does, and indexes on
+top of it. It never publishes over it, and refuses a primary that holds
+another library. Playlists carry over by path only from an index with
+playlist changes not yet saved (since its last version, or in a version
+the primary never took), and then only those the primary's index lacks:
+- From an index whose playlists were all saved, nothing carries, so a
+  playlist another device removed stays removed.
+- From one with unsaved changes, every playlist the primary lacks
+  carries, so one another device removed comes back along with the new
+  ones.
+- An unsaved edit here to a playlist both have gives way to the
+  primary's.
+
+A cloud that gives no hash or size for the snapshot counts as holding
+this device's. An index from before versions had ids gets a new version
+at its next sync. The check hashes the local snapshot on each sync (a few
+MB).
 
 ## Checks before anything is written
 
@@ -311,7 +335,7 @@ Hashes are kept so a file is read once:
 4. The library's own files: the art packs the secondary lacks, then the
    index's current version (older snapshots are removed), then `repo.json`
    last.
-5. `member.json` is rewritten with state `synced`, the index version and
+5. `member.json` is rewritten with state `synced`, the index version, its id and the
    snapshot it now holds and matches, the generation, and the time.
 
 A sync that pauses sets `paused`, keeping the snapshot and time it last
@@ -411,7 +435,9 @@ primary, and "the index" is the device's SQLite database of the library.
 7. It reads the target's `member.json` and checks:
    - `library_id` is this library's,
    - `state` is `synced`,
-   - `version` is this device's index version,
+   - `version` is this device's index version, and `version_id` is that
+     version's id (so it is this device's index, not another of that
+     number),
    - `generation` is the current generation.
 8. It reads the target's `repo.json` and checks that it exists and names
    no newer generation.

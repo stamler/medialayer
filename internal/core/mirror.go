@@ -433,10 +433,11 @@ func putBytes(ctx context.Context, f fs.Fs, remote string, b []byte) error {
 
 // target is a secondary that passed the checks before syncing.
 type target struct {
-	s     source
-	dst   fs.Fs
-	have  *listing
-	probe string // its probe file, under .medialayer/probe/
+	s         source
+	dst       fs.Fs
+	have      *listing
+	probe     string // its probe file, under .medialayer/probe/
+	versionID string // the id of the index version it is sent
 	// newProbe is set when this sync wrote the probe for the first time,
 	// so a listing of the primary made before it can't show it.
 	newProbe bool
@@ -539,11 +540,16 @@ func (c *Core) mirrorAll(ctx context.Context, f fs.Fs) error {
 	if err != nil {
 		return err
 	}
+	versionID, err := db.Meta("version_id")
+	if err != nil {
+		return err
+	}
 	snap := c.localSnapshot(version)
 	if version == 0 || fileSize(snap) < 0 {
 		return errors.New("the index has no saved version yet")
 	}
 	for _, t := range targets {
+		t.versionID = versionID
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -688,6 +694,9 @@ type memberRecord struct {
 	State     string `json:"state"`              // "copying", "paused" or "synced"
 	Snapshot  string `json:"snapshot,omitempty"` // the index snapshot it holds and matches
 	Version   int    `json:"version,omitempty"`  // that snapshot's index version
+	// VersionID is that version's id (the index's "version_id"), which
+	// unlike the number names one index whichever device made it.
+	VersionID string `json:"version_id,omitempty"`
 	// Generation is the primary's generation it was synced under.
 	Generation int64     `json:"generation,omitempty"`
 	SyncedAt   time.Time `json:"synced_at,omitzero"`
@@ -1031,8 +1040,9 @@ func (c *Core) mirror(ctx context.Context, f fs.Fs, src *listing, repo *repoReco
 		return fmt.Errorf("copy .medialayer: %w", err)
 	}
 	if t.member.State != "synced" || t.member.Snapshot != snapName || t.member.Version != version ||
-		t.member.Generation != repo.Generation {
+		t.member.VersionID != t.versionID || t.member.Generation != repo.Generation {
 		member.State, member.Snapshot, member.Version, member.SyncedAt = "synced", snapName, version, time.Now().UTC()
+		member.VersionID = t.versionID
 		if err := writeMember(member); err != nil {
 			return err
 		}

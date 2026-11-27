@@ -98,9 +98,11 @@ func listRepoDir(ctx context.Context, f fs.Fs, dir string) (map[string]fs.Object
 	return out, nil
 }
 
-// errPublishedElsewhere means another device published the library
-// while this one was indexing it from scratch.
-var errPublishedElsewhere = errors.New("another device published this library first")
+// errPublishedElsewhere means the primary holds a version this device
+// didn't make or take: another device published the library while this
+// one indexed it from scratch, or published a newer version. The sync
+// takes it (restore) and indexes again.
+var errPublishedElsewhere = errors.New("another device published this library meanwhile")
 
 // snapshotNumber parses "000042.sqlite" (six or more digits); ok is false
 // for other names.
@@ -148,17 +150,27 @@ func download(ctx context.Context, o fs.Object, dst string) error {
 	return os.Rename(tmp, dst)
 }
 
-// restore replaces an empty local index with the newest snapshot from the
-// cloud, and fetches the art packs it refers to. A local index that
-// already belongs to a library is kept: indexing brings it up to date.
+// restore replaces the local index with the newest snapshot from the
+// cloud, and fetches the art packs it refers to: an empty index, or one
+// the primary has moved past (publish sets takePrimary). Otherwise a
+// local index that already belongs to a library is kept: indexing
+// brings it up to date.
 func (c *Core) restore(ctx context.Context, f fs.Fs) error {
 	db := c.currentDB()
-	if id, err := db.Meta("library_id"); err != nil || id != "" {
+	c.mu.Lock()
+	take := c.takePrimary
+	c.takePrimary = false
+	c.mu.Unlock()
+	known, err := db.Meta("library_id")
+	if err != nil || known != "" && !take {
 		return err
 	}
 	repo, err := readRepo(ctx, f)
 	if err != nil || repo == nil {
 		return err
+	}
+	if known != "" && known != repo.LibraryID {
+		return fmt.Errorf("this folder holds library %s, but the local index is library %s", repo.LibraryID, known)
 	}
 	snaps, err := listRepoDir(ctx, f, "snapshots")
 	if err != nil {
@@ -181,8 +193,18 @@ func (c *Core) restore(ctx context.Context, f fs.Fs) error {
 	if err := download(ctx, snap, path); err != nil {
 		return err
 	}
+	// The local snapshot of this version is the primary's file as it is,
+	// so the next publish sees the primary holds it.
+	if err := os.MkdirAll(filepath.Join(c.dataDir, "snapshots"), 0o700); err != nil {
+		return err
+	}
+	snapCopy := c.localSnapshot(snapN) + ".restore"
+	if err := copyLocal(path, snapCopy); err != nil {
+		return err
+	}
 	keep := false
 	defer func() {
+		_ = os.Remove(snapCopy)
 		if !keep {
 			for _, p := range []string{path, path + "-wal", path + "-shm"} {
 				_ = os.Remove(p)
@@ -225,13 +247,6 @@ func (c *Core) restore(ctx context.Context, f fs.Fs) error {
 	if err == nil {
 		err = sdb.SetMeta("primary_version", strconv.Itoa(snapN))
 	}
-	if err == nil {
-		err = os.MkdirAll(filepath.Join(c.dataDir, "snapshots"), 0o700)
-	}
-	if err == nil {
-		_ = os.Remove(c.localSnapshot(snapN))
-		err = sdb.Snapshot(c.localSnapshot(snapN))
-	}
 	if err != nil {
 		_ = sdb.Close()
 		return err
@@ -242,9 +257,25 @@ func (c *Core) restore(ctx context.Context, f fs.Fs) error {
 	// They join the restored index now, with the items the snapshot
 	// knows, so they never vanish; the full lists wait to be applied
 	// after this sync's index pass (see applyCarried).
+	//
+	// An index replaced because the primary moved past it carries only
+	// if it has playlist changes not yet saved: changed since its last
+	// version, or a version the primary never took. One the primary
+	// already had all of carries nothing, so what another device removed
+	// stays removed. This is decided under playlistMu, so an edit made
+	// while the snapshot downloaded counts.
 	c.playlistMu.Lock()
 	defer c.playlistMu.Unlock()
-	if old := c.currentDB(); old != nil {
+	old := c.currentDB()
+	carry := old != nil
+	if take && old != nil {
+		carry, err = unsavedPlaylists(old)
+		if err != nil {
+			_ = sdb.Close()
+			return err
+		}
+	}
+	if carry {
 		lists, err := old.PlaylistsByPath()
 		if err == nil {
 			_, err = sdb.AddPlaylistsByPath(lists)
@@ -260,7 +291,7 @@ func (c *Core) restore(ctx context.Context, f fs.Fs) error {
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	old := c.db
+	old = c.db
 	oldFile := c.settings.DBFile
 	c.db = sdb
 	c.dbEpoch++
@@ -271,6 +302,12 @@ func (c *Core) restore(ctx context.Context, f fs.Fs) error {
 		return err
 	}
 	keep = true
+	// Only now, so a restore that failed leaves the local snapshot of the
+	// index still in use. Without it the next publish makes a new version.
+	_ = os.Remove(c.localSnapshot(snapN))
+	if err := os.Rename(snapCopy, c.localSnapshot(snapN)); err != nil {
+		fs.Errorf(nil, "keep the restored snapshot: %v", err)
+	}
 	c.countTracks(sdb)
 	// The old file is deleted at the next start, when nothing has it open.
 	if old != nil {
@@ -324,13 +361,19 @@ func (c *Core) currentVersion(db *index.DB, newest int, generation int64) (int, 
 	if err != nil {
 		return 0, "", err
 	}
+	id, err := db.Meta("version_id")
+	if err != nil {
+		return 0, "", err
+	}
 	local := c.localSnapshot(version)
-	if _, err := os.Stat(local); version > 0 && dirty != "1" && err == nil {
+	// An index from before versions had ids gets a new version, once.
+	if _, err := os.Stat(local); version > 0 && dirty != "1" && id != "" && err == nil {
 		return version, local, nil
 	}
 	version = max(version, newest) + 1
 	for k, v := range map[string]string{
 		"version": strconv.Itoa(version), "generation": strconv.FormatInt(generation, 10),
+		"version_id": index.NewID(), "version_parent": id,
 		"dirty": "0", "files_dirty": "0", "playlists_dirty": "0",
 	} {
 		if err := db.SetMeta(k, v); err != nil {
@@ -379,8 +422,36 @@ func (c *Core) publish(ctx context.Context, f fs.Fs) error {
 	if err != nil {
 		return err
 	}
+	versionID, err := db.Meta("version_id")
+	if err != nil {
+		return err
+	}
+	// The primary's newest snapshot must be one this device made or
+	// took. Another device's newer version (or another index under this
+	// device's number) is taken, with the playlists not yet saved carried
+	// on top, rather than overwritten; so is the primary's when this
+	// index was restored from a backup older than it.
+	var snaps map[string]fs.Object
+	if known, err := db.Meta("library_id"); err != nil {
+		return err
+	} else if repo != nil && known != "" {
+		if known != repo.LibraryID {
+			return fmt.Errorf("this folder holds library %s, but the local index is library %s", repo.LibraryID, known)
+		}
+		if snaps, err = listRepoDir(ctx, f, "snapshots"); err != nil {
+			return err
+		}
+		if s, newest := newestSnapshot(snaps); s != nil &&
+			(newest > version || newest == version && snapshotDiffers(ctx, s, c.localSnapshot(version))) {
+			fs.Logf(f, "the primary holds version %d, not this device's %d; taking it", newest, version)
+			c.mu.Lock()
+			c.takePrimary = true
+			c.mu.Unlock()
+			return errPublishedElsewhere
+		}
+	}
 	_, statErr := os.Stat(c.localSnapshot(version))
-	if repo != nil && dirty != "1" && version > 0 && onPrimary >= version && statErr == nil {
+	if repo != nil && dirty != "1" && version > 0 && versionID != "" && onPrimary >= version && statErr == nil {
 		return nil
 	}
 	c.setJob(func(j *jobStatus) { j.Phase, j.Done, j.Total, j.Current = PhasePublishing, 0, 0, "" })
@@ -395,9 +466,10 @@ func (c *Core) publish(ctx context.Context, f fs.Fs) error {
 	if repo != nil && libraryID != "" && libraryID != repo.LibraryID {
 		return fmt.Errorf("this folder holds library %s, but the local index is library %s", repo.LibraryID, libraryID)
 	}
-	snaps, err := listRepoDir(ctx, f, "snapshots")
-	if err != nil {
-		return err
+	if snaps == nil {
+		if snaps, err = listRepoDir(ctx, f, "snapshots"); err != nil {
+			return err
+		}
 	}
 	if repo != nil && libraryID == "" {
 		if s, _ := newestSnapshot(snaps); s != nil {
@@ -562,6 +634,50 @@ func sameFile(ctx context.Context, o fs.Object, local string) bool {
 		return false
 	}
 	return strings.EqualFold(mine[ht], theirs)
+}
+
+// snapshotDiffers reports whether the cloud's snapshot o is known to
+// differ from the local file: by size, or by a hash both sides have. A
+// cloud that gives no hash for it counts as the same, as before versions
+// had ids, so a missing hash never has a device take its own snapshot
+// back on every sync.
+func snapshotDiffers(ctx context.Context, o fs.Object, local string) bool {
+	if size := o.Size(); size >= 0 && size != fileSize(local) {
+		return true
+	}
+	ht := hash.MD5
+	if !o.Fs().Hashes().Contains(ht) {
+		ht = hash.SHA1
+	}
+	theirs, err := o.Hash(ctx, ht)
+	if err != nil || theirs == "" {
+		return false
+	}
+	in, err := os.Open(local)
+	if err != nil {
+		return true // no local snapshot of this version to match
+	}
+	defer func() { _ = in.Close() }()
+	mine, err := hash.StreamTypes(in, hash.NewHashSet(ht))
+	return err != nil || !strings.EqualFold(mine[ht], theirs)
+}
+
+// copyLocal copies the local file src to dst.
+func copyLocal(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = in.Close() }()
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	_, err = io.Copy(out, in)
+	if cerr := out.Close(); err == nil {
+		err = cerr
+	}
+	return err
 }
 
 // fileSize is a local file's size, or -1.

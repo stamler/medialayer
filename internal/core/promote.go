@@ -265,7 +265,12 @@ func (c *Core) promotable(ctx context.Context, dst fs.Fs, repo *repoRecord) erro
 	if err := json.Unmarshal(b, &m); err != nil {
 		return fmt.Errorf("member.json: %w", err)
 	}
-	version, err := metaInt(c.currentDB(), "version")
+	db := c.currentDB()
+	version, err := metaInt(db, "version")
+	if err != nil {
+		return err
+	}
+	versionID, err := db.Meta("version_id")
 	if err != nil {
 		return err
 	}
@@ -276,6 +281,9 @@ func (c *Core) promotable(ctx context.Context, dst fs.Fs, repo *repoRecord) erro
 		return fmt.Errorf("this folder's last sync didn't finish (it is %s); sync it first", m.State)
 	case m.Version != version:
 		return fmt.Errorf("this folder holds index version %d, but the current one is %d; sync it first", m.Version, version)
+	case m.VersionID != versionID:
+		// Another device's index of the same number, say.
+		return fmt.Errorf("this folder holds a different index of version %d than this device's; sync it first", version)
 	case m.Generation != repo.Generation:
 		return fmt.Errorf("this folder was synced under generation %d, but the current one is %d; sync it first", m.Generation, repo.Generation)
 	}

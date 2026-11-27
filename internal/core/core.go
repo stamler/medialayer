@@ -41,16 +41,17 @@ type Core struct {
 	jobFs      map[string]fs.Fs // folders the running job opened, by fsKey
 	// listed is the running job's latest listing of the primary, made
 	// by the indexer, for mirroring to take (takeListing).
-	listed     *listing
-	listedFs   fs.Fs
-	listedAt   time.Time
-	db         *index.DB // nil until a folder is picked
-	dbEpoch    int64     // raised each time the database file is replaced
-	job        jobStatus
-	jobDone    chan struct{}      // closed when the running job ends; nil if none
-	phaseStart time.Time          // when the job's current phase began
-	resync     bool               // start a sync when the job ends (errSwitchFinished)
-	cancel     context.CancelFunc // stops the running job
+	listed      *listing
+	listedFs    fs.Fs
+	listedAt    time.Time
+	db          *index.DB // nil until a folder is picked
+	dbEpoch     int64     // raised each time the database file is replaced
+	job         jobStatus
+	jobDone     chan struct{}      // closed when the running job ends; nil if none
+	phaseStart  time.Time          // when the job's current phase began
+	resync      bool               // start a sync when the job ends (errSwitchFinished)
+	takePrimary bool               // the next restore takes the primary's newest snapshot (publish)
+	cancel      context.CancelFunc // stops the running job
 	// tracks is the index's track count, kept here so Status never waits
 	// on the database while the indexer writes.
 	tracks atomic.Int64

@@ -156,6 +156,7 @@ func (c *Core) startJobLocked(work func(context.Context) error) error {
 		c.stream.forgetAll()
 	}
 	c.jobFs, c.listed, c.listedFs = map[string]fs.Fs{}, nil, nil
+	c.takePrimary = false
 	if c.fsys != nil {
 		c.jobFs[fsKey(source{Remote: c.primaryRemote(), Folder: c.settings.Folder})] = c.fsys
 	}
@@ -241,9 +242,11 @@ func (c *Core) syncHeld(ctx context.Context) error {
 	if err := c.checkPrimary(ctx, f); err != nil {
 		return err
 	}
-	// A second pass happens only when another device published the
-	// library while this one indexed it from scratch: this device then
-	// takes that snapshot, keeping its file ids, and indexes on top.
+	// A second pass happens only when the primary holds a version this
+	// device didn't make or take: another device published the library
+	// while this one indexed it from scratch, or published a newer
+	// version since. This device then takes that snapshot, keeping its
+	// file ids, and indexes on top.
 	for range 2 {
 		if err := c.restore(ctx, f); err != nil {
 			return fmt.Errorf("open the library's .medialayer: %w", err)
