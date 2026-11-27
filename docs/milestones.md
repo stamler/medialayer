@@ -105,7 +105,8 @@ and work on it continues after the AppKit table.
    audio hashes), reading files at disk speed instead of over the
    network. Onboarding a large SMB library would then take a fraction of
    the time, and the helper might also do some rudimentary sync, such as
-   noticing changes on the share as they happen.
+   noticing changes on the share as they happen. The design, with
+   Tailscale and the keychain: [smb.md](smb.md).
 5. **macOS desktop features.** Menu bar control, cache cap with offline
    albums, write-mode toggle, the optional Tauon mount, a notarized build
    with Sparkle updates.
