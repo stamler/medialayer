@@ -109,11 +109,81 @@ and work on it continues after the AppKit table.
 5. **macOS desktop features.** Menu bar control, cache cap with offline
    albums, write-mode toggle, the optional Tauon mount, a notarized build
    with Sparkle updates.
-6. **iOS from the same project.** The iOS player check (framework size, 30
+6. **Sharing a library read-only.** The owner shares the library folder
+   view-only with another account, such as a child's, and that person's
+   copy of the app plays it: the notarized build from milestone 5 on a
+   Mac, and the iOS app of milestone 7, which has this mode from its first
+   version. Setup offers "Open a library shared with me", which lists the
+   account's shared folders. The core opens the folder through a wrapper
+   that refuses every write, so a folder shared with edit rights by
+   mistake is left alone too. A reader never indexes, publishes, runs the
+   hash pass (which would download the whole library) or takes or waits
+   for the sync lock; it needs none of them, since the lock only guards
+   writes and the owner's snapshots carry the index, art packs and
+   `audio_sha256`. The reader's own playlists, and later play counts and
+   ratings, go in a local overlay.
+   - The reader takes the folder's newest snapshot and art packs, and
+     looks for a newer snapshot at app start and on Update Library. It
+     shows the library as the owner's last sync left it; files the owner
+     adds appear after the owner's device syncs. A track whose file has
+     gone fails to play until the next snapshot. New work: today a
+     snapshot is restored only into an empty index, only inside a sync
+     under the lock, and a folder that is a secondary is refused.
+   - The primary is the best folder to share. It keeps two snapshots and
+     uploads art packs before each snapshot, so a reader always finds a
+     whole version. A shared secondary keeps one snapshot and changes its
+     files during a sync, so the reader waits while its `member.json`
+     says `copying` and retries if the snapshot vanishes. After Make
+     Primary, a shared old primary still holds a whole library, current
+     again once its first sync as a secondary succeeds; the reader
+     doesn't follow `repo.json` to a primary it can't reach. A shared
+     folder the owner stops syncing looks just like a library that hasn't
+     changed, so telling the reader would need each sync to stamp the
+     folder even when nothing changed.
+   - The overlay is a SQLite database on the reader's device, per library
+     id, attached to the index (SQLite ATTACH) so the app can join them.
+     The owner's playlists show read-only beside the reader's. Rows name
+     tracks by file id, which survives retags and most moves and renames,
+     and also keep the track's path and `audio_sha256`, to find a track
+     the owner indexed again under a new id once the owner's hash pass
+     has hashed it. A reader on a different hash version than the owner
+     would clear those hashes, so sync.md's rule (change the version only
+     with a release every device takes) covers readers too. Backing the
+     overlay up to the reader's own cloud, so it survives a reinstall and
+     follows them to another device, comes later.
+   - Google Drive is reachable through rclone: the drive backend opens a
+     folder shared with the account (`shared_with_me`, or the folder's id
+     as `root_folder_id`, with `resource_key` for old link-shared
+     folders). The owner must not turn off downloads for viewers (Drive's
+     `copyRequiresWriterPermission`, set per file). MediaLayer asks for
+     the full `drive` scope, which covers shared folders; if milestone 1
+     moves to `drive.file`, a shared folder works only if picking it in
+     Google's picker grants its contents. In Google's testing mode each
+     reader's account must be a test user, and a child's supervised
+     account may need a parent's approval to sign in.
+   - Proton Drive is not reachable today. rclone's Proton backend, on the
+     Proton-API-Bridge library, opens only the account's own main share,
+     so neither a folder shared with a Proton member nor a public link
+     can be opened. That needs upstream work in rclone's backend and in
+     Proton-API-Bridge. Until then, a Proton library is shared through a
+     Google Drive secondary.
+   - An SMB share with a read-only account, or a disk, opens the same way.
+     A view-only iCloud Drive shared folder appears in the file system on
+     Apple devices and should open as a local folder; untested.
+
+   Gate: a second Google account with view-only access opens the test
+   library in seconds and starts a track within about 2 seconds. It makes
+   a playlist, which is still there after the owner adds a track and syncs
+   and the reader takes the new snapshot and shows that track. A file set
+   so viewers can't download fails with a clear message. The shared
+   folder is unchanged afterwards, and in the tests the wrapper saw no
+   write. Make Primary on the owner's device doesn't stop the reader
+   playing.
+7. **iOS from the same project.** The iOS player check (framework size, 30
    minutes of locked-screen playback, a TestFlight upload), then the
    iPhone and iPad app, which can open a library a Mac built or set one up
    on its own.
-7. **Tag editing with MusicBrainz (desktop, write mode).** Look up a
+8. **Tag editing with MusicBrainz (desktop, write mode).** Look up a
    release by its tags (or track lengths for a ripped CD), show current and
    proposed tags side by side with the Cover Art Archive cover, and write
    only after the user approves. MediaLayer downloads the file, rewrites the
@@ -122,7 +192,7 @@ and work on it continues after the AppKit table.
    Picard's tag names; lookups keep to one request per second. Gate:
    retagging the test album leaves `audio_sha256` unchanged and every
    secondary matches the primary.
-8. **Merging a library on another source.** Add a folder on a different
+9. **Merging a library on another source.** Add a folder on a different
    source that already holds music, or already has its own `.medialayer`
    library, and merge the two libraries into one. Details are to be
    decided. Today such a folder is refused as a secondary, because sync
@@ -146,22 +216,22 @@ and work on it continues after the AppKit table.
      written, as tag editing does.
 
    Gate: to be decided.
-9. **Tempo, pitch and beat matching.** Three playback controls on the
-   Mac and iOS players. Time stretching changes speed without changing
-   pitch; pitch shifting changes key without changing speed, in
-   semitones; beat matching brings the next track to the current track's
-   tempo and lines up their beats through a crossfade. `AVPlayer` can
-   stretch time but can't shift pitch on its own or play two tracks in
-   sync, so playback moves to `AVAudioEngine` with `AVAudioUnitTimePitch`.
-   The engine can't play the core's localhost stream as a URL, so the app
-   fetches and decodes the stream itself and handles seeking, buffering
-   and (on iOS) interruptions and route changes. Beat matching needs each
-   track's tempo and beat grid, measured from the audio when the track
-   plays (or is cached, on the Mac), with a BPM tag as a hint. These
-   measurements stay in a cache on each device rather than in the shared
-   index, so listening never republishes the index; sharing them is a
-   later choice. Indexing still never reads audio. Gate: a track stretched
-   from 0.5x to 2x keeps its pitch, a shift of plus or minus 12 semitones
-   keeps its speed, two tracks from the test library mix with beats that
-   stay aligned through the crossfade, a track still starts within about
-   2 seconds, and the Feel targets above still hold.
+10. **Tempo, pitch and beat matching.** Three playback controls on the
+    Mac and iOS players. Time stretching changes speed without changing
+    pitch; pitch shifting changes key without changing speed, in
+    semitones; beat matching brings the next track to the current track's
+    tempo and lines up their beats through a crossfade. `AVPlayer` can
+    stretch time but can't shift pitch on its own or play two tracks in
+    sync, so playback moves to `AVAudioEngine` with `AVAudioUnitTimePitch`.
+    The engine can't play the core's localhost stream as a URL, so the app
+    fetches and decodes the stream itself and handles seeking, buffering
+    and (on iOS) interruptions and route changes. Beat matching needs each
+    track's tempo and beat grid, measured from the audio when the track
+    plays (or is cached, on the Mac), with a BPM tag as a hint. These
+    measurements stay in a cache on each device rather than in the shared
+    index, so listening never republishes the index; sharing them is a
+    later choice. Indexing still never reads audio. Gate: a track stretched
+    from 0.5x to 2x keeps its pitch, a shift of plus or minus 12 semitones
+    keeps its speed, two tracks from the test library mix with beats that
+    stay aligned through the crossfade, a track still starts within about
+    2 seconds, and the Feel targets above still hold.
