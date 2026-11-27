@@ -302,17 +302,17 @@ func TestProtonKeyStepSendsAssertion(t *testing.T) {
 
 	old := assertWithKey
 	defer func() { assertWithKey = old }()
-	var waited []bool
+	var waited []KeyTouch
 	var gotPIN string
-	assertWithKey = func(_ context.Context, req fidoRequest, pin string, waiting func(bool)) (fidoAssertion, error) {
+	assertWithKey = func(_ context.Context, req fidoRequest, pin string, waiting func(KeyTouch)) (fidoAssertion, error) {
 		gotPIN = pin
-		waiting(true)
-		waiting(false)
+		waiting(KeyTouchToSign)
+		waiting(KeyNoTouch)
 		return fidoAssertion{credentialID: []byte{9, 8, 7}, authData: []byte("auth"), signature: []byte("sig")}, nil
 	}
 	opts := protonFidoOptions(t)
 	auth := proton.Auth{TwoFA: proton.TwoFAInfo{Enabled: proton.HasFIDO2, FIDO2: proton.FIDO2Info{AuthenticationOptions: opts}}}
-	if err := protonKeyStep(context.Background(), c, auth, "1234", func(w bool) { waited = append(waited, w) }); err != nil {
+	if err := protonKeyStep(context.Background(), c, auth, "1234", func(w KeyTouch) { waited = append(waited, w) }); err != nil {
 		t.Fatal(err)
 	}
 	f := got["FIDO2"]
@@ -332,7 +332,7 @@ func TestProtonKeyStepSendsAssertion(t *testing.T) {
 	if gotPIN != "1234" {
 		t.Errorf("the key got PIN %q", gotPIN)
 	}
-	if fmt.Sprint(waited) != "[true false]" {
+	if fmt.Sprint(waited) != "[2 0]" {
 		t.Errorf("waiting = %v", waited)
 	}
 }

@@ -165,8 +165,9 @@ enum Core {
         }.value
     }
 
-    /// Whether a Proton sign-in is waiting for its security key's touch.
-    static var protonKeyWaiting: Bool { MLProtonKeyWaiting() != 0 }
+    /// What a Proton sign-in waits for its security key's touch for.
+    enum KeyTouch: Int32 { case idle = 0, toPick = 1, toSign = 2 }
+    static var protonKeyWaiting: KeyTouch { KeyTouch(rawValue: Int32(MLProtonKeyWaiting())) ?? .idle }
 
     /// Why a security key PIN can't be right, or nil. A YubiKey touched
     /// early types a 44-letter one-time code, which would cost a PIN try.

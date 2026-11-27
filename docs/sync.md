@@ -516,7 +516,9 @@ signs in with the key plugged in over USB, as Proton's Bridge does: the
 core reads the WebAuthn options Proton sends with the first step, has
 the key sign Proton's challenge (a touch, after its PIN when the key has
 one, as Bridge asks), and sends the signature back as the second step.
-The app asks for the PIN on a step of its own, sent only by clicking
+As in a browser, a key with a PIN is touched twice: once to pick it
+(CTAP 2.1's selection, skipped on a key without it), then once to sign,
+after its PIN. The app asks for the PIN on a step of its own, sent only by clicking
 Continue (a YubiKey touched early types a one-time code and presses
 Return), and refuses one that looks like such a code before the key or
 Proton sees it; the PIN goes to the key only, and nothing keeps it. The

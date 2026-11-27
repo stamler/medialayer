@@ -1085,20 +1085,20 @@ struct ProtonSignInView: View {
     @State private var pin = "" // the security key's; cleared after each try
     @State private var codeInstead = false // the account has a 2FA code too
     @State private var working = false
-    @State private var touchKey = false
+    @State private var touchKey = Core.KeyTouch.idle
     @State private var error: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Sign in to Proton Drive").font(.title2)
-            if touchKey {
+            if touchKey != .idle {
                 touchScreen
             } else if step == .pin {
                 pinStep
             } else {
                 accountStep
             }
-            if working && !touchKey {
+            if working && touchKey == .idle {
                 Text("Signing in…").foregroundStyle(.secondary)
             }
             if let error { Text(error).foregroundStyle(.red).textSelection(.enabled) }
@@ -1108,7 +1108,7 @@ struct ProtonSignInView: View {
                     onCancel()
                 }.keyboardShortcut(.cancelAction)
                 Spacer()
-                if !touchKey { primaryButton }
+                if touchKey == .idle { primaryButton }
             }
         }
         .padding(24)
@@ -1120,7 +1120,7 @@ struct ProtonSignInView: View {
                 touchKey = Core.protonKeyWaiting
                 try? await Task.sleep(nanoseconds: 250_000_000)
             }
-            touchKey = false
+            touchKey = .idle
         }
     }
 
@@ -1151,6 +1151,7 @@ struct ProtonSignInView: View {
             Text("Your security key has a PIN. Type it here and click Continue. Don't touch the key yet: MediaLayer will tell you when.")
                 .fixedSize(horizontal: false, vertical: true)
             Form {
+                LabeledContent("Username", value: user)
                 SecureField("Security key PIN", text: $pin)
                     .textContentType(.oneTimeCode) // not a password to save
                     .onSubmit {} // Return does nothing here
@@ -1172,8 +1173,15 @@ struct ProtonSignInView: View {
     private var touchScreen: some View {
         VStack(spacing: 12) {
             Image(systemName: "key.fill").font(.system(size: 40))
-            Text("Touch your security key now").font(.title3.bold())
-            Text("Touch the key while it blinks.").foregroundStyle(.secondary)
+            if touchKey == .toPick {
+                Text("Touch your security key").font(.title3.bold())
+                Text("Touch the key while it blinks, to use it for this sign-in. Then you'll enter its PIN.")
+                    .foregroundStyle(.secondary).multilineTextAlignment(.center)
+            } else {
+                Text("Touch your security key to sign in").font(.title3.bold())
+                Text("Touch the key while it blinks, to finish signing in.")
+                    .foregroundStyle(.secondary).multilineTextAlignment(.center)
+            }
         }
         .frame(maxWidth: .infinity)
         .padding(.vertical, 24)

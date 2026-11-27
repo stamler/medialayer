@@ -48,7 +48,7 @@ type Core struct {
 	tracks atomic.Int64
 	// protonKeyWait is set while a Proton sign-in waits for a security
 	// key's touch.
-	protonKeyWait atomic.Bool
+	protonKeyWait atomic.Int32       // a KeyTouch
 	protonCancel  context.CancelFunc // ends the Proton sign-in under way; under mu
 	// badCovers are folder images that failed to read or decode, so later
 	// syncs in this session don't download them again.

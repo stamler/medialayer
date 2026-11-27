@@ -153,13 +153,14 @@ func MLConnectProton(user, password, mailbox, code, pin *C.char) *C.char {
 	return jsonStr(out)
 }
 
-// MLProtonKeyWaiting returns 1 while MLConnectProton waits for a security
-// key to be touched, else 0.
+// MLProtonKeyWaiting returns what MLConnectProton waits for a security
+// key's touch for: 0 nothing, 1 the touch that picks the key (before its
+// PIN), 2 the touch that signs in.
 //
 //export MLProtonKeyWaiting
 func MLProtonKeyWaiting() C.int {
-	if c, err := get(); err == nil && c.ProtonKeyWaiting() {
-		return 1
+	if c, err := get(); err == nil {
+		return C.int(c.ProtonKeyWaiting())
 	}
 	return 0
 }

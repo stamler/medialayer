@@ -8,8 +8,9 @@ package core
 //
 // It talks to the key only (no Proton sign-in, no touch needed): each
 // try opens the key from a new OS thread that then ends, as calls from
-// the app's Swift threads do, and stops at the PIN question (or the
-// touch wait, cut short, for a key without a PIN).
+// the app's Swift threads do, and stops at the first touch wait (the
+// touch that picks a key with a PIN), cut short after 3 seconds: don't
+// touch the key. No PIN is ever sent.
 
 import (
 	"context"
@@ -25,9 +26,9 @@ func TestKeyFromManyThreads(t *testing.T) {
 		done := make(chan error, 1)
 		go func() {
 			runtime.LockOSThread() // not unlocked: the thread ends with the goroutine
-			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 			defer cancel()
-			_, err := assertWithKey(ctx, req, "", func(bool) {})
+			_, err := assertWithKey(ctx, req, "", func(KeyTouch) {})
 			done <- err
 		}()
 		var err error
@@ -37,8 +38,8 @@ func TestKeyFromManyThreads(t *testing.T) {
 			t.Fatalf("try %d hung", i)
 		}
 		t.Logf("try %d: %v", i, err)
-		if errors.Is(err, context.DeadlineExceeded) {
-			t.Fatal("the key didn't answer in time, or waited for a touch (this test needs a key with a PIN)")
+		if errors.Is(err, errKeyNoAnswer) {
+			t.Fatal("the key didn't answer")
 		}
 		if errors.Is(err, ErrProtonNoKey) {
 			t.Fatal("plug in a security key")

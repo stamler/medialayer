@@ -99,7 +99,7 @@ func (c *Core) remoteInUse(remote string) bool {
 // the account needs it. pin is the security key's PIN, which the key
 // alone sees; the error is ErrProtonNeedsPIN when the key wants it. With
 // no code, an account with a security key signs
-// in with the key plugged in (ProtonKeyWaiting is true while it waits for
+// in with the key plugged in (ProtonKeyWaiting says when it waits for
 // a touch). Signing in to the connected account again renews
 // its session; another account replaces it, unless the library uses it.
 func (c *Core) ConnectProton(ctx context.Context, user, password, mailbox, code, pin string) (string, error) {
@@ -132,7 +132,7 @@ func (c *Core) ConnectProton(ctx context.Context, user, password, mailbox, code,
 	}
 	c.protonCancel = cancel
 	c.mu.Unlock()
-	session, err := protonLogin(ctx, user, password, mailbox, code, pin, c.protonKeyWait.Store)
+	session, err := protonLogin(ctx, user, password, mailbox, code, pin, func(k KeyTouch) { c.protonKeyWait.Store(int32(k)) })
 	if err != nil {
 		return "", err
 	}
@@ -184,7 +184,7 @@ var protonAppVersion = func() string {
 // the password, or the mailbox password of a two-password account. It
 // returns the session for the config, under protonSessionKeys. A sign-in
 // that can't finish is signed out at Proton.
-func protonLogin(ctx context.Context, user, password, mailbox, code, pin string, waiting func(bool)) (map[string]string, error) {
+func protonLogin(ctx context.Context, user, password, mailbox, code, pin string, waiting func(KeyTouch)) (map[string]string, error) {
 	m := proton.New(
 		proton.WithAppVersion(protonAppVersion),
 		proton.WithUserAgent(fs.GetConfig(ctx).UserAgent),
@@ -381,9 +381,9 @@ func protonError(err error) error {
 	return err
 }
 
-// ProtonKeyWaiting reports whether a Proton sign-in is waiting for its
-// security key to be touched.
-func (c *Core) ProtonKeyWaiting() bool { return c.protonKeyWait.Load() }
+// ProtonKeyWaiting reports what a Proton sign-in waits for its security
+// key's touch for, if anything.
+func (c *Core) ProtonKeyWaiting() KeyTouch { return KeyTouch(c.protonKeyWait.Load()) }
 
 // CancelProtonSignIn gives up the Proton sign-in under way, if any, as
 // while it waits for a security key.

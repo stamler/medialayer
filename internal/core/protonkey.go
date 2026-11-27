@@ -166,7 +166,7 @@ func newFido2Body(opts any, req fidoRequest, a fidoAssertion) fido2Body {
 // protonKeyStep signs Proton's challenge with a security key and sends
 // the signature as the second step. waiting is told while the key waits
 // for a touch.
-func protonKeyStep(ctx context.Context, c *proton.Client, auth proton.Auth, pin string, waiting func(bool)) error {
+func protonKeyStep(ctx context.Context, c *proton.Client, auth proton.Auth, pin string, waiting func(KeyTouch)) error {
 	opts := auth.TwoFA.FIDO2.AuthenticationOptions
 	req, err := fidoOptions(opts)
 	if err != nil {
@@ -203,7 +203,7 @@ var keyBusy = make(chan struct{}, 1)
 // with a PIN is unlocked with pin first, as Proton's Bridge does; with
 // no pin, the error is ErrProtonNeedsPIN. The PIN goes to the key only.
 // A variable so tests can stand in for a key.
-var assertWithKey = func(ctx context.Context, req fidoRequest, pin string, waiting func(bool)) (fidoAssertion, error) {
+var assertWithKey = func(ctx context.Context, req fidoRequest, pin string, waiting func(KeyTouch)) (fidoAssertion, error) {
 	// One sign-in at a time uses the key: macOS opens it for one user,
 	// and closing it ends hidapi for the whole process. A cancelled
 	// sign-in's key keeps it until the key gives up.
@@ -240,7 +240,13 @@ var assertWithKey = func(ctx context.Context, req fidoRequest, pin string, waiti
 	// a touch, as before.
 	if info := dev.GetInfo(); info.Options[ctaptypes.OptionClientPIN] && !info.Options[ctaptypes.OptionNoMcGaPermissionsWithClientPin] {
 		if pin == "" {
+			// As browsers do: a touch picks the key, then its PIN is asked
+			// for, then a second touch signs.
+			err := selectKey(ctx, dev, waiting)
 			closeKey(dev)
+			if err != nil {
+				return fidoAssertion{}, err
+			}
 			return fidoAssertion{}, ErrProtonNeedsPIN
 		}
 		token, err = dev.GetPinUvAuthTokenUsingPIN(pin, ctaptypes.PermissionGetAssertion, req.rpID)
@@ -259,8 +265,8 @@ var assertWithKey = func(ctx context.Context, req fidoRequest, pin string, waiti
 		err error
 	}
 	done := make(chan result, 1)
-	waiting(true)
-	defer waiting(false)
+	waiting(KeyTouchToSign)
+	defer waiting(KeyNoTouch)
 	// The key's answer can't be cancelled from here: on a cancel the
 	// sign-in ends, and the key gives up by itself, then lets go.
 	held = false
@@ -439,6 +445,40 @@ func pinError(dev *device.Device, err error) error {
 		}
 	}
 	return fmt.Errorf("the security key couldn't check its PIN: %w", err)
+}
+
+// KeyTouch is what a sign-in waits for the security key's touch for.
+type KeyTouch int32
+
+const (
+	KeyNoTouch     KeyTouch = iota
+	KeyTouchToPick          // the first touch, before the PIN
+	KeyTouchToSign          // the touch that signs in
+)
+
+// selectKey waits for a touch that picks the key (CTAP 2.1's
+// authenticatorSelection). A key without that command is picked without
+// one.
+func selectKey(ctx context.Context, dev *device.Device, waiting func(KeyTouch)) error {
+	ctx, cancel := context.WithTimeout(ctx, keyTouchTimeout)
+	defer cancel()
+	waiting(KeyTouchToPick)
+	defer waiting(KeyNoTouch)
+	err := dev.Selection(ctx)
+	if ctx.Err() != nil { // cancelled at the key: Selection may say nothing
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return errors.New("the security key wasn't touched in time: sign in again, and touch it when it blinks")
+		}
+		return ctx.Err()
+	}
+	var ce *ctaphid.CTAPError
+	if errors.As(err, &ce) && (ce.StatusCode == ctaphid.CTAP1_ERR_INVALID_COMMAND || ce.StatusCode == ctaphid.CTAP2_ERR_UNSUPPORTED_OPTION) {
+		return nil
+	}
+	if err != nil {
+		return keyError(err)
+	}
+	return nil
 }
 
 // keyError explains a security key's refusal.
