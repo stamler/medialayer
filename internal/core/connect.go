@@ -49,6 +49,7 @@ func (c *Core) ConnectGoogleDrive(ctx context.Context) error {
 	}
 	c.mu.Lock()
 	c.fsys = nil // a new account may see a different folder
+	c.restartJobFsLocked()
 	c.mu.Unlock()
 	return nil
 }
@@ -211,7 +212,7 @@ func (c *Core) SetFolder(folder string) error {
 		c.settings.Picked = true                                // the first sync checks for a promoted primary
 		c.mirrors = nil
 		c.primaryFull = false
-		c.fsys = nil
+		c.fsys, c.jobFs = nil, nil
 		if err := c.saveSettings(); err != nil {
 			c.mu.Unlock()
 			return err

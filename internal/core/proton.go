@@ -159,6 +159,7 @@ func (c *Core) ConnectProton(ctx context.Context, user, password, mailbox, code,
 	for k, v := range session {
 		config.FileSetValue(name, k, v)
 	}
+	c.restartJobFsLocked() // a running job opens folders again with the new session
 	c.mu.Unlock()
 	config.SaveConfig() // may retry for a while: not under the lock
 	// rclone's backend must be able to use the session.

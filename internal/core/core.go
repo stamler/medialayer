@@ -37,9 +37,10 @@ type Core struct {
 	// before mu.
 	playlistMu sync.Mutex
 	settings   settings
-	fsys       fs.Fs     // the library folder, nil until one is picked
-	db         *index.DB // nil until a folder is picked
-	dbEpoch    int64     // raised each time the database file is replaced
+	fsys       fs.Fs            // the library folder, nil until one is picked
+	jobFs      map[string]fs.Fs // folders the running job opened, by fsKey
+	db         *index.DB        // nil until a folder is picked
+	dbEpoch    int64            // raised each time the database file is replaced
 	job        jobStatus
 	jobDone    chan struct{}      // closed when the running job ends; nil if none
 	phaseStart time.Time          // when the job's current phase began
@@ -238,7 +239,7 @@ func (c *Core) libraryFs(ctx context.Context) (fs.Fs, error) {
 	if s.Folder == "" {
 		return nil, errors.New("no library folder picked")
 	}
-	f, err := openSource(ctx, s)
+	f, err := c.openJobSource(ctx, s)
 	if err != nil {
 		return nil, fmt.Errorf("open %s: %w", s.Folder, err)
 	}
@@ -251,6 +252,55 @@ func (c *Core) libraryFs(ctx context.Context) (fs.Fs, error) {
 		return c.fsys, nil // opened meanwhile by another caller
 	}
 	c.fsys = f
+	return f, nil
+}
+
+// restartJobFsLocked forgets the running job's clients, after a sign-in
+// changed an account, so the job opens each folder once more. The caller
+// holds c.mu.
+func (c *Core) restartJobFsLocked() {
+	if c.jobFs != nil {
+		c.jobFs = map[string]fs.Fs{}
+	}
+}
+
+// fsKey names a folder for jobFs.
+func fsKey(s source) string {
+	r := s.Remote
+	if r == localPrimary {
+		r = ""
+	}
+	return r + "\x00" + s.Folder
+}
+
+// openJobSource opens a folder, reusing the client the running job
+// already opened for it. A switch of the primary touches the same two
+// folders as primary, secondary and lease holder in turn; one client per
+// folder saves a sign-in and the folder lookups each time, and keeps the
+// same folder from having two Proton clients renewing one session.
+// (Different Proton folders still get a client each.) Out of a job, or
+// once it ends, each call opens afresh; after an account is signed in
+// again, each folder is opened afresh once more (restartJobFsLocked).
+func (c *Core) openJobSource(ctx context.Context, s source) (fs.Fs, error) {
+	k := fsKey(s)
+	c.mu.Lock()
+	if f := c.jobFs[k]; f != nil {
+		c.mu.Unlock()
+		return f, nil
+	}
+	c.mu.Unlock()
+	f, err := openSource(ctx, s)
+	if err != nil {
+		return nil, err
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.jobFs != nil {
+		if g := c.jobFs[k]; g != nil {
+			return g, nil
+		}
+		c.jobFs[k] = f
+	}
 	return f, nil
 }
 

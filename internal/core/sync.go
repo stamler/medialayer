@@ -155,6 +155,10 @@ func (c *Core) startJobLocked(work func(context.Context) error) error {
 		c.fsys = nil
 		c.stream.forgetAll()
 	}
+	c.jobFs = map[string]fs.Fs{}
+	if c.fsys != nil {
+		c.jobFs[fsKey(source{Remote: c.primaryRemote(), Folder: c.settings.Folder})] = c.fsys
+	}
 	go func() {
 		defer close(done)
 		// A write the stopped hash pass had begun ends first.
@@ -167,7 +171,7 @@ func (c *Core) startJobLocked(work func(context.Context) error) error {
 		c.mu.Lock()
 		defer c.mu.Unlock()
 		cancel()
-		c.jobDone, c.cancel = nil, nil
+		c.jobDone, c.cancel, c.jobFs = nil, nil, nil
 		c.job.Current = ""
 		c.job.Finished = time.Now()
 		fs.Logf(nil, "sync: %s took %s; the job took %s (%v)", c.job.Phase,

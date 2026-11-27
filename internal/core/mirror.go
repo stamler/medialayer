@@ -314,8 +314,8 @@ func (c *Core) dropSecondaries() error {
 	return c.saveSettings()
 }
 
-// openSource opens a secondary's folder.
-func openSource(ctx context.Context, s source) (fs.Fs, error) {
+// openSource opens a secondary's folder. It is a variable for tests.
+var openSource = func(ctx context.Context, s source) (fs.Fs, error) {
 	if s.Remote == "" || s.Remote == localPrimary {
 		return fs.NewFs(ctx, s.Folder)
 	}
@@ -559,7 +559,7 @@ func (c *Core) mirrorAll(ctx context.Context, f fs.Fs) error {
 // file and, before the first copy, its member record.
 func (c *Core) check(ctx context.Context, f fs.Fs, s source, repo *repoRecord, device, run string) (target, error) {
 	t := target{s: s, probe: repoDir + "/probe/" + device + "-" + s.ID}
-	dst, err := openSource(ctx, s)
+	dst, err := c.openJobSource(ctx, s)
 	if err != nil {
 		return t, err
 	}

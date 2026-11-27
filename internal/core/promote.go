@@ -81,7 +81,7 @@ func (c *Core) promoteHeld(ctx context.Context, id string) error {
 	if target.ID == "" {
 		return fmt.Errorf("no secondary %s", id)
 	}
-	dst, err := openSource(ctx, target)
+	dst, err := c.openJobSource(ctx, target)
 	if err != nil {
 		return err
 	}
