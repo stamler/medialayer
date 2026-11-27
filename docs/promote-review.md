@@ -3,8 +3,11 @@
 A review of sync and Make Primary for speed and robustness, written after
 six switches on Dean's Mac on 2026-11-27. The library had 496 files and
 three replicas: two Google Drive folders and one Proton Drive folder.
-Build 50f99d6. Nothing to do in this file is done yet; it is the plan to
-choose from.
+Build 50f99d6.
+
+**Done since (2026-11-27):** items 1 (f64fd3a), 2 (5af7857), 4 (c2ca909),
+5 without reading repo.json once (05051e6), and 10 (a96450d). The rest is
+still the plan to choose from.
 
 ## Measurements
 
