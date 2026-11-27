@@ -25,7 +25,7 @@ func TestKeyFromManyThreads(t *testing.T) {
 		done := make(chan error, 1)
 		go func() {
 			runtime.LockOSThread() // not unlocked: the thread ends with the goroutine
-			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 			defer cancel()
 			_, err := assertWithKey(ctx, req, "", func(bool) {})
 			done <- err
@@ -38,7 +38,7 @@ func TestKeyFromManyThreads(t *testing.T) {
 		}
 		t.Logf("try %d: %v", i, err)
 		if errors.Is(err, context.DeadlineExceeded) {
-			t.Fatal("the key waited for a touch: this test needs a key with a PIN")
+			t.Fatal("the key didn't answer in time, or waited for a touch (this test needs a key with a PIN)")
 		}
 		if errors.Is(err, ErrProtonNoKey) {
 			t.Fatal("plug in a security key")

@@ -202,7 +202,7 @@ var assertWithKey = func(ctx context.Context, req fidoRequest, pin string, waiti
 			<-keyBusy
 		}
 	}()
-	dev, err := openKey()
+	dev, err := openKey(ctx)
 	if err != nil {
 		return fidoAssertion{}, err
 	}
@@ -283,15 +283,45 @@ var hidLocaleOnce sync.Once
 // openKey opens the one security key plugged in, on the HID thread. The
 // HID libraries panic on some devices' strings; that is an error here,
 // never a crash of the app.
-func openKey() (dev *device.Device, err error) {
-	if p := onHIDThread(func() { dev, err = findKey() }); p != nil {
-		if dev != nil {
-			closeKey(dev)
-		}
-		return nil, fmt.Errorf("couldn't look for a security key: %v", p)
+func openKey(ctx context.Context) (*device.Device, error) {
+	type found struct {
+		dev      *device.Device
+		err      error
+		panicked any
 	}
-	return dev, err
+	ch := make(chan found, 1)
+	go func() {
+		var f found
+		f.panicked = onHIDThread(func() { f.dev, f.err = findKey() })
+		ch <- f
+	}()
+	t := time.NewTimer(keyAnswerTimeout)
+	defer t.Stop()
+	select {
+	case f := <-ch:
+		if f.panicked != nil {
+			return nil, fmt.Errorf("couldn't look for a security key: %v", f.panicked)
+		}
+		return f.dev, f.err
+	case <-ctx.Done():
+	case <-t.C:
+	}
+	// A key that never answers holds the HID thread: close it if it
+	// answers after all.
+	go func() {
+		if f := <-ch; f.dev != nil {
+			closeKey(f.dev)
+		}
+	}()
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	return nil, errors.New("the security key didn't answer: unplug it, plug it in again, and sign in again")
 }
+
+// keyAnswerTimeout is how long a key may take to say what it is, before
+// any touch.
+const keyAnswerTimeout = 10 * time.Second
 
 func findKey() (*device.Device, error) {
 	hidLocaleOnce.Do(setHIDLocale)
@@ -307,6 +337,10 @@ func findKey() (*device.Device, error) {
 	default:
 		return nil, errors.New("more than one security key is plugged in: leave only the one for this Proton account, then sign in again")
 	}
+	// Not exclusively: a browser may have the key open too, and seizing
+	// it can leave the key's answers undelivered. hid_init sets
+	// exclusive again each time it starts, so this follows the listing.
+	setHIDShared()
 	dev, err := device.New(infos[0].Path, quiet)
 	if err != nil {
 		return nil, fmt.Errorf("couldn't open the security key: %w", err)

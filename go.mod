@@ -10,6 +10,7 @@ require (
 	github.com/rclone/Proton-API-Bridge v1.0.5
 	github.com/rclone/go-proton-api v1.0.4
 	github.com/rclone/rclone v1.76.0
+	github.com/sstallion/go-hid v0.15.0
 	golang.org/x/text v0.43.0
 	modernc.org/sqlite v1.53.0
 )
@@ -221,7 +222,6 @@ require (
 	github.com/spf13/afero v1.15.0 // indirect
 	github.com/spf13/cobra v1.10.2 // indirect
 	github.com/spf13/pflag v1.0.10 // indirect
-	github.com/sstallion/go-hid v0.15.0 // indirect
 	github.com/stangelandcl/ppmd v0.1.1 // indirect
 	github.com/stretchr/testify v1.12.1 // indirect
 	github.com/t3rm1n4l/go-mega v0.0.0-20260717075258-c6acd6a5bd04 // indirect

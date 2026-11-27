@@ -13,4 +13,10 @@ static void mlHIDLocale(void) { setlocale(LC_CTYPE, "UTF-8"); }
 */
 import "C"
 
+import "github.com/sstallion/go-hid"
+
 func setHIDLocale() { C.mlHIDLocale() }
+
+// setHIDShared has hidapi open devices without seizing them, as other
+// FIDO clients (libfido2, browsers) do.
+func setHIDShared() { hid.SetOpenExclusive(false) }
