@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/go-ctap/ctaphid/pkg/ctaphid"
@@ -200,21 +201,9 @@ var assertWithKey = func(ctx context.Context, req fidoRequest, pin string, waiti
 			<-keyBusy
 		}
 	}()
-	quiet := options.WithLogger(slog.New(slog.DiscardHandler))
-	infos, err := sugar.EnumerateFIDODevices(quiet)
+	dev, err := openKey()
 	if err != nil {
-		return fidoAssertion{}, fmt.Errorf("couldn't look for a security key: %w", err)
-	}
-	switch len(infos) {
-	case 0:
-		return fidoAssertion{}, ErrProtonNoKey
-	case 1:
-	default:
-		return fidoAssertion{}, errors.New("more than one security key is plugged in: leave only the one for this Proton account, then sign in again")
-	}
-	dev, err := device.New(infos[0].Path, quiet)
-	if err != nil {
-		return fidoAssertion{}, fmt.Errorf("couldn't open the security key: %w", err)
+		return fidoAssertion{}, err
 	}
 	// ctaphid asks for a PIN protocol even without a PIN, and a key with
 	// none (some CTAP 2.0 keys) would crash it.
@@ -286,6 +275,40 @@ var assertWithKey = func(ctx context.Context, req fidoRequest, pin string, waiti
 	case <-t.C:
 		return fidoAssertion{}, errors.New("the security key wasn't touched in time: sign in again, and touch it when it blinks")
 	}
+}
+
+var hidLocaleOnce sync.Once
+
+// openKey opens the one security key plugged in. The HID libraries
+// panic on some devices' strings; that is an error here, never a crash
+// of the app.
+func openKey() (dev *device.Device, err error) {
+	hidLocaleOnce.Do(setHIDLocale)
+	defer func() {
+		if p := recover(); p != nil {
+			if dev != nil {
+				_ = dev.Close()
+			}
+			dev, err = nil, fmt.Errorf("couldn't look for a security key: %v", p)
+		}
+	}()
+	quiet := options.WithLogger(slog.New(slog.DiscardHandler))
+	infos, err := sugar.EnumerateFIDODevices(quiet)
+	if err != nil {
+		return nil, fmt.Errorf("couldn't look for a security key: %w", err)
+	}
+	switch len(infos) {
+	case 0:
+		return nil, ErrProtonNoKey
+	case 1:
+	default:
+		return nil, errors.New("more than one security key is plugged in: leave only the one for this Proton account, then sign in again")
+	}
+	dev, err = device.New(infos[0].Path, quiet)
+	if err != nil {
+		return nil, fmt.Errorf("couldn't open the security key: %w", err)
+	}
+	return dev, nil
 }
 
 // pinError explains a key's refusal of its PIN.
