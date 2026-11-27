@@ -975,6 +975,10 @@ struct AddSourceSheet: View {
     @EnvironmentObject var model: AppModel
     @EnvironmentObject var core: StatusModel
     @Environment(\.dismiss) private var dismiss
+    /// The service picked in the first step, whose accounts the second
+    /// step lists.
+    private enum Service { case google, proton }
+    @State private var service: Service?
     @State private var account: String? // the remote whose folders to browse
     /// Signing in to Proton, with this username filled in.
     @State private var protonSignIn: String?
@@ -1001,31 +1005,65 @@ struct AddSourceSheet: View {
         } else if let user = protonSignIn {
             ProtonSignInView(user: user, onCancel: { protonSignIn = nil }) { remote in
                 protonSignIn = nil
+                service = .proton // the folder picker's Cancel comes back to Proton's step
                 browsingProton = true
                 account = remote
             }
             .frame(width: 460)
         } else {
-            chooser.frame(width: 460)
+            switch service {
+            case .google: googleStep.frame(width: 460)
+            case .proton: protonStep.frame(width: 460)
+            case nil: chooser.frame(width: 460)
+            }
         }
     }
 
     private var primaryRemote: String? { core.status.sources?.first { $0.primary }?.remote }
 
+    /// The first step: which service the copy goes to.
     private var chooser: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text("Add a source").font(.title2)
             Text("A second source holds a full copy of your library. The primary stays the source of truth, and every sync makes the copy match it.")
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
+            option(icon: "drive", title: "Google Drive", detail: "A folder in one of your Google accounts") {
+                error = nil
+                service = .google
+            }
+            option(icon: "protondrive", title: "Proton Drive", detail: "A folder in your Proton account") {
+                error = nil
+                if core.status.protonAccounts?.isEmpty ?? true {
+                    protonSignIn = "" // none connected yet: sign in first
+                } else {
+                    service = .proton
+                }
+            }
+            option(icon: "local", title: "A folder on this Mac or a disk", detail: "Such as an external drive") {
+                pickLocal()
+            }
+            footer(back: false)
+        }
+        .padding(24)
+    }
+
+    /// The second step for Google Drive: the connected accounts, by
+    /// address, and signing in to another.
+    private var googleStep: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Google Drive").font(.title2)
+            Text("Pick the account that holds the folder for the copy.")
+                .foregroundStyle(.secondary)
             ForEach(core.status.accounts ?? [], id: \.self) { remote in
-                option(icon: "drive",
-                       title: remote == primaryRemote ? "Google Drive, same account" : "Google Drive (\(remote))",
-                       detail: remote == primaryRemote ? "Another folder in the primary's Google account" : "A folder in that Google account") {
+                let email = core.status.accountEmails?.first { $0.remote == remote }?.email
+                option(icon: "drive", title: email ?? "Google account",
+                       detail: remote == primaryRemote ? "The primary's account: another folder in it"
+                           : email == nil ? "Connected earlier. Its address shows once Google tells it." : "Connected") {
                     account = remote
                 }
             }
-            option(icon: "drive", title: "Google Drive, another account", detail: "Your browser opens to sign in") {
+            option(icon: "drive", title: "Another Google account", detail: "Your browser opens to sign in") {
                 working = true
                 error = nil
                 Task {
@@ -1034,9 +1072,22 @@ struct AddSourceSheet: View {
                 }
             }
             .disabled(working)
+            if working { Text("Waiting for Google…").foregroundStyle(.secondary) }
+            footer(back: true)
+        }
+        .padding(24)
+    }
+
+    /// The second step for Proton Drive: the connected account, and
+    /// signing in again, to it or another one.
+    private var protonStep: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Proton Drive").font(.title2)
+            Text("MediaLayer connects one Proton account at a time.")
+                .foregroundStyle(.secondary)
             ForEach(core.status.protonAccounts ?? [], id: \.self) { a in
-                option(icon: "protondrive", title: "Proton Drive (\(a.user))",
-                       detail: a.signedIn ? "A folder in that Proton account" : "Signed out: sign in again to use it") {
+                option(icon: "protondrive", title: a.user,
+                       detail: a.signedIn ? "Signed in" : "Signed out: sign in again to use it") {
                     if a.signedIn {
                         browsingProton = true
                         account = a.remote
@@ -1045,27 +1096,24 @@ struct AddSourceSheet: View {
                     }
                 }
             }
-            if let a = core.status.protonAccounts?.first {
-                option(icon: "protondrive", title: "Proton Drive, sign in again",
-                       detail: "If its folders can't be opened, or to switch to another Proton account") {
-                    protonSignIn = a.user
-                }
-            } else {
-                option(icon: "protondrive", title: "Proton Drive", detail: "Sign in with your Proton account") {
-                    protonSignIn = ""
-                }
+            option(icon: "protondrive", title: "Sign in again, or to another account",
+                   detail: "If its folders can't be opened, or to switch accounts") {
+                protonSignIn = core.status.protonAccounts?.first?.user ?? ""
             }
-            option(icon: "local", title: "A folder on this Mac or a disk", detail: "Such as an external drive") {
-                pickLocal()
-            }
-            if working { Text("Waiting for Google…").foregroundStyle(.secondary) }
-            if let error { Text(error).foregroundStyle(.red).textSelection(.enabled) }
-            HStack {
-                Spacer()
-                Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
-            }
+            footer(back: true)
         }
         .padding(24)
+    }
+
+    @ViewBuilder private func footer(back: Bool) -> some View {
+        if let error { Text(error).foregroundStyle(.red).textSelection(.enabled) }
+        HStack {
+            if back {
+                Button("Back") { service = nil; error = nil }.disabled(working)
+            }
+            Spacer()
+            Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
+        }
     }
 
     private func option(icon: String, title: String, detail: String, action: @escaping () -> Void) -> some View {

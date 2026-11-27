@@ -120,6 +120,9 @@ type settings struct {
 	Picked bool `json:"picked,omitempty"`
 	// DebugOff turns off debug logging, which is on until then.
 	DebugOff bool `json:"debug_off,omitempty"`
+	// GoogleEmails are the connected Google accounts' addresses, by
+	// remote (googleemail.go).
+	GoogleEmails map[string]string `json:"google_emails,omitempty"`
 }
 
 // New opens the core with its files in dataDir and its sign-ins
@@ -161,6 +164,11 @@ func Open(dataDir, configKey string) (*Core, error) {
 		if err := c.openDB(); err != nil {
 			return nil, err
 		}
+	}
+	// Listed here, before anything else can use rclone's config, which
+	// loads on first use without a lock.
+	if todo := c.unknownGoogleEmailsLocked(); len(todo) > 0 {
+		go c.learnGoogleEmails(todo)
 	}
 	return c, nil
 }

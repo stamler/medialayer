@@ -54,6 +54,10 @@ type Status struct {
 	// Accounts are the connected Google accounts (rclone remotes), the
 	// primary's first.
 	Accounts []string `json:"accounts"`
+	// AccountEmails are the Google accounts' addresses, where known, in
+	// the order of Accounts. (A list, not a map: the app's JSON decoding
+	// would rewrite map keys such as "gdrive_2".)
+	AccountEmails []GoogleAccount `json:"account_emails,omitempty"`
 	// ProtonAccounts are the connected Proton accounts: at most one.
 	ProtonAccounts []ProtonAccount `json:"proton_accounts"`
 	Notice         string          `json:"notice,omitempty"`
@@ -84,6 +88,11 @@ func (c *Core) Status() Status {
 	s.Job.Failures = append([]string(nil), c.job.Failures...)
 	s.Sources = c.sourcesLocked()
 	s.Accounts = driveAccounts(c.primaryRemote())
+	for _, a := range s.Accounts {
+		if e := c.settings.GoogleEmails[a]; e != "" {
+			s.AccountEmails = append(s.AccountEmails, GoogleAccount{Remote: a, Email: e})
+		}
+	}
 	s.ProtonAccounts = protonAccounts()
 	s.Notice = c.notice
 	if s.Notice == "" {

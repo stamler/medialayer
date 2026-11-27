@@ -122,6 +122,7 @@ func (c *Core) connectDrive(ctx context.Context, name string) error {
 	if config.GetValue(name, "token") == "" {
 		return errors.New("Google sign-in did not finish")
 	}
+	c.learnGoogleEmail(ctx, name)
 	return nil
 }
 

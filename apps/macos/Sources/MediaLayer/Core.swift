@@ -48,6 +48,12 @@ struct CoreStatus: Decodable, Equatable {
     var job = Job()
     var sources: [Source]? = []
     var accounts: [String]? = []
+    /// The Google accounts' addresses, where known.
+    var accountEmails: [GoogleAccount]?
+    struct GoogleAccount: Decodable, Equatable, Hashable {
+        var remote: String
+        var email: String
+    }
     var protonAccounts: [ProtonAccount]? = []
     var notice: String?
     var error: String?
