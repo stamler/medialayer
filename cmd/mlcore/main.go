@@ -60,16 +60,18 @@ func jsonStr(v any) *C.char {
 	return cstr(string(b))
 }
 
-// MLInit opens the core with its files in dataDir. Call it once.
+// MLInit opens the core with its files in dataDir, its saved sign-ins
+// encrypted with configKey (which the app keeps in the keychain). Call
+// it once.
 //
 //export MLInit
-func MLInit(dataDir *C.char) *C.char {
+func MLInit(dataDir, configKey *C.char) *C.char {
 	mu.Lock()
 	defer mu.Unlock()
 	if lib != nil {
 		return nil
 	}
-	c, err := core.New(C.GoString(dataDir))
+	c, err := core.Open(C.GoString(dataDir), C.GoString(configKey))
 	if err != nil {
 		return errStr(err)
 	}

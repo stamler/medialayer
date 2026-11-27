@@ -77,6 +77,9 @@ func (c *Core) Status() Status {
 	s.Accounts = driveAccounts(c.primaryRemote())
 	s.ProtonAccounts = protonAccounts()
 	s.Notice = c.notice
+	if s.Notice == "" {
+		s.Notice = c.keyNotice
+	}
 	if c.hash.known {
 		h := c.hash.status
 		s.AudioHashes = &h

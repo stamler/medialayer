@@ -20,8 +20,6 @@ import (
 
 	_ "github.com/rclone/rclone/backend/drive" // Google Drive
 	"github.com/rclone/rclone/fs"
-	"github.com/rclone/rclone/fs/config"
-	"github.com/rclone/rclone/fs/config/configfile"
 
 	"github.com/stamler/medialayer/internal/index"
 )
@@ -66,6 +64,9 @@ type Core struct {
 	// file.
 	hashFileHook func()
 	notice       string // something the user should know, until the next sync
+	// keyNotice says the saved sign-ins were set aside at start-up. It
+	// shows for the session, as the first sync starts at once.
+	keyNotice string
 	// primaryFull is set when the last publish found the primary's cloud
 	// full, so a sync can't save changes there until space is freed.
 	primaryFull bool
@@ -105,19 +106,24 @@ type settings struct {
 	Picked bool `json:"picked,omitempty"`
 }
 
-// New opens the core with its files in dataDir (on macOS,
-// ~/Library/Application Support/MediaLayer). It starts the streaming
-// endpoint and, if a folder was picked before, opens its index.
-func New(dataDir string) (*Core, error) {
+// New opens the core with its files in dataDir and its sign-ins
+// unencrypted. The apps use Open.
+func New(dataDir string) (*Core, error) { return Open(dataDir, "") }
+
+// Open opens the core with its files in dataDir (on macOS,
+// ~/Library/Application Support/MediaLayer), its sign-ins encrypted with
+// configKey (see setupConfig). It starts the streaming endpoint and, if a
+// folder was picked before, opens its index.
+func Open(dataDir, configKey string) (*Core, error) {
 	if err := os.MkdirAll(filepath.Join(dataDir, "art"), 0o700); err != nil {
 		return nil, err
 	}
-	if err := config.SetConfigPath(filepath.Join(dataDir, "rclone.conf")); err != nil {
+	notice, err := setupConfig(filepath.Join(dataDir, "rclone.conf"), configKey)
+	if err != nil {
 		return nil, err
 	}
-	configfile.Install()
 
-	c := &Core{dataDir: dataDir}
+	c := &Core{dataDir: dataDir, keyNotice: notice}
 	if err := c.loadSettings(); err != nil {
 		return nil, err
 	}
