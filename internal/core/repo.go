@@ -16,7 +16,6 @@ import (
 
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/hash"
-	"github.com/rclone/rclone/fs/operations"
 
 	"github.com/stamler/medialayer/internal/index"
 )
@@ -202,6 +201,13 @@ func (c *Core) restore(ctx context.Context, f fs.Fs) error {
 	if err := copyLocal(path, snapCopy); err != nil {
 		return err
 	}
+	// With the primary's time too, where its cloud has no hashes to match
+	// it by (sameTimes).
+	if t := snap.ModTime(ctx); !t.IsZero() {
+		if err := os.Chtimes(snapCopy, t, t); err != nil {
+			return err
+		}
+	}
 	keep := false
 	defer func() {
 		_ = os.Remove(snapCopy)
@@ -228,7 +234,7 @@ func (c *Core) restore(ctx context.Context, f fs.Fs) error {
 	}
 
 	for name, o := range packs {
-		if !strings.HasPrefix(name, "pack-") {
+		if !strings.HasPrefix(name, "pack-") || partialUpload(name) {
 			continue
 		}
 		local := filepath.Join(c.artDir(), name)
@@ -610,11 +616,15 @@ func (c *Core) uploadPacks(ctx context.Context, f fs.Fs, db *index.DB) error {
 
 // sameFile reports whether remote object o has the same contents as the
 // local file, by size and a hash the remote keeps: MD5, or else SHA-1
-// (Proton Drive). Without either it says no, so the file is written
-// again.
+// (Proton Drive). On a cloud that keeps neither (SMB) it goes by size
+// and modification time (see sameTimes). Without a hash it says no, so
+// the file is written again.
 func sameFile(ctx context.Context, o fs.Object, local string) bool {
 	if o.Size() != fileSize(local) {
 		return false
+	}
+	if noContentHash(o.Fs()) {
+		return sameTimes(ctx, o, local)
 	}
 	ht := hash.MD5
 	if !o.Fs().Hashes().Contains(ht) {
@@ -640,10 +650,15 @@ func sameFile(ctx context.Context, o fs.Object, local string) bool {
 // differ from the local file: by size, or by a hash both sides have. A
 // cloud that gives no hash for it counts as the same, as before versions
 // had ids, so a missing hash never has a device take its own snapshot
-// back on every sync.
+// back on every sync. A cloud that keeps no hashes at all (SMB) is
+// judged by modification time instead (see sameTimes), so another
+// device's index of the same number and size is still noticed.
 func snapshotDiffers(ctx context.Context, o fs.Object, local string) bool {
 	if size := o.Size(); size >= 0 && size != fileSize(local) {
 		return true
+	}
+	if noContentHash(o.Fs()) {
+		return fileSize(local) < 0 || !sameTimes(ctx, o, local)
 	}
 	ht := hash.MD5
 	if !o.Fs().Hashes().Contains(ht) {
@@ -660,6 +675,33 @@ func snapshotDiffers(ctx context.Context, o fs.Object, local string) bool {
 	defer func() { _ = in.Close() }()
 	mine, err := hash.StreamTypes(in, hash.NewHashSet(ht))
 	return err != nil || !strings.EqualFold(mine[ht], theirs)
+}
+
+// noContentHash reports whether f keeps neither MD5 nor SHA-1, as SMB
+// shares don't.
+func noContentHash(f fs.Info) bool {
+	h := f.Hashes()
+	return !h.Contains(hash.MD5) && !h.Contains(hash.SHA1)
+}
+
+// sameTimes reports whether the remote snapshot or art pack o has the
+// local file's modification time, within 2 seconds, the coarsest a disk
+// keeps (FAT). An upload gives the remote file the local file's time, a
+// restore gives the local file the remote's, and a snapshot never
+// changes once written, so on a cloud without hashes this tells this
+// device's file from another device's of the same name and size, unless
+// two devices wrote theirs within 2 seconds of each other, which the
+// sync lock makes unlikely. A secondary that ignores the times it is
+// given is refused (see precisionSeen); a primary that does makes a
+// device take its own snapshot back once after each upload, which costs
+// a download.
+func sameTimes(ctx context.Context, o fs.Object, local string) bool {
+	st, err := os.Stat(local)
+	if err != nil {
+		return false
+	}
+	d := o.ModTime(ctx).Sub(st.ModTime())
+	return d > -2*time.Second && d < 2*time.Second
 }
 
 // copyLocal copies the local file src to dst.
@@ -704,8 +746,7 @@ func upload(ctx context.Context, f fs.Fs, src, remote string) error {
 		return err
 	}
 	err = noPanic("upload "+remote, func() error {
-		_, err := operations.RcatSize(ctx, f, remote, in, st.Size(), st.ModTime(), nil)
-		return err
+		return putWhole(ctx, f, remote, in, st.Size(), st.ModTime())
 	})
 	if err != nil {
 		return fmt.Errorf("upload %s: %w", remote, err)

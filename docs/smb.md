@@ -123,28 +123,33 @@ Found by checking the core against the backend; each is small, but sync
 isn't safe on SMB without them:
 
 1. **Library files written whole.** `putBytes` and `upload` write to a
-   temporary name in the same folder and then move it over the real
-   name (`Move`, which on SMB is a rename), on backends that say
-   `PartialUploads`. A cut write then leaves the old `repo.json` or
-   `member.json` in place.
-2. **Time precision measured.** On the first write to an SMB folder the
-   core sets a test file's time to an odd number of milliseconds, reads
-   it back, and keeps the precision it sees for that source (as rclone's
-   local backend does for local disks). Comparisons with that source use
-   it as the modify window, as `withinPrecision` does for indexing.
+   temporary name beside the file (`name.<8 hex>.partial`) and then
+   move it over the real name, on backends that say `PartialUploads`
+   (SMB, local disks). A cut write then leaves the old `repo.json` or
+   `member.json` in place. A server that refuses the rename because
+   another device has the file open (Windows share modes) gets the file
+   written in place, as before.
+2. **Time precision measured.** Each sync of an SMB secondary writes its
+   probe with a fixed time (an odd second with a fraction, in 2020),
+   reads it back, and takes the precision it sees as the modify window
+   for comparing that folder's files, a step loose where the disk rounds
+   up. A server that doesn't keep the time it is given is refused as a
+   secondary: with no hashes either, a retag that kept the size would go
+   unseen.
 3. **Leftover partial files ignored.** A file named like rclone's
    partial uploads (`*.<8 hex>.partial`) is neither copied, nor trashed,
-   nor counted toward the daily limit; a sync removes those it left in
-   its own folders. Without this, a cut copy shows up next time as a file
-   the primary lacks.
-4. **The snapshot without hashes.** `sameFile` says no when the cloud
-   has no hash, so every sync would upload the index snapshot (several
-   MB) again; and `snapshotDiffers` compares only by size on an SMB
-   primary, so another device's index of the same size isn't noticed.
-   Both should use what SMB does give: the snapshot's name carries its
-   version, and `member.json` and the snapshot's own `meta.version_id`
-   say which index it is. Reading the snapshot's few MB back to hash it
-   is the fallback.
+   nor counted toward the daily limit. A secondary's sync removes those
+   left in it, since only MediaLayer writes there; a primary's are left
+   alone. Restore skips them among the art packs.
+4. **The snapshot without hashes.** On a cloud with neither MD5 nor
+   SHA-1, a snapshot is this device's when its size matches and its
+   modification time is within 2 seconds of the local file's. An upload
+   gives the remote file the local time and a restore gives the local
+   file the remote time, so another device's index of the same number
+   and size is told apart unless both were written within 2 seconds,
+   which the sync lock makes unlikely. Without this, every sync would
+   upload the snapshot again, and an SMB primary would make a new index
+   version on every sync.
 
 ### The sync rules on SMB
 

@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/crc32"
 	"io"
 	"os"
 	"path"
@@ -65,6 +66,9 @@ type source struct {
 	Remote string `json:"remote"` // rclone remote in the core's config; "" for a local folder
 	Folder string `json:"folder"` // on the remote, or an absolute local path
 }
+
+// smbType is rclone's SMB backend.
+const smbType = "smb"
 
 // sourceType is the rclone backend, such as "drive", or "local".
 func (s source) sourceType() string {
@@ -346,6 +350,9 @@ type listing struct {
 	probes map[string][]string // file name -> paths
 	// ownProbes are the probe files in the folder's own .medialayer.
 	ownProbes map[string]bool
+	// partials are rclone's partial uploads (see partialUpload), which
+	// files leaves out.
+	partials []fs.Object
 }
 
 func newListing() *listing {
@@ -376,6 +383,12 @@ func (l *listing) add(o fs.Object) {
 			return
 		}
 	}
+	// Only backends that write in place get partial uploads; on Drive or
+	// Proton such a name is a real file.
+	if partialUpload(parts[len(parts)-1]) && o.Fs().Features().PartialUploads {
+		l.partials = append(l.partials, o)
+		return
+	}
 	if _, ok := l.files[r]; ok {
 		l.dupes[r] = true
 		l.extra = append(l.extra, o)
@@ -393,6 +406,26 @@ func systemName(base string) bool {
 		return true
 	}
 	return strings.HasPrefix(base, "._")
+}
+
+// partialUpload reports a name rclone gives a file while copying it to a
+// backend that writes in place (SMB, local disks): name.<8 hex>.partial,
+// renamed when the copy ends. One left by a copy cut short is neither
+// copied, trashed nor counted toward the daily limit. Its hex depends on
+// the file copied, so a later copy of a changed file doesn't write over
+// it: a secondary's sync removes those left in it (see mirror). A
+// primary's are left alone.
+func partialUpload(base string) bool {
+	rest, ok := strings.CutSuffix(base, ".partial")
+	if !ok || len(rest) < 10 || rest[len(rest)-9] != '.' {
+		return false
+	}
+	for _, r := range rest[len(rest)-8:] {
+		if !strings.ContainsRune("0123456789abcdef", r) {
+			return false
+		}
+	}
+	return true
 }
 
 // listLibrary lists a library folder. A missing folder is empty when
@@ -424,11 +457,106 @@ var listLibrary = func(ctx context.Context, f fs.Fs, missingOK bool) (*listing, 
 
 // putBytes writes a small file to f.
 func putBytes(ctx context.Context, f fs.Fs, remote string, b []byte) error {
-	err := noPanic("write "+remote, func() error {
-		_, err := operations.RcatSize(ctx, f, remote, io.NopCloser(bytes.NewReader(b)), int64(len(b)), time.Now(), nil)
-		return err
+	return putBytesAt(ctx, f, remote, b, time.Now())
+}
+
+// putBytesAt writes a small file to f with modification time t.
+func putBytesAt(ctx context.Context, f fs.Fs, remote string, b []byte, t time.Time) error {
+	return noPanic("write "+remote, func() error {
+		return putWhole(ctx, f, remote, bytes.NewReader(b), int64(len(b)), t)
 	})
-	return err
+}
+
+// probeTime is the modification time a probe is written with on SMB, to
+// see what the server's disk keeps of it: an odd second, so a disk that
+// keeps times to 2 seconds shows it, with a fraction that every coarser
+// precision rounds away, and long ago, so a server that ignores the time
+// it is given (and keeps the time of the write) shows that too.
+var probeTime = time.Date(2020, 1, 1, 0, 0, 1, 123_456_789, time.UTC)
+
+// precisionSeen is the modify window to compare times on a folder with,
+// from the time a file was given (set) and the time the folder then
+// lists for it (got). 0 means the backend's own precision serves.
+// rclone's SMB backend says it keeps milliseconds whatever the server's
+// disk keeps, so on a disk that keeps seconds (HFS+) or 2 seconds (FAT)
+// every copied file would look changed on the next sync, with no hash to
+// settle it, and each would be replaced.
+func precisionSeen(set, got time.Time) time.Duration {
+	d := got.Sub(set)
+	if d < 0 {
+		d = -d
+	}
+	// A disk that rounds up lands nearer than its step (2-second FAT
+	// rounding 1.12 s up to 2 s is 0.88 s off), so a gap over half a step
+	// takes the next step: never too fine, at worst one step loose.
+	steps := []time.Duration{time.Millisecond, 10 * time.Millisecond, 100 * time.Millisecond, time.Second, 2 * time.Second}
+	for i, w := range steps {
+		if d < w {
+			if 2*d >= w && i+1 < len(steps) {
+				w = steps[i+1]
+			}
+			if w == time.Millisecond {
+				return 0
+			}
+			return w
+		}
+	}
+	return fs.ModTimeNotSupported // the time given wasn't kept
+}
+
+// putWhole writes in (size bytes) to remote on f, so that a write cut
+// short leaves the old file whole. Drive and Proton create a file only
+// once all of it has arrived. Backends that write in place (SMB, local
+// disks) say PartialUploads: there the file is written under a
+// temporary name beside it and renamed over it, as rclone's own copies
+// do, since a cut write in place would leave repo.json or member.json
+// truncated, or removed.
+func putWhole(ctx context.Context, f fs.Fs, remote string, in io.Reader, size int64, modTime time.Time) error {
+	feat := f.Features()
+	if !feat.PartialUploads || feat.Move == nil {
+		_, err := operations.RcatSize(ctx, f, remote, io.NopCloser(in), size, modTime, nil)
+		return err
+	}
+	tmp := partialName(remote)
+	// Clean up even when ctx was cancelled, which may be why the write
+	// failed.
+	cleanup := context.WithoutCancel(ctx)
+	o, err := operations.RcatSize(ctx, f, tmp, io.NopCloser(in), size, modTime, nil)
+	if err != nil {
+		if o, e := f.NewObject(cleanup, tmp); e == nil {
+			_ = o.Remove(cleanup)
+		}
+		return err
+	}
+	if _, err := feat.Move(ctx, o, remote); err != nil {
+		// A server that enforces share modes (Windows) refuses to rename
+		// over a file another device has open, as when it reads a lease
+		// claim or repo.json, where writing in place was allowed. Write
+		// in place then, as before, from the temporary file's contents.
+		fs.Debugf(f, "rename %s into place: %v; writing it in place", tmp, err)
+		rc, oerr := o.Open(ctx)
+		if oerr != nil {
+			_ = o.Remove(cleanup)
+			return fmt.Errorf("rename %s into place: %w", tmp, err)
+		}
+		// As before this function, a write in place that is cut short
+		// removes the file.
+		_, werr := operations.RcatSize(ctx, f, remote, rc, size, modTime, nil)
+		_ = rc.Close()
+		_ = o.Remove(cleanup)
+		if werr != nil {
+			return fmt.Errorf("write %s: %w", remote, werr)
+		}
+	}
+	return nil
+}
+
+// partialName is the temporary name putWhole writes remote under: the
+// same every time, so one left by a crash is written over by the next
+// try rather than piling up, and in the form rclone gives its own
+// partial uploads (name.<8 hex>.partial).
+func partialName(remote string) string {
+	return fmt.Sprintf("%s.%08x.partial", remote, crc32.ChecksumIEEE([]byte(remote)))
 }
 
 // target is a secondary that passed the checks before syncing.
@@ -438,6 +566,9 @@ type target struct {
 	have      *listing
 	probe     string // its probe file, under .medialayer/probe/
 	versionID string // the id of the index version it is sent
+	// window, when not 0, is the modify window to compare times with on
+	// this folder, measured from its probe (see precisionSeen).
+	window time.Duration
 	// newProbe is set when this sync wrote the probe for the first time,
 	// so a listing of the primary made before it can't show it.
 	newProbe bool
@@ -647,8 +778,28 @@ func (c *Core) check(ctx context.Context, f fs.Fs, s source, repo *repoRecord, d
 		return t, err
 	}
 	t.newProbe = !have.ownProbes[path.Base(t.probe)]
-	if err := putBytes(ctx, dst, t.probe, []byte(run)); err != nil {
+	at := time.Now()
+	if s.sourceType() == smbType {
+		at = probeTime
+	}
+	if err := putBytesAt(ctx, dst, t.probe, []byte(run), at); err != nil {
 		return t, fmt.Errorf("write a probe file: %w", err)
+	}
+	if s.sourceType() == smbType {
+		o, err := dst.NewObject(ctx, t.probe)
+		if err != nil {
+			return t, fmt.Errorf("read back the probe file: %w", err)
+		}
+		t.window = precisionSeen(probeTime, o.ModTime(ctx))
+		switch t.window {
+		case 0:
+		case fs.ModTimeNotSupported:
+			// Comparing by size alone would miss a retag that kept the
+			// size, and there is no hash to compare instead.
+			return t, errors.New("this server doesn't keep the modification times MediaLayer gives files, so it can't tell which files changed; it can't be a secondary")
+		default:
+			fs.Logf(dst, "the server keeps times to %v, so times are compared to that", t.window)
+		}
 	}
 	b, err := readSmall(ctx, f, t.probe)
 	if err != nil && !absent(err) {
@@ -843,10 +994,13 @@ func (c *Core) mirror(ctx context.Context, f fs.Fs, src *listing, repo *repoReco
 	// change it, so a file whose time alone differs (with the same size
 	// and SHA-1) is the same file, rather than one to upload again.
 	eqCtx := ctx
-	if s.sourceType() == protonType {
+	if s.sourceType() == protonType || t.window != 0 {
 		var ci *fs.ConfigInfo
 		eqCtx, ci = fs.AddConfig(ctx)
-		ci.NoUpdateModTime = true
+		ci.NoUpdateModTime = s.sourceType() == protonType
+		if t.window != 0 {
+			ci.ModifyWindow = fs.Duration(t.window)
+		}
 	}
 	var copies, replaces []string
 	var deletes []fs.Object
@@ -979,6 +1133,17 @@ func (c *Core) mirror(ctx context.Context, f fs.Fs, src *listing, repo *repoReco
 			return err
 		}
 		step(d.Remote())
+	}
+	// Partial uploads left by a copy cut short are MediaLayer's own
+	// (only it writes to a secondary), never a whole file, so they are
+	// removed rather than trashed.
+	for _, o := range have.partials {
+		if err := checkLease(ctx); err != nil {
+			return err
+		}
+		if err := o.Remove(ctx); err != nil {
+			fs.Errorf(o, "remove a partial upload: %v", err)
+		}
 	}
 	for _, p := range replaces {
 		old, _ := lookup(p)
