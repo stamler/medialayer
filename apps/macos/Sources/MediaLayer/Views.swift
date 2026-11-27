@@ -1076,6 +1076,7 @@ struct ProtonSignInView: View {
     @State private var askCode = false
     @State private var askMailbox = false
     @State private var working = false
+    @State private var touchKey = false
     @State private var error: String?
 
     var body: some View {
@@ -1093,23 +1094,40 @@ struct ProtonSignInView: View {
                     SecureField("Mailbox password", text: $mailbox)
                 }
                 if askCode {
-                    TextField("2FA code", text: $code)
+                    // Left empty, a security key signs in, if the account has one.
+                    TextField("2FA code", text: $code, prompt: Text("Leave empty to use a security key"))
                         .textContentType(.oneTimeCode)
                 }
             }
-            if working { Text("Signing in…").foregroundStyle(.secondary) }
+            if touchKey {
+                Label("Touch your security key now.", systemImage: "key.fill").font(.headline)
+            } else if working {
+                Text("Signing in…").foregroundStyle(.secondary)
+            }
             if let error { Text(error).foregroundStyle(.red).textSelection(.enabled) }
             HStack {
-                Button("Cancel", action: onCancel).keyboardShortcut(.cancelAction)
+                Button("Cancel") {
+                    if working { Core.cancelProtonSignIn() }
+                    onCancel()
+                }.keyboardShortcut(.cancelAction)
                 Spacer()
                 Button("Sign In", action: signIn)
                     .buttonStyle(.borderedProminent)
                     .keyboardShortcut(.defaultAction)
                     .disabled(working || user.trimmingCharacters(in: .whitespaces).isEmpty || password.isEmpty
-                              || (askCode && code.isEmpty) || (askMailbox && mailbox.isEmpty))
+                              || (askMailbox && mailbox.isEmpty))
             }
         }
         .padding(24)
+        .onDisappear { if working { Core.cancelProtonSignIn() } }
+        // A sign-in with a security key waits for its touch.
+        .task(id: working) {
+            while working && !Task.isCancelled {
+                touchKey = Core.protonKeyWaiting
+                try? await Task.sleep(nanoseconds: 250_000_000)
+            }
+            touchKey = false
+        }
     }
 
     private func signIn() {

@@ -1,15 +1,21 @@
 package core
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/go-ctap/ctaphid/pkg/ctaphid"
 	"github.com/rclone/Proton-API-Bridge/common"
 	"github.com/rclone/go-proton-api"
 	"github.com/rclone/rclone/fs"
@@ -233,5 +239,115 @@ func TestProtonScopeError(t *testing.T) {
 	}
 	if err := protonScopeError(errors.New("offline"), proton.Auth{}); strings.Contains(err.Error(), "limited access") {
 		t.Errorf("an unrelated error explained as scope: %v", err)
+	}
+}
+
+// protonFidoOptions is the shape Proton sends: numbers for bytes.
+func protonFidoOptions(t *testing.T) any {
+	t.Helper()
+	var opts any
+	if err := json.Unmarshal([]byte(`{"publicKey":{"rpId":"proton.me","timeout":60000,"userVerification":"discouraged",
+		"challenge":[1,2,3,250],"allowCredentials":[{"id":[9,8,7],"type":"public-key"},{"id":[6],"type":"public-key"}]}}`), &opts); err != nil {
+		t.Fatal(err)
+	}
+	return opts
+}
+
+func TestFidoOptions(t *testing.T) {
+	req, err := fidoOptions(protonFidoOptions(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if req.rpID != "proton.me" || len(req.allow) != 2 || !bytes.Equal(req.allow[0], []byte{9, 8, 7}) {
+		t.Errorf("fidoOptions = %+v", req)
+	}
+	var cd map[string]string
+	if err := json.Unmarshal(req.clientData, &cd); err != nil {
+		t.Fatal(err)
+	}
+	if cd["type"] != "webauthn.get" || cd["origin"] != "https://proton.me" || cd["challenge"] != "AQID-g" {
+		t.Errorf("client data = %v", cd)
+	}
+	for _, bad := range []string{`{}`, `{"publicKey":{"rpId":"proton.me","challenge":[1],"allowCredentials":[]}}`,
+		`{"publicKey":{"rpId":"proton.me","challenge":[1,300],"allowCredentials":[{"id":[1]}]}}`} {
+		var o any
+		_ = json.Unmarshal([]byte(bad), &o)
+		if _, err := fidoOptions(o); err == nil {
+			t.Errorf("fidoOptions(%s) succeeded", bad)
+		}
+	}
+}
+
+// The second step goes to Proton with the key's answer in the shape
+// Proton's own apps send, though go-proton-api's request type can't hold
+// it.
+func TestProtonKeyStepSendsAssertion(t *testing.T) {
+	var got map[string]map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/auth/v4/2fa" {
+			http.NotFound(w, r)
+			return
+		}
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Error(err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"Code":1000,"Scopes":["full"]}`)
+	}))
+	defer srv.Close()
+	m := proton.New(proton.WithHostURL(srv.URL))
+	defer m.Close()
+	c := m.NewClient("uid", "acc", "ref")
+	defer c.Close()
+
+	old := assertWithKey
+	defer func() { assertWithKey = old }()
+	var waited []bool
+	assertWithKey = func(_ context.Context, req fidoRequest, waiting func(bool)) (fidoAssertion, error) {
+		waiting(true)
+		waiting(false)
+		return fidoAssertion{credentialID: []byte{9, 8, 7}, authData: []byte("auth"), signature: []byte("sig")}, nil
+	}
+	opts := protonFidoOptions(t)
+	auth := proton.Auth{TwoFA: proton.TwoFAInfo{Enabled: proton.HasFIDO2, FIDO2: proton.FIDO2Info{AuthenticationOptions: opts}}}
+	if err := protonKeyStep(context.Background(), c, auth, func(w bool) { waited = append(waited, w) }); err != nil {
+		t.Fatal(err)
+	}
+	f := got["FIDO2"]
+	if f == nil {
+		t.Fatalf("body = %v", got)
+	}
+	if fmt.Sprint(f["CredentialID"]) != "[9 8 7]" || f["AuthenticatorData"] != "YXV0aA==" || f["Signature"] != "c2ln" {
+		t.Errorf("FIDO2 = %v", f)
+	}
+	cd, _ := base64.StdEncoding.DecodeString(f["ClientData"].(string))
+	if !strings.Contains(string(cd), `"origin":"https://proton.me"`) {
+		t.Errorf("client data = %s", cd)
+	}
+	if fmt.Sprint(f["AuthenticationOptions"]) != fmt.Sprint(opts) {
+		t.Errorf("options sent back = %v", f["AuthenticationOptions"])
+	}
+	if fmt.Sprint(waited) != "[true false]" {
+		t.Errorf("waiting = %v", waited)
+	}
+}
+
+func TestKeyError(t *testing.T) {
+	for code, want := range map[ctaphid.StatusCode]string{
+		ctaphid.CTAP2_ERR_NO_CREDENTIALS:      "isn't one registered",
+		ctaphid.CTAP2_ERR_USER_ACTION_TIMEOUT: "touched in time",
+		ctaphid.CTAP2_ERR_PUAT_REQUIRED:       "PIN",
+	} {
+		err := keyError(fmt.Errorf("x: %w", &ctaphid.CTAPError{StatusCode: code}))
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("keyError(%v) = %v", code, err)
+		}
+	}
+}
+
+func TestNoKeyAsksForCode(t *testing.T) {
+	err := needError{"plug in your key", ErrProtonNeeds2FA}
+	if !errors.Is(err, ErrProtonNeeds2FA) || err.Error() != "plug in your key" {
+		t.Errorf("needError = %v", err)
 	}
 }

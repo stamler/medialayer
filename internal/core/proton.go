@@ -20,8 +20,8 @@ import (
 
 // A Proton Drive folder can be a secondary, and be made the primary (see
 // docs/sync.md, Proton Drive). The core signs in itself (protonLogin),
-// with the account's username and password, a 2FA code if the account
-// uses one, and the mailbox password of a two-password account, and
+// with the account's username and password, a 2FA code or security key if
+// the account uses one, and the mailbox password of a two-password account, and
 // hands the session to rclone's backend. Only the session the
 // sign-in makes is kept in the core's rclone config, never the password
 // (the session's salted key password does unlock the account's keys):
@@ -96,8 +96,9 @@ func (c *Core) remoteInUse(remote string) bool {
 // ConnectProton signs in to Proton Drive and returns the remote's name.
 // code is the 2FA code, and mailbox the mailbox password; either may be
 // empty, and the error is ErrProtonNeeds2FA or ErrProtonNeedsMailbox when
-// the account needs it, or ErrProtonSecurityKey when its two-step sign-in
-// is a security key only. Signing in to the connected account again renews
+// the account needs it. With no code, an account with a security key signs
+// in with the key plugged in (ProtonKeyWaiting is true while it waits for
+// a touch). Signing in to the connected account again renews
 // its session; another account replaces it, unless the library uses it.
 func (c *Core) ConnectProton(ctx context.Context, user, password, mailbox, code string) (string, error) {
 	user = strings.TrimSpace(user)
@@ -116,12 +117,24 @@ func (c *Core) ConnectProton(ctx context.Context, user, password, mailbox, code 
 		}
 	}
 	// A failed sign-in leaves the connected account as it was.
-	session, err := protonLogin(ctx, user, password, mailbox, code)
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	c.mu.Lock()
+	if c.protonCancel != nil {
+		c.protonCancel() // the sign-in before is given up
+	}
+	c.protonCancel = cancel
+	c.mu.Unlock()
+	session, err := protonLogin(ctx, user, password, mailbox, code, c.protonKeyWait.Store)
 	if err != nil {
 		return "", err
 	}
 	// The library may have started using the account during the sign-in.
 	c.mu.Lock()
+	if ctx.Err() != nil { // cancelled as it finished
+		c.mu.Unlock()
+		return "", ctx.Err()
+	}
 	if old := config.GetValue(name, "username"); old != "" && !sameProtonUser(old, user) && c.remoteInUse(name) {
 		c.mu.Unlock()
 		return "", fmt.Errorf("MediaLayer connects one Proton account at a time, and the library uses %s. Stop syncing to its folders (or make another source the primary) first", old)
@@ -158,16 +171,13 @@ var protonAppVersion = func() string {
 	return "external-drive-rclone@" + v + "-stable"
 }()
 
-// ErrProtonSecurityKey: the account's second sign-in step is a security
-// key or passkey, which only Proton's own apps can use.
-var ErrProtonSecurityKey = errors.New("this Proton account's two-step sign-in uses a security key or passkey, which only Proton's own apps can use. In Proton's settings (Account and password, Two-factor authentication), also turn on an authenticator app, then sign in here again: MediaLayer will ask for its code")
-
 // protonLogin signs in as Proton's own clients do: the password (by SRP),
-// then a 2FA code if the account has one, then the keys are unlocked with
+// then the second step if the account has one (a 2FA code when given, or
+// else its security key, see protonKeyStep), then the keys are unlocked with
 // the password, or the mailbox password of a two-password account. It
 // returns the session for the config, under protonSessionKeys. A sign-in
 // that can't finish is signed out at Proton.
-func protonLogin(ctx context.Context, user, password, mailbox, code string) (map[string]string, error) {
+func protonLogin(ctx context.Context, user, password, mailbox, code string, waiting func(bool)) (map[string]string, error) {
 	m := proton.New(
 		proton.WithAppVersion(protonAppVersion),
 		proton.WithUserAgent(fs.GetConfig(ctx).UserAgent),
@@ -198,15 +208,26 @@ func protonLogin(ctx context.Context, user, password, mailbox, code string) (map
 	if auth.PasswordMode == proton.TwoPasswordMode && mailbox == "" {
 		return fail(ErrProtonNeedsMailbox)
 	}
+	code = strings.ReplaceAll(strings.TrimSpace(code), " ", "")
 	if tfa := auth.TwoFA.Enabled; tfa != 0 {
 		switch {
-		case tfa&proton.HasTOTP == 0:
-			return fail(ErrProtonSecurityKey)
-		case strings.ReplaceAll(strings.TrimSpace(code), " ", "") == "":
+		case tfa&proton.HasTOTP != 0 && code != "":
+			if err := c.Auth2FA(ctx, proton.Auth2FAReq{TwoFactorCode: code}); err != nil {
+				return fail(fmt.Errorf("Proton didn't accept the 2FA code (codes change every 30 seconds): %w", err))
+			}
+		case tfa&proton.HasFIDO2 != 0:
+			if err := protonKeyStep(ctx, c, auth, waiting); err != nil {
+				if tfa&proton.HasTOTP != 0 && ctx.Err() == nil {
+					msg := err.Error() + ". Or enter the code from your authenticator app"
+					if errors.Is(err, ErrProtonNoKey) {
+						msg = "plug in your security key and sign in again, or enter the code from your authenticator app"
+					}
+					err = needError{msg, ErrProtonNeeds2FA}
+				}
+				return fail(err)
+			}
+		default:
 			return fail(ErrProtonNeeds2FA)
-		}
-		if err := c.Auth2FA(ctx, proton.Auth2FAReq{TwoFactorCode: strings.ReplaceAll(strings.TrimSpace(code), " ", "")}); err != nil {
-			return fail(fmt.Errorf("Proton didn't accept the 2FA code (codes change every 30 seconds): %w", err))
 		}
 	}
 	keyPass := []byte(password)
@@ -347,4 +368,18 @@ func protonError(err error) error {
 		return errors.New("couldn't open Proton Drive with the saved sign-in: MediaLayer may be offline, or Proton ended the session. If this keeps happening, sign in again from Add Source, Proton Drive")
 	}
 	return err
+}
+
+// ProtonKeyWaiting reports whether a Proton sign-in is waiting for its
+// security key to be touched.
+func (c *Core) ProtonKeyWaiting() bool { return c.protonKeyWait.Load() }
+
+// CancelProtonSignIn gives up the Proton sign-in under way, if any, as
+// while it waits for a security key.
+func (c *Core) CancelProtonSignIn() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.protonCancel != nil {
+		c.protonCancel()
+	}
 }

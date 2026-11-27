@@ -121,7 +121,9 @@ func MLAddGoogleAccount() *C.char {
 // MLConnectProton signs in to Proton Drive with a username, password,
 // mailbox password and 2FA code (the last two may be empty). It blocks
 // until Proton answers and returns {"remote": "..."} or {"error": "..."},
-// with "need": "2fa" or "mailbox" when the account needs that too.
+// with "need": "2fa" or "mailbox" when the account needs that too. An
+// account with a security key signs in with the key plugged in when no
+// code is given (see MLProtonKeyWaiting).
 //
 //export MLConnectProton
 func MLConnectProton(user, password, mailbox, code *C.char) *C.char {
@@ -141,6 +143,27 @@ func MLConnectProton(user, password, mailbox, code *C.char) *C.char {
 		out["need"] = "mailbox"
 	}
 	return jsonStr(out)
+}
+
+// MLProtonKeyWaiting returns 1 while MLConnectProton waits for a security
+// key to be touched, else 0.
+//
+//export MLProtonKeyWaiting
+func MLProtonKeyWaiting() C.int {
+	if c, err := get(); err == nil && c.ProtonKeyWaiting() {
+		return 1
+	}
+	return 0
+}
+
+// MLCancelProtonSignIn gives up the MLConnectProton call under way,
+// which then returns an error.
+//
+//export MLCancelProtonSignIn
+func MLCancelProtonSignIn() {
+	if c, err := get(); err == nil {
+		c.CancelProtonSignIn()
+	}
 }
 
 // MLListFolders returns {"folders": [...]} or {"error": "..."} for the

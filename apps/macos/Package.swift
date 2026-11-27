@@ -19,6 +19,7 @@ let package = Package(
                 .linkedLibrary("mlcore"), // found with -L build, passed by the script
                 .linkedFramework("CoreFoundation"),
                 .linkedFramework("Security"),
+                .linkedFramework("IOKit"), // security keys, over USB
                 .linkedLibrary("resolv"),
             ]
         ),

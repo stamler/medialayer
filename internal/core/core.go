@@ -46,6 +46,10 @@ type Core struct {
 	// tracks is the index's track count, kept here so Status never waits
 	// on the database while the indexer writes.
 	tracks atomic.Int64
+	// protonKeyWait is set while a Proton sign-in waits for a security
+	// key's touch.
+	protonKeyWait atomic.Bool
+	protonCancel  context.CancelFunc // ends the Proton sign-in under way; under mu
 	// badCovers are folder images that failed to read or decode, so later
 	// syncs in this session don't download them again.
 	badCovers map[string]bool

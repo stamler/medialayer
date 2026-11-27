@@ -3,6 +3,8 @@ module github.com/stamler/medialayer
 go 1.26.0
 
 require (
+	github.com/go-ctap/ctaphid v0.8.3
+	github.com/go-resty/resty/v2 v2.17.2
 	github.com/mewkiz/flac v1.0.14
 	github.com/oklog/ulid/v2 v2.1.2
 	github.com/rclone/Proton-API-Bridge v1.0.5
@@ -101,11 +103,13 @@ require (
 	github.com/emersion/go-vcard v0.0.0-20260618161152-d854b7e0e2d3 // indirect
 	github.com/felixge/httpsnoop v1.1.0 // indirect
 	github.com/flynn/noise v1.1.0 // indirect
+	github.com/fxamacker/cbor/v2 v2.9.0 // indirect
 	github.com/gabriel-vasile/mimetype v1.4.15 // indirect
 	github.com/gdamore/encoding v1.0.1 // indirect
 	github.com/gdamore/tcell/v3 v3.6.0 // indirect
 	github.com/geoffgarside/ber v1.2.0 // indirect
 	github.com/go-chi/chi/v5 v5.5.0 // indirect
+	github.com/go-ctap/hid v0.3.0 // indirect
 	github.com/go-darwin/apfs v0.0.0-20211011131704-f84b94dbf348 // indirect
 	github.com/go-git/go-billy/v5 v5.9.2 // indirect
 	github.com/go-logr/logr v1.4.4 // indirect
@@ -116,7 +120,6 @@ require (
 	github.com/go-playground/locales v0.14.2 // indirect
 	github.com/go-playground/universal-translator v0.18.2 // indirect
 	github.com/go-playground/validator/v10 v10.30.5 // indirect
-	github.com/go-resty/resty/v2 v2.17.2 // indirect
 	github.com/go-viper/mapstructure/v2 v2.5.0 // indirect
 	github.com/goccy/go-json v0.10.6 // indirect
 	github.com/gofrs/flock v0.13.1 // indirect
@@ -156,6 +159,7 @@ require (
 	github.com/kr/fs v0.1.0 // indirect
 	github.com/kylelemons/godebug v1.1.0 // indirect
 	github.com/lanrat/extsort v1.5.0 // indirect
+	github.com/ldclabs/cose v1.3.2 // indirect
 	github.com/leodido/go-urn v1.5.0 // indirect
 	github.com/lpar/calendar v0.2.0 // indirect
 	github.com/lucasb-eyer/go-colorful v1.4.1 // indirect
@@ -205,6 +209,7 @@ require (
 	github.com/ryszard/goskiplist v0.0.0-20150312221310-2dfbae5fcf46 // indirect
 	github.com/sabhiram/go-gitignore v0.0.0-20210923224102-525f6e181f06 // indirect
 	github.com/samber/lo v1.53.0 // indirect
+	github.com/samber/mo v1.16.0 // indirect
 	github.com/shabbyrobe/gocovmerge v0.0.0-20230507112040-c3350d9342df // indirect
 	github.com/shirou/gopsutil/v4 v4.26.9 // indirect
 	github.com/sirupsen/logrus v1.10.2 // indirect
@@ -216,6 +221,7 @@ require (
 	github.com/spf13/afero v1.15.0 // indirect
 	github.com/spf13/cobra v1.10.2 // indirect
 	github.com/spf13/pflag v1.0.10 // indirect
+	github.com/sstallion/go-hid v0.15.0 // indirect
 	github.com/stangelandcl/ppmd v0.1.1 // indirect
 	github.com/stretchr/testify v1.12.1 // indirect
 	github.com/t3rm1n4l/go-mega v0.0.0-20260717075258-c6acd6a5bd04 // indirect
@@ -227,6 +233,7 @@ require (
 	github.com/willscott/go-nfs-client v0.0.0-20251022144359-801f10d98886 // indirect
 	github.com/winfsp/cgofuse v1.6.1-0.20260531120352-2fa812d1bdc7 // indirect
 	github.com/wk8/go-ordered-map/v2 v2.1.8 // indirect
+	github.com/x448/float16 v0.8.4 // indirect
 	github.com/xanzy/ssh-agent v0.3.3 // indirect
 	github.com/youmark/pkcs8 v0.0.0-20240726163527-a2c0da244d78 // indirect
 	github.com/yunify/qingstor-sdk-go/v3 v3.2.0 // indirect

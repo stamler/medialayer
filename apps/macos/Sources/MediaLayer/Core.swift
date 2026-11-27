@@ -159,6 +159,12 @@ enum Core {
         }.value
     }
 
+    /// Whether a Proton sign-in is waiting for its security key's touch.
+    static var protonKeyWaiting: Bool { MLProtonKeyWaiting() != 0 }
+
+    /// Gives up the Proton sign-in under way.
+    static func cancelProtonSignIn() { MLCancelProtonSignIn() }
+
     /// Lists folders on a connected account ("" for the primary's).
     static func listFolders(remote: String = "", in dir: String) async throws -> [String] {
         struct Reply: Decodable { var folders: [String]?; var error: String? }

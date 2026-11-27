@@ -511,9 +511,15 @@ password, then a 2FA code or the mailbox password if the account uses
 one. The core signs in itself (rclone's backend handles a 2FA code from
 an authenticator app only, and would leave an account whose two-step
 sign-in is a security key half signed in) and hands the session to
-rclone's backend. An account with only a security key or passkey for
-two-step sign-in can't sign in from a third-party app; adding an
-authenticator app in Proton's settings lets it. The core identifies
+rclone's backend. An account whose two-step sign-in is a security key
+signs in with the key plugged in over USB, as Proton's Bridge does: the
+core reads the WebAuthn options Proton sends with the first step, has
+the key sign Proton's challenge (a touch, no PIN), and sends the
+signature back as the second step. The app shows "Touch your security
+key" while the key waits. With an authenticator app as well, a code
+entered is used instead. One key at a time; a key that asks for its PIN
+on every use, and a passkey kept in iCloud Keychain (which only Proton's
+own apps and website may use), can't sign in. The core identifies
 itself to Proton with the app version a release of rclone sends. The password goes to Proton only: the core keeps the session Proton
 returns, in its own rclone config. That session includes the salted key
 password that unlocks the account's keys. The Mac app encrypts the whole
