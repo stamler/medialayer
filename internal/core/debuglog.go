@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	rtdebug "runtime/debug"
 	"sync"
 	"testing"
 
@@ -46,6 +47,12 @@ func setupLogging(dataDir string, debug bool) {
 			}
 			if f, err := os.OpenFile(p, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600); err == nil {
 				w, logging.path = io.MultiWriter(os.Stderr, f), p
+				// A crash's Go stack goes to stderr only, which nobody
+				// keeps for an app opened from Finder; keep it here too.
+				if !testing.Testing() {
+					_ = rtdebug.SetCrashOutput(f, rtdebug.CrashOptions{})
+					rtdebug.SetTraceback("all")
+				}
 			}
 		}
 		fs.SetLogger(slog.NewTextHandler(w, &slog.HandlerOptions{Level: &logging.level, ReplaceAttr: levelName}))

@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -407,7 +408,10 @@ func listLibrary(ctx context.Context, f fs.Fs, missingOK bool) (*listing, error)
 
 // putBytes writes a small file to f.
 func putBytes(ctx context.Context, f fs.Fs, remote string, b []byte) error {
-	_, err := operations.RcatSize(ctx, f, remote, io.NopCloser(bytes.NewReader(b)), int64(len(b)), time.Now(), nil)
+	err := noPanic("write "+remote, func() error {
+		_, err := operations.RcatSize(ctx, f, remote, io.NopCloser(bytes.NewReader(b)), int64(len(b)), time.Now(), nil)
+		return err
+	})
 	return err
 }
 
@@ -906,7 +910,10 @@ func (c *Core) mirror(ctx context.Context, f fs.Fs, src *listing, repo *repoReco
 		if err := checkLease(ctx); err != nil {
 			return err
 		}
-		_, err := operations.Move(ctx, dst, nil, trashDir+"/"+stamp+"/"+o.Remote(), o)
+		err := noPanic("move "+o.Remote()+" to trash", func() error {
+			_, err := operations.Move(ctx, dst, nil, trashDir+"/"+stamp+"/"+o.Remote(), o)
+			return err
+		})
 		if err != nil {
 			return fmt.Errorf("move %s to trash: %w", o.Remote(), err)
 		}
@@ -930,7 +937,7 @@ func (c *Core) mirror(ctx context.Context, f fs.Fs, src *listing, repo *repoReco
 			return err
 		}
 		start := time.Now()
-		if _, err := operations.Copy(ctx, dst, nil, p, src.files[p]); err != nil {
+		if err := copyFile(ctx, dst, p, src.files[p]); err != nil {
 			return fmt.Errorf("copy %s: %w", p, err)
 		}
 		logCopy(dst, p, src.files[p].Size(), time.Since(start))
@@ -939,23 +946,36 @@ func (c *Core) mirror(ctx context.Context, f fs.Fs, src *listing, repo *repoReco
 	// New files go up several at a time, as each costs a few round trips
 	// of its own on a cloud secondary (Proton is about 15 seconds a song
 	// one at a time); rclone's dircache keeps folders made once.
-	g, gctx := errgroup.WithContext(ctx)
+	// After a failure no more start, but those under way finish rather
+	// than being cancelled mid-upload: a crash followed a Proton upload
+	// cancelled that way.
+	var g errgroup.Group
 	g.SetLimit(max(fs.GetConfig(ctx).Transfers, 1))
+	var failed atomic.Bool
 	for _, p := range copies {
-		if gctx.Err() != nil {
+		if failed.Load() || ctx.Err() != nil {
 			break
 		}
 		g.Go(func() error {
-			if err := checkLease(gctx); err != nil {
-				return err
+			if failed.Load() {
+				return nil
 			}
-			start := time.Now()
-			if _, err := operations.Copy(gctx, dst, nil, p, src.files[p]); err != nil {
-				return fmt.Errorf("copy %s: %w", p, err)
+			err := func() error {
+				if err := checkLease(ctx); err != nil {
+					return err
+				}
+				start := time.Now()
+				if err := copyFile(ctx, dst, p, src.files[p]); err != nil {
+					return fmt.Errorf("copy %s: %w", p, err)
+				}
+				logCopy(dst, p, src.files[p].Size(), time.Since(start))
+				step(p)
+				return nil
+			}()
+			if err != nil {
+				failed.Store(true)
 			}
-			logCopy(dst, p, src.files[p].Size(), time.Since(start))
-			step(p)
-			return nil
+			return err
 		})
 	}
 	if err := g.Wait(); err != nil {
@@ -1064,4 +1084,12 @@ func emptyTrash(ctx context.Context, dst fs.Fs, now time.Time) error {
 func logCopy(dst fs.Fs, p string, size int64, took time.Duration) {
 	mb := float64(size) / 1e6
 	fs.Infof(dst, "copied %s: %.1f MB in %.1fs (%.1f MB/s)", p, mb, took.Seconds(), mb/max(took.Seconds(), 0.001))
+}
+
+// copyFile copies o to p on dst.
+func copyFile(ctx context.Context, dst fs.Fs, p string, o fs.Object) error {
+	return noPanic("copy "+p, func() error {
+		_, err := operations.Copy(ctx, dst, nil, p, o)
+		return err
+	})
 }

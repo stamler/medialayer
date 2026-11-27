@@ -587,7 +587,10 @@ func upload(ctx context.Context, f fs.Fs, src, remote string) error {
 	if err != nil {
 		return err
 	}
-	_, err = operations.RcatSize(ctx, f, remote, in, st.Size(), st.ModTime(), nil)
+	err = noPanic("upload "+remote, func() error {
+		_, err := operations.RcatSize(ctx, f, remote, in, st.Size(), st.ModTime(), nil)
+		return err
+	})
 	if err != nil {
 		return fmt.Errorf("upload %s: %w", remote, err)
 	}

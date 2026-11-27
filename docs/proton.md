@@ -233,6 +233,48 @@ Log in Finder**. With debug on, the log also has:
 With debug off, the log keeps notices, warnings and errors, and throttle
 lines still appear.
 
+## The overnight crash (go-proton-api bugs)
+
+About 19 minutes into the first fast sync, the app crashed
+(EXC_BAD_ACCESS at 0x8, then a Go runtime abort). Here's what happened:
+
+1. A block upload to Proton's storage got "broken pipe".
+2. resty retried it with the same `bytes.Reader`, which the first
+   attempt had already drained. go-proton-api's `UploadBlock` doesn't
+   rewind it, so Proton answered "400 Upload file empty (2003)". A block
+   retry can never succeed.
+3. That copy failed, and the copy loop cancelled the others.
+4. One of them was inside `Client.CreateFile`. That function reads
+   `resp.StatusCode()` on the nil response `doRes` returns when no answer
+   came (go-proton-api v1.0.4 `link.go:51`; `CreateFolder` has the same
+   bug at `:91` and `:94`). The second word of `resty.Response` is at
+   offset 8.
+
+This was reproduced in a test. Any network failure during a file or
+folder create can trigger it, not only a cancel.
+
+What MediaLayer does about it:
+- Every write to a cloud (copy, move to trash, small files, uploads) runs
+  under `noPanic`, which turns such a panic into an error. The next sync
+  tries again.
+- A failed copy no longer cancels the copies under way; they finish, and
+  no new ones start.
+- A crash's full Go stack now goes to `MediaLayer.log`
+  (`runtime/debug.SetCrashOutput`), as stderr is lost for an app opened
+  from Finder.
+
+To send upstream (go-proton-api and Proton-API-Bridge, not yet filed):
+- **Nil response.** `CreateFile` and `CreateFolder` should check `resp`
+  before reading its status, or `doRes` should return the response with
+  its error.
+- **Empty retry.** `UploadBlock` should give resty a reader it can
+  rewind, or turn on `RetryResetReaders`.
+- **Leaked goroutines.** In Proton-API-Bridge `uploadPendingBlocks`,
+  `errChan` is unbuffered and the function returns on the first error.
+  The other block goroutines then block forever and keep their semaphore
+  permits. Also, a failed `Acquire` doesn't return, so `Release` is
+  called without a permit.
+
 ## Open items
 
 - **Proton shares can't be opened.** rclone's backend, on
