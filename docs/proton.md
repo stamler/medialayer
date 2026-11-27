@@ -28,7 +28,8 @@ what went wrong on the way, and what is still open.
     its upload and can't change it later. A file whose time alone differs
     from the primary's, with the same size and SHA-1, counts as the same
     file. After Make Primary, files whose times differ by less than a
-    second keep their ids, so nothing is read again.
+    second keep their ids and times, so nothing is read again, in either
+    direction.
 
 ## Credentials are encrypted with a key in the keychain
 

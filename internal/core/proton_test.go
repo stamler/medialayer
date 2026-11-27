@@ -173,8 +173,8 @@ type coarseFs struct{ fs.Fs }
 func (coarseFs) Precision() time.Duration { return time.Second }
 
 // A primary that keeps times to the second (a Proton folder made the
-// primary) keeps every file's id and doesn't read it again: each row
-// takes the time the cloud reports.
+// primary) keeps every file's id and doesn't read it again; each row
+// keeps its time.
 func TestIndexKeepsFilesOnCoarseTimes(t *testing.T) {
 	ctx := context.Background()
 	lib := writeLibrary(t, nil)
@@ -215,9 +215,19 @@ func TestIndexKeepsFilesOnCoarseTimes(t *testing.T) {
 	}
 	for p, id := range before {
 		k := known[p]
-		if k.ID != id || k.MTime != whole.UnixMilli() {
-			t.Errorf("%s: id %s -> %s, mtime %d (want %d)", p, id, k.ID, k.MTime, whole.UnixMilli())
+		if k.ID != id || k.MTime != base.UnixMilli() {
+			t.Errorf("%s: id %s -> %s, mtime %d (want it kept at %d)", p, id, k.ID, k.MTime, base.UnixMilli())
 		}
+	}
+	// A row with a whole second (indexed on a coarse cloud) matches a
+	// finer time within that second, so the switch back reads nothing
+	// again either, and the audio hash pass still finds the row.
+	if !sameTime(f, whole.UnixMilli(), base.UnixMilli()) {
+		t.Error("a whole-second row doesn't match a finer time within its second")
+	}
+	ok, err := c.currentDB().SetAudioSHA("A/Album/01.flac", known["A/Album/01.flac"].Size, whole.UnixMilli(), make([]byte, 32))
+	if err != nil || !ok {
+		t.Errorf("SetAudioSHA at the cloud's whole second = %v, %v; want the row found", ok, err)
 	}
 	// On a cloud with fine times, a time off by under a second is a change.
 	if withinPrecision(f, whole.UnixMilli(), base.UnixMilli()) {

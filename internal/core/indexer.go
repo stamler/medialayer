@@ -95,22 +95,12 @@ func (c *Core) index(ctx context.Context, f fs.Fs) error {
 	}
 	var todo []fs.Object
 	var found, gone []string
-	retimed := map[string]int64{} // by id
 	listed := map[string]bool{}
 	for _, o := range objs {
 		listed[o.Remote()] = true
 		k, ok := known[o.Remote()]
 		if ok && k.Size == o.Size() {
-			mtime := o.ModTime(ctx).UnixMilli()
-			same := k.MTime == mtime
-			if !same && withinPrecision(f, k.MTime, mtime) {
-				// A cloud that keeps times to the second (Proton), now
-				// the primary: the file is unchanged, and its row takes
-				// the time the cloud reports from now on.
-				same = true
-				retimed[k.ID] = mtime
-			}
-			if same {
+			if sameTime(f, k.MTime, o.ModTime(ctx).UnixMilli()) {
 				if k.Missing {
 					found = append(found, k.ID)
 				}
@@ -128,11 +118,8 @@ func (c *Core) index(ctx context.Context, f fs.Fs) error {
 			gone = append(gone, k.ID)
 		}
 	}
-	if len(found)+len(gone)+len(retimed) > 0 {
+	if len(found)+len(gone) > 0 {
 		if err := db.MarkFilesChanged(); err != nil {
-			return err
-		}
-		if err := db.SetMTimes(retimed); err != nil {
 			return err
 		}
 		if err := db.SetMissing(found, false); err != nil {
@@ -157,6 +144,21 @@ func (c *Core) index(ctx context.Context, f fs.Fs) error {
 		return fmt.Errorf("art pack: %w", err)
 	}
 	return ctx.Err()
+}
+
+// sameTime reports whether an indexed file's time, stored, and the time
+// the primary lists for it, listed (both in milliseconds), are one time.
+// A row is never retimed, so both switches of the primary between a
+// cloud that keeps times to the second (Proton) and one that keeps
+// milliseconds read nothing again: on the coarse cloud the times match
+// within its second, and on the fine one a stored whole second (a row
+// indexed on the coarse cloud) matches a listed time within that second.
+func sameTime(f fs.Info, stored, listed int64) bool {
+	if stored == listed || withinPrecision(f, stored, listed) {
+		return true
+	}
+	d := stored - listed
+	return stored%1000 == 0 && d > -1000 && d < 1000
 }
 
 // withinPrecision reports whether two modification times, in
@@ -213,7 +215,7 @@ func matchMoves(ctx context.Context, f fs.Info, db *index.DB, known map[string]i
 				same = bytes.Equal(sha, k.SHA256)
 			} else {
 				mtime := o.ModTime(ctx).UnixMilli()
-				same = (k.MTime == mtime || withinPrecision(f, k.MTime, mtime)) && path.Base(p) == path.Base(o.Remote())
+				same = sameTime(f, k.MTime, mtime) && path.Base(p) == path.Base(o.Remote())
 			}
 			if same {
 				match, n = p, n+1

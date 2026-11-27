@@ -169,7 +169,7 @@ func (c *Core) hashPass(ctx context.Context, db *index.DB) error {
 			continue
 		}
 		o, err := f.NewObject(ctx, t.Path)
-		if err != nil || o.Size() != t.Size || o.ModTime(ctx).UnixMilli() != t.MTime {
+		if err != nil || o.Size() != t.Size || !sameTime(f, t.MTime, o.ModTime(ctx).UnixMilli()) {
 			continue // changed since it was indexed: the next sync indexes it again
 		}
 		sha, err := c.audioSHA(ctx, f, o)

@@ -497,11 +497,14 @@ func (d *DB) Locate(id, replica string) (FileLocation, error) {
 
 // SetAudioSHA records the audio_sha256 of the file at path, if the index
 // holds it at this size and modification time, and reports whether it
-// did. It doesn't make a new version: the hash goes out with the next
-// one.
+// did. A time that is a whole second, on either side, matches within
+// that second, as rows keep the time of the cloud they were indexed on
+// and Proton keeps times to the second. It doesn't make a new version:
+// the hash goes out with the next one.
 func (d *DB) SetAudioSHA(path string, size, mtime int64, sha []byte) (bool, error) {
-	res, err := d.db.Exec(`UPDATE file SET audio_sha256 = ? WHERE path = ? AND size = ? AND mtime = ?`,
-		sha, path, size, mtime)
+	res, err := d.db.Exec(`UPDATE file SET audio_sha256 = ? WHERE path = ? AND size = ? AND
+		(mtime = ? OR ((mtime % 1000 = 0 OR ? % 1000 = 0) AND abs(mtime - ?) < 1000))`,
+		sha, path, size, mtime, mtime, mtime)
 	if err != nil {
 		return false, err
 	}
