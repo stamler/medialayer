@@ -53,6 +53,16 @@ struct CoreStatus: Decodable, Equatable {
     var error: String?
     /// The background audio-hash pass's progress.
     var audioHashes: AudioHashes?
+    /// A cloud that asked us to slow down (HTTP 429 or 503)
+    /// in the last two minutes; its requests are retried after a wait.
+    struct Throttle: Decodable, Equatable {
+        var service: String
+        var count: Int64
+    }
+    var throttled: [Throttle]?
+    /// Debug logging: on until turned off in the Library menu.
+    var debug: Bool? = false
+    var logPath: String?
 
     /// A connected Proton account: at most one.
     struct ProtonAccount: Decodable, Equatable, Hashable {
@@ -230,6 +240,10 @@ enum Core {
 
     static func startSync() throws {
         try check(MLStartSync())
+    }
+
+    static func setDebug(_ on: Bool) throws {
+        try check(MLSetDebug(on ? 1 : 0))
     }
 
     /// Looks up a track's cloud file in the background, ahead of playing it.

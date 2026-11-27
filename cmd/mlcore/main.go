@@ -264,6 +264,17 @@ func MLStartSync() *C.char {
 	return errStr(c.StartSync())
 }
 
+// MLSetDebug turns debug logging on (on != 0) or off, and remembers it.
+//
+//export MLSetDebug
+func MLSetDebug(on C.int) *C.char {
+	c, err := get()
+	if err != nil {
+		return errStr(err)
+	}
+	return errStr(c.SetDebug(on != 0))
+}
+
 // MLPrepare gets ready to stream a file (the selected or next track)
 // by looking up its cloud object in the background.
 //

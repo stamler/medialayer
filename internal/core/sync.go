@@ -60,6 +60,12 @@ type Status struct {
 	// AudioHashes is the background pass that hashes every track's audio,
 	// once it has counted them.
 	AudioHashes *AudioHashStatus `json:"audio_hashes,omitempty"`
+	// Throttled is the clouds that asked us to slow down in the last
+	// two minutes.
+	Throttled []Throttle `json:"throttled,omitempty"`
+	// Debug is whether debug logging is on; LogPath is the log file.
+	Debug   bool   `json:"debug"`
+	LogPath string `json:"log_path,omitempty"`
 }
 
 // Status returns the current state.
@@ -72,6 +78,8 @@ func (c *Core) Status() Status {
 		ArtDir:     c.artDir(),
 		StreamBase: c.stream.base(),
 		Job:        c.job,
+		Debug:      !c.settings.DebugOff,
+		LogPath:    logging.path,
 	}
 	s.Job.Failures = append([]string(nil), c.job.Failures...)
 	s.Sources = c.sourcesLocked()
@@ -93,6 +101,7 @@ func (c *Core) Status() Status {
 		s.Tracks = c.tracks.Load()
 	}
 	c.mu.Unlock()
+	s.Throttled = recentThrottles(time.Now())
 	return s
 }
 

@@ -929,9 +929,11 @@ func (c *Core) mirror(ctx context.Context, f fs.Fs, src *listing, repo *repoReco
 		if err := checkLease(ctx); err != nil {
 			return err
 		}
+		start := time.Now()
 		if _, err := operations.Copy(ctx, dst, nil, p, src.files[p]); err != nil {
 			return fmt.Errorf("copy %s: %w", p, err)
 		}
+		logCopy(dst, p, src.files[p].Size(), time.Since(start))
 		step(p)
 	}
 	// New files go up several at a time, as each costs a few round trips
@@ -947,9 +949,11 @@ func (c *Core) mirror(ctx context.Context, f fs.Fs, src *listing, repo *repoReco
 			if err := checkLease(gctx); err != nil {
 				return err
 			}
+			start := time.Now()
 			if _, err := operations.Copy(gctx, dst, nil, p, src.files[p]); err != nil {
 				return fmt.Errorf("copy %s: %w", p, err)
 			}
+			logCopy(dst, p, src.files[p].Size(), time.Since(start))
 			step(p)
 			return nil
 		})
@@ -1054,4 +1058,10 @@ func emptyTrash(ctx context.Context, dst fs.Fs, now time.Time) error {
 		}
 	}
 	return nil
+}
+
+// logCopy logs how long a file took to copy, in debug logging.
+func logCopy(dst fs.Fs, p string, size int64, took time.Duration) {
+	mb := float64(size) / 1e6
+	fs.Infof(dst, "copied %s: %.1f MB in %.1fs (%.1f MB/s)", p, mb, took.Seconds(), mb/max(took.Seconds(), 0.001))
 }

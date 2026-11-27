@@ -25,6 +25,7 @@ import (
 	"github.com/go-ctap/ctaphid/pkg/webauthntypes"
 	"github.com/go-resty/resty/v2"
 	"github.com/rclone/go-proton-api"
+	"github.com/rclone/rclone/fs"
 )
 
 // A Proton account's two-step sign-in can be a security key (FIDO2), as
@@ -254,6 +255,8 @@ var assertWithKey = func(ctx context.Context, req fidoRequest, pin string, waiti
 	if err != nil {
 		return fidoAssertion{}, err
 	}
+	// Debug logging follows the sign-in's steps, never with the PIN.
+	fs.Infof(nil, "security key: opened (versions %v, PIN set %v)", dev.GetInfo().Versions, dev.GetInfo().Options[ctaptypes.OptionClientPIN])
 	// ctaphid asks for a PIN protocol even without a PIN, and a key with
 	// none (some CTAP 2.0 keys) would crash it.
 	if len(dev.GetInfo().PinUvAuthProtocols) == 0 {
@@ -267,18 +270,23 @@ var assertWithKey = func(ctx context.Context, req fidoRequest, pin string, waiti
 		if pin == "" {
 			// As browsers do: a touch picks the key, then its PIN is asked
 			// for, then a second touch signs.
+			fs.Infof(nil, "security key: waiting for a touch to pick it")
 			err := selectKey(ctx, dev, waiting) // closes dev
 			if err != nil {
+				fs.Infof(nil, "security key: not picked: %v", err)
 				return fidoAssertion{}, err
 			}
+			fs.Infof(nil, "security key: picked; asking for its PIN")
 			return fidoAssertion{}, ErrProtonNeedsPIN
 		}
 		token, err = dev.GetPinUvAuthTokenUsingPIN(pin, ctaptypes.PermissionGetAssertion, req.rpID)
 		if err != nil {
 			err = pinError(dev, err)
 			closeKey(dev)
+			fs.Infof(nil, "security key: PIN not accepted: %v", err)
 			return fidoAssertion{}, err
 		}
+		fs.Infof(nil, "security key: PIN accepted")
 	}
 	allow := make([]webauthntypes.PublicKeyCredentialDescriptor, len(req.allow))
 	for i, id := range req.allow {
@@ -289,6 +297,7 @@ var assertWithKey = func(ctx context.Context, req fidoRequest, pin string, waiti
 		err error
 	}
 	done := make(chan result, 1)
+	fs.Infof(nil, "security key: waiting for a touch to sign in")
 	waiting(KeyTouchToSign)
 	defer waiting(KeyNoTouch)
 	// The key's answer can't be cancelled from here: on a cancel the
@@ -323,6 +332,11 @@ var assertWithKey = func(ctx context.Context, req fidoRequest, pin string, waiti
 	defer t.Stop()
 	select {
 	case r := <-done:
+		if r.err != nil {
+			fs.Infof(nil, "security key: didn't sign: %v", r.err)
+		} else {
+			fs.Infof(nil, "security key: signed")
+		}
 		return r.a, r.err
 	case <-ctx.Done():
 		return fidoAssertion{}, ctx.Err()

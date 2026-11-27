@@ -109,6 +109,8 @@ type settings struct {
 	// Picked is set from picking the folder until the first sync reads
 	// its repository.
 	Picked bool `json:"picked,omitempty"`
+	// DebugOff turns off debug logging, which is on until then.
+	DebugOff bool `json:"debug_off,omitempty"`
 }
 
 // New opens the core with its files in dataDir and its sign-ins
@@ -132,6 +134,8 @@ func Open(dataDir, configKey string) (*Core, error) {
 	if err := c.loadSettings(); err != nil {
 		return nil, err
 	}
+	setupLogging(dataDir, !c.settings.DebugOff)
+	watchThrottles()
 	if c.settings.DeviceID == "" {
 		c.settings.DeviceID = index.NewID()
 		if err := c.saveSettings(); err != nil {

@@ -8,6 +8,7 @@ require (
 	github.com/go-resty/resty/v2 v2.17.2
 	github.com/mewkiz/flac v1.0.14
 	github.com/oklog/ulid/v2 v2.1.2
+	github.com/prometheus/client_golang v1.25.0
 	github.com/rclone/Proton-API-Bridge v1.0.5
 	github.com/rclone/go-proton-api v1.0.4
 	github.com/rclone/rclone v1.76.0
@@ -196,7 +197,6 @@ require (
 	github.com/pkg/xattr v0.4.12 // indirect
 	github.com/power-devops/perfstat v0.0.0-20260805114148-88456608a4f6 // indirect
 	github.com/pquerna/otp v1.5.0 // indirect
-	github.com/prometheus/client_golang v1.25.0 // indirect
 	github.com/prometheus/client_model v0.6.3 // indirect
 	github.com/prometheus/common v0.72.0 // indirect
 	github.com/prometheus/procfs v0.22.0 // indirect

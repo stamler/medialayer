@@ -55,6 +55,17 @@ struct LibraryCommands: Commands {
                 .disabled(!core.status.connected || core.status.isBusy)
             Button("Add Source…") { model.addingSource = true }
                 .disabled(core.status.folder.isEmpty || core.status.isBusy)
+            Divider()
+            Toggle("Debug Logging", isOn: Binding(get: { core.status.debug ?? false }, set: { on in
+                do { try Core.setDebug(on) } catch { NSSound.beep() }
+                model.refresh()
+            }))
+            Button("Show Log in Finder") {
+                if let p = core.status.logPath {
+                    NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: p)])
+                }
+            }
+            .disabled(core.status.logPath == nil)
         }
     }
 }
@@ -678,6 +689,12 @@ struct StatusBar: View {
             // sources could still crowd out the rest of a narrow bar.
             SourcesBar().fixedSize()
             jobText.foregroundStyle(.secondary).lineLimit(1)
+            if let ts = core.status.throttled, !ts.isEmpty {
+                Label("\(ts.map(\.service).joined(separator: " and ")) \(ts.count == 1 ? "is" : "are") slowing us down", systemImage: "tortoise")
+                    .foregroundStyle(.orange).lineLimit(1)
+                    .help(ts.map { "\($0.service) asked MediaLayer to slow down \($0.count == 1 ? "once" : "\($0.count) times") since it opened. Each request is retried after a wait, so syncing goes on, more slowly." }
+                        .joined(separator: "\n"))
+            }
             if let n = core.status.notice, !core.status.isBusy {
                 Image(systemName: "exclamationmark.circle").foregroundStyle(.orange).help(n)
             }
