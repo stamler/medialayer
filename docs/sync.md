@@ -524,9 +524,20 @@ it clear the session: a failed open says the sign-in may have ended, and
 works again once Proton can be reached. If Proton really ended the
 session, Add Source, "Proton Drive, sign in again" fixes it.
 
-- **Secondary only.** Make Primary is refused for a Proton folder for
-  now. A Proton primary would need indexing, streaming and the sync lock
-  checked against its encrypted blocks and slower API first.
+- **As the primary.** A synced Proton folder can be made the primary
+  with Make Primary, like any other. Proton keeps files in encrypted
+  4 MB blocks, so reading a file's tags, or starting or seeking a track,
+  fetches and decrypts at least one block: indexing new files and
+  starting tracks are slower than on Drive. Listings always ask Proton
+  for a folder's files, so files added with Proton's own apps and other
+  devices' sync lock claims are seen; the backend caches only keys and
+  folder links, and the core opens a fresh client for each sync, so that
+  cache lasts one sync. Proton keeps modification times to the second,
+  so after the switch each indexed file whose time differs by less than
+  a second is the same file, keeping its id, and takes Proton's time;
+  nothing is read again. Each renewal of the sync lock adds a revision
+  of its small claim file on Proton. Choose Music Folder still browses
+  Google Drive only, so a Proton primary is reached by Make Primary.
 - **One account at a time.** rclone's Proton backend keeps the config
   that a renewed session is saved to in a package variable, set by
   whichever Proton remote was opened last. With two accounts open at

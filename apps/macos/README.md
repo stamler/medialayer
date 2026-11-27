@@ -45,7 +45,9 @@ the Proton username and password; the app asks for a 2FA code or the
 mailbox password if the account uses one. The password isn't kept, only
 the session Proton returns (which can unlock the account's files until it
 ends), so sign in again when Proton ends it.
-A Proton folder can't be made the primary yet.
+Once a Proton folder shows as synced, Make Primary can switch the
+library to it. Tracks start a little slower than from Drive, as Proton
+sends files in encrypted 4 MB blocks.
 
 ## Saved sign-ins and the keychain
 

@@ -695,16 +695,22 @@ struct StatusBar: View {
         .background(.bar)
     }
 
+    /// The primary's cloud, as the status line names it.
+    private var primaryCloud: String {
+        let type = core.status.sources?.first { $0.primary }?.type ?? "drive"
+        return type == "local" ? "this Mac" : SourceIcon.label(type)
+    }
+
     @ViewBuilder private var jobText: some View {
         let j = core.status.job
         if let e = model.libraryError ?? core.status.error {
             Text("Can't read the library: \(e)").foregroundStyle(.red).help(e)
         } else {
             switch j.phase {
-            case "opening": Text("Opening library from Google Drive…")
+            case "opening": Text("Opening library from \(primaryCloud)…")
             case "listing": Text("Listing \(core.status.folder)… \(j.done) files")
             case "indexing": Text("Indexing \(j.done) of \(j.total)" + (j.failed > 0 ? ", \(j.failed) failed" : ""))
-            case "publishing": Text("Saving the library to Google Drive…")
+            case "publishing": Text("Saving the library to \(primaryCloud)…")
             case "promoting": Text("Switching the primary…")
             case "waiting": Text("Syncing on \(j.holder ?? "another device"). This Mac will sync after it.")
             case "mirroring":
@@ -810,8 +816,7 @@ struct SourcesBar: View {
             }
             if !source.primary {
                 Button("Make Primary…") { promoting = source }
-                    .disabled(source.state != "synced" || core.status.isBusy || source.cantPromote != nil)
-                    .help(source.cantPromote ?? "")
+                    .disabled(source.state != "synced" || core.status.isBusy)
                 Button("Stop Syncing to “\(source.name)”") {
                     do { try model.removeSecondary(source.id) } catch { self.error = error.localizedDescription }
                 }

@@ -34,8 +34,6 @@ struct CoreStatus: Decodable, Equatable {
         var version: Int? // the index version a synced secondary matches
         /// Sync matches this secondary's paths ignoring case.
         var caseBlind: Bool?
-        /// Why this secondary can't be made the primary, if it can't.
-        var cantPromote: String?
 
         var name: String { (folder as NSString).lastPathComponent }
     }

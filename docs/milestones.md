@@ -95,9 +95,9 @@ and work on it continues after the AppKit table.
    edits told apart by audio hashes: decoded samples for FLAC and ALAC,
    audio bytes for MP3 and AAC, made by a background pass over every
    track). Proton Drive works as a secondary, signing in with the
-   account's password and 2FA code and keeping only the session; it
-   can't be made the primary yet, and one Proton account is connected at
-   a time. SMB comes next. How it works now: [sync.md](sync.md).
+   account's password and 2FA code and keeping only the session, and a
+   synced Proton secondary can be made the primary; one Proton account
+   is connected at a time. SMB comes next. How it works now: [sync.md](sync.md).
 
    An idea for SMB, to be worked out: a small helper installed on the
    machine that serves the share pre-generates the library there, all of
