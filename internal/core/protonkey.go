@@ -202,7 +202,10 @@ var assertWithKey = func(ctx context.Context, req fidoRequest, pin string, waiti
 			<-keyBusy
 		}
 	}()
-	dev, err := openKey(ctx)
+	dev, gaveUp, err := openKey(ctx, func() { <-keyBusy })
+	if gaveUp {
+		held = false // released when the look ends
+	}
 	if err != nil {
 		return fidoAssertion{}, err
 	}
@@ -283,7 +286,12 @@ var hidLocaleOnce sync.Once
 // openKey opens the one security key plugged in, on the HID thread. The
 // HID libraries panic on some devices' strings; that is an error here,
 // never a crash of the app.
-func openKey(ctx context.Context) (*device.Device, error) {
+//
+// When it gives up (ctx ends, or the key says nothing), the look goes on
+// on the HID thread; release is then called once the look ends and any
+// key it found is closed, and openKey reports gaveUp. Otherwise release
+// isn't called.
+func openKey(ctx context.Context, release func()) (_ *device.Device, gaveUp bool, _ error) {
 	type found struct {
 		dev      *device.Device
 		err      error
@@ -300,23 +308,24 @@ func openKey(ctx context.Context) (*device.Device, error) {
 	select {
 	case f := <-ch:
 		if f.panicked != nil {
-			return nil, fmt.Errorf("couldn't look for a security key: %v", f.panicked)
+			return nil, false, fmt.Errorf("couldn't look for a security key: %v", f.panicked)
 		}
-		return f.dev, f.err
+		return f.dev, false, f.err
 	case <-ctx.Done():
 	case <-t.C:
 	}
 	// A key that never answers holds the HID thread: close it if it
 	// answers after all.
 	go func() {
+		defer release()
 		if f := <-ch; f.dev != nil {
 			closeKey(f.dev)
 		}
 	}()
 	if ctx.Err() != nil {
-		return nil, ctx.Err()
+		return nil, true, ctx.Err()
 	}
-	return nil, errors.New("the security key didn't answer: unplug it, plug it in again, and sign in again")
+	return nil, true, errors.New("the security key didn't answer: unplug it, plug it in again, and sign in again")
 }
 
 // keyAnswerTimeout is how long a key may take to say what it is, before

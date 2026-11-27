@@ -3,7 +3,7 @@
 package core
 
 // setHIDLocale: only macOS's HID backend converts device names with the C
-// locale (see hidlocale_darwin.go).
+// locale (see hid_darwin.go).
 func setHIDLocale() {}
 
 // setHIDShared: only macOS's hidapi seizes devices by default.
