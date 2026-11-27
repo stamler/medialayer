@@ -3,8 +3,11 @@
 A design for the rest of milestone 4: an SMB share as a source, reached
 over Tailscale or WireGuard if need be, with its password in the
 keychain, and an optional helper on the machine that serves the share so
-the slow parts of SMB are done at disk speed. Nothing here is built yet.
-The rules it must keep are in [sync.md](sync.md).
+the slow parts of SMB are done at disk speed. Built so far: the SMB
+source with its password in the keychain (steps 1 and 2 below) and
+`mlhost` level 1 (step 3); "Built" under the helper says where the
+build differs from this design. The rules it must keep are in
+[sync.md](sync.md).
 
 The setup this is designed around: a Mac (or NAS) at home shares a music
 folder over SMB, and other devices reach it over Tailscale, often from
@@ -91,9 +94,13 @@ port, user and domain, and `Folder` is `share/path`. What is new:
   `case_insensitive` is (the default, and right for macOS and Windows
   servers; a Samba server set case-sensitive says false).
 - `openSource` (and `ListFolders`, which opens remotes itself) builds the
-  remote with the password added in memory, as an rclone connection
-  string override (`smb2,pass=<obscured>:share/Music`), so the password
-  is never saved in `rclone.conf`. The password comes from the app (see
+  remote with the password added in memory, so the password is never
+  saved in `rclone.conf`. (Built: the password goes straight into the
+  backend's options, `fs.ConfigMap` with an override layer, not through
+  a connection string, which avoids both side effects below. A logon is
+  first tried by a client that makes one try, since rclone retries a
+  refused logon ten times and a server may lock the account; a refused
+  one makes the core forget the password until the app gives it again.) The password comes from the app (see
   section 2). If the core has none for that remote, the open fails with
   "MediaLayer needs the password for <user> on <host>", which the app
   turns into a prompt. Two side effects to handle:
@@ -493,6 +500,59 @@ than listing, so level 2 needs a journal: a base inventory rebuilt daily
 and a small file of changes since, of which the device reads only the
 part it lacks. Step 0's measurement should time this too.
 
+### Built (level 1)
+
+`cmd/mlhost`, with the scanner in `internal/core/hostscan.go` and the
+device's side in `internal/core/host.go`. Where it differs from the
+design above:
+
+- **The inventory is `inventory.json.gz`, not SQLite.** The device reads
+  it whole into memory anyway, and gzipped JSON is much smaller to
+  fetch over a slow link. It is written to a temporary file and renamed.
+  Rows are media files only; nested `.medialayer` folders and other files
+  are left to level 2.
+- **Art is one file per image,** `art/<2 hex>/<SHA-256>`, not packs: a
+  device fetches only the images it lacks, checks each one's SHA-256
+  against its name, and stores it in its own pack. Images no row uses are
+  removed at each scan.
+- **No watcher.** The helper rescans every 10 minutes (`-interval`),
+  which on its own disk takes about a second for 20,000 files, and reads
+  only files whose size, time, inode or change time moved. At level 1 a
+  stale row costs nothing but speed, since the device matches every row
+  against its own listing, so a watcher's overflow handling isn't worth
+  its code.
+- **No content SHA-256 yet.** It would only help `matchMoves` keep a
+  renamed file's id, and would mean reading the library a second time.
+- **The parser version** is `media.ParserVersion`, and the helper uses the
+  indexer's own `readInfo`, so its rows are what a device would read.
+- Tests (`host_test.go`, and `TestSMBHostHelper` against Samba) cover a
+  helper on another parser version, another format, behind a changed
+  file, or with art whose content isn't what its name says: each indexes
+  exactly as without the helper. Its audio hashes reach the index's
+  `audio_sha256` and never `audio-hashes.json`.
+
+Running it on the server (OpenMediaVault or any Linux with systemd), as
+the user who owns the music (it refuses root unless `-allow-root`),
+once MediaLayer has made the folder's `.medialayer` (it never makes
+that itself, so nothing is written to a folder before it is picked as
+the music folder):
+
+```
+mlhost -folder /srv/dev-disk-by-uuid-…/media/music -once     # first run, by hand
+mlhost -folder /srv/dev-disk-by-uuid-…/media/music -systemd -user dean | sudo tee /etc/systemd/system/mlhost.service
+sudo systemctl enable --now mlhost
+```
+
+It writes only `.medialayer/host/` inside that folder, every write
+through an `os.Root` there and refusing a `.medialayer`, `host` or `art`
+that is a link. Its files and folders are readable by all, so a
+read-only SMB user can fetch them. It runs at low CPU and disk priority,
+writes what it has every 2 minutes (so a restart loses little), and logs
+to the journal (`journalctl -u mlhost`). `.medialayer/host/status.json`
+shows how far it is. A file whose change time alone moved (a chmod, a
+hard-link backup) has its header read again but keeps its audio hash;
+tags that aren't valid UTF-8 are left for the device to read itself.
+
 ### What it could do later
 
 The helper sees changes as they happen, so it could tell the device to
@@ -539,6 +599,6 @@ its own sign-ins) and isn't part of this design.
 2. Measure Dean's library over Tailscale: listing, indexing, stream start.
 3. `mlhost` level 1: tags, art and audio hashes; tests where the helper
    is stopped, behind, on another parser version, or wrong about a file,
-   each ending with the same sync decisions as without it.
+   each ending with the same sync decisions as without it. (Built.)
 4. MediaLayer's own Tailscale node through the forwarder, its state in
    the encrypted config, sign-in from the app.
