@@ -1,37 +1,39 @@
 # Library data: what is kept where, and who writes it
 
 A design note, written 2026-11-28 for Dean's question: should the one
-SQLite index be split into an inventory, a per-installation user
-database and the manager's data? It answers that, says what a host
-helper (mlhost today, NFS hosts later) can build, takes up Dean's
-sync rules (adds come from anywhere, deletes only in the app, losses
-put back), lays out his target setup on it, and lists what is cut on purpose. Nothing here is built. The
-decisions to make are at the end. An independent review of the first
-draft found real gaps (the setup order relied on two things that don't
-exist, cached hashes were trusted where the docs refuse them, the user
-file had no versioning and leaked listening data to readers); this
-version answers them.
+SQLite index be split into an inventory, a personal database and the
+manager's data? It answers that, says what a host helper (mlhost today,
+NFS hosts later) can build, sets out Dean's sync rules (adds come from
+anywhere, deletes only in the app, losses put back), lays out his target
+setup on it, and lists what is cut on purpose. Nothing here is built.
+Dean's decisions are listed at the end. An independent review of the
+first draft found real gaps (the setup order relied on two things that
+don't exist, cached hashes were trusted where the docs refuse them,
+published user data leaked listening history to readers); this version
+answers them.
 
 ## The short answer
 
 Yes, split it, along one rule rather than three topics: **every file
-has exactly one writer**. Then nothing has to be merged on write. The
-sync lock stays, but only as a guard against a second writer started by
-mistake, not as the way writers take turns.
+has one writer at a time**. The library's files (catalog, records,
+shared playlists) are written by whichever writer holds the sync lock;
+an inventory by the one helper or device that builds it; a personal
+database only by its own installation. Then nothing has to be merged
+on write.
 
 | Piece | What it holds | Written by | Where |
 |---|---|---|---|
-| **Catalog** | The library: tracks, file ids, tags, art references, audio hashes, the deletions log | The controller, only | Published to every replica as today's snapshots |
-| **Inventory**, one per place | Facts about the files at one place: path, size, time, content hashes, audio hash, parsed tags and art | Whoever reads that place fastest: its host helper, or the controller for a disk it can read | `.medialayer/host/` on that place |
-| **User data**, one per installation | Playlists, ratings, play counts made on that installation | That installation, only | On the device; owner installations' files also on the replicas |
-| **Records** | Which library, which primary, which replicas, each replica's state, which installation is the controller | The controller | `repo.json` and `member.json` on the replicas, `settings.json` on the device (as now) |
+| **Catalog** | The library: tracks, file ids, tags, art references, audio hashes, the deletions log | Any writer, holding the sync lock | Published to every replica as today's snapshots |
+| **Inventory**, one per place | Facts about the files at one place: path, size, time, content hashes, audio hash, parsed tags and art | Whoever reads that place fastest: its host helper, or a writer for a disk it can read | `.medialayer/host/` on that place |
+| **Personal data**, one per installation | Playlists, ratings, play counts made on that installation | That installation, only | On the device; cloud sync later. Shared playlists are published into the library |
+| **Records** | Which library, which primary, which copies, each copy's state | Any writer, holding the sync lock | `repo.json` and `member.json` on the replicas, `settings.json` on the device (as now) |
 
 Dean's three parts map onto this with two changes:
 
 1. **"Inventory" is two things.** What is physically at a place (a fact
    anyone with fast access can measure) is not what the library is
    (which tracks, under which ids, which playlists point at them).
-   Helpers build the first. Only the controller makes the second, mostly
+   Helpers build the first. Only a writer makes the second, mostly
    from the primary's listing and inventories.
 2. **The manager's part needs no new database.** It already lives
    outside the index, in `repo.json`, each replica's `member.json` and
@@ -80,9 +82,9 @@ The SQLite index as now, without the playlist tables, `location` and
 `.medialayer/snapshots/NNNNNN.sqlite` with its version and version id,
 as sync.md describes; that machinery is unchanged.
 
-- **One writer**, the controller (below). The version id check stays as
-  the guard for the abnormal case: a restored backup, or a second
-  controller by mistake.
+- **Writers take turns** through the sync lock, and the version id
+  check makes each start from the newest catalog (see "Writers and
+  readers").
 - **What changes it:** indexing the primary, the hash pass, a tag edit
   made in the app, an import, a delete made in the app. Not playlists,
   ratings or counts.
@@ -100,13 +102,15 @@ compare and adoption, three changes:
    catalog. A file whose change time moved loses its content hashes, even
    where it keeps its audio hash today (`hostscan.go:277-283`), since an
    in-place retag that keeps size and time looks exactly like that.
-2. **Any place, not only the primary.** Today the device loads an
-   inventory only from the folder it indexes (`host.go`), and mlhost
-   refuses a folder with no `.medialayer` (`hostscan.go`, `ErrNoRepo`).
-   A source being compared or adopted needs one too: "Bring its music
-   in" writes a small `.medialayer/source.json` there (with the user's
-   approval, the only write to the source), which mlhost accepts as
-   leave to run.
+2. **Priming, before a source is attached.** Dean's decision: the
+   helper's job is to prime the inventory on its host before the folder
+   is added to any library, so adding it is a matter of minutes, not of
+   hashing 483 GB over the link. So mlhost runs on any folder and makes
+   `.medialayer/host/` itself (today it refuses a folder with no
+   `.medialayer`, `hostscan.go`, `ErrNoRepo`), and a folder whose
+   `.medialayer` holds only `host/` counts as not yet a library in sync's
+   checks. The device uses the inventory of any source or copy, not only
+   of the folder it indexes (`host.go`).
 3. **A fresh pass on request.** For adoption (below), the device asks
    for a pass that starts after its request and waits for that
    inventory, using the probe mechanism smb.md describes for level 2.
@@ -116,8 +120,8 @@ Who builds which inventory:
 | Place | Built by | How fast |
 |---|---|---|
 | Linux server over SMB (and NFS later) | mlhost on the server | Disk speed; an hour or two for 483 GB, then only changed files |
-| External SSD | The controller, reading it directly | Disk speed, while plugged in |
-| A folder on the Mac | The controller | Disk speed |
+| External SSD | The Mac it is plugged into, reading it directly | Disk speed, while plugged in |
+| A folder on the Mac | That Mac | Disk speed |
 | Proton, Google Drive | Nobody: no host to run on. Their listings give a content hash per file | Listing only |
 
 NFS needs nothing new in the helper, which reads a folder on its own
@@ -144,20 +148,29 @@ cheaper, never decisions that remove or replace a file.**
   read the file; a Proton hash is trusted only for files MediaLayer
   uploaded itself, after the check below.
 
-## User data
+## Personal data
 
-One SQLite file per installation, ATTACHed to the catalog so the app can
-join them (milestone 6's plan). Tables: playlists and their items,
-ratings, and per-track play counts with the last time played.
+Playlists, ratings and play counts leave the library's database for a
+**personal database**: one SQLite file per installation, kept on the
+device and ATTACHed to the catalog so the app can join them (milestone
+6's plan). Decided by Dean, 2026-11-28.
 
-- **One writer.** Each installation writes only its own file.
-- **Ready to merge from day one.** Playlist ids are stable (ULIDs, as
+- **On the device only.** It isn't published to the library's copies.
+  Syncing it to a cloud of the user's choosing (not necessarily the
+  library's) is a later milestone, for writers and readers alike.
+- **Sharing playlists** is for writers only. A writer can share a
+  playlist, which publishes it into the library as
+  `.medialayer/playlists/shared.sqlite`, written under the sync lock like
+  the catalog and copied to every copy. Readers see shared playlists
+  read-only beside their own and can't share theirs, since they can't
+  write the library. Ratings, play counts and last-played times are
+  never published, so Dean's listening never reaches his daughters'
+  copy.
+- **Ready to sync from day one.** Playlist ids are stable (ULIDs, as
   now), each playlist and rating has an `updated_at`, and a removed
-  playlist leaves a tombstone. Then a person's view over several of
-  their installations' files is computed when reading, never written:
-  play counts add up, a rating or a playlist takes its newest version.
-  Without these fields from the first version, merging later would need
-  a format change.
+  playlist leaves a tombstone. Then the later sync can combine one
+  person's installations without a format change: play counts add up,
+  a rating or a playlist takes its newest version.
 - **Naming tracks.** Rows keep the file id, the path and `audio_sha256`.
   A row finds its track by file id; failing that, by path with an equal
   audio hash; failing that, by an audio hash that only one track has;
@@ -166,70 +179,65 @@ ratings, and per-track play counts with the last time played.
   compilation that shares audio with an album isn't confused with it.
   Rows are often saved before the hash pass has reached a file, so the
   indexer fills `audio_sha256` from an inventory where it can.
-- **Versioned like the catalog.** A user file that is published has its
-  own version id and parent, checked before it is replaced on a
-  replica, so an older copy from a restored Mac doesn't overwrite a
-  newer one (the case promote-review.md raises for the index). In
-  sync's write order it goes before the snapshot, and `member.json`
-  records the user files it matches.
-- **Published with a sync, not on every change.** Playlist edits go out
-  with the next sync; play counts at most daily.
-- **Where it lives.**
-  - **Owner installations** (Dean's Mac, his iPhone) publish their own
-    file as `.medialayer/users/<installation id>.sqlite` on the primary,
-    and the controller copies them on to the replicas with each sync.
-    An installation writing only its own file needs no lock. So Dean's
-    playlists are backed up three times and follow him between devices.
-  - **Reader installations** (his daughters') keep theirs on the
-    device. Backing it up to the reader's own cloud comes later
-    (milestone 6 already says so).
-  - **A shared replica gets no listening data.** On a replica marked
-    shared, the controller publishes only the owner's playlists marked
-    shared, as `.medialayer/users/shared.sqlite`. Dean's ratings, counts
-    and last-played times never reach his daughters' copy.
-- **Moving today's playlists.** In this library, the first release with
-  this moves the playlist tables into the controller's user file. For
-  the new Proton library (below), Dean's current playlists are carried
-  by path (`PathPlaylist`, `playlist.go`), then matched by audio hash
-  once the new catalog has hashes.
+- **Moving today's playlists.** The first release with this moves the
+  playlist tables from the index into the device's personal database.
+  For a new library on Proton (below), Dean's current playlists are
+  carried by path (`PathPlaylist`, `playlist.go`), then matched by audio
+  hash once the new catalog has hashes.
 
-## The controller
+Until that later milestone, a playlist made on one Mac isn't on Dean's
+other Mac or his iPhone unless he shares it.
 
-One installation per library is **the controller**: the only one that
-writes music, the catalog, the records, or deletes anything. For Dean,
-the Mac. Every other installation reads the catalog and art from a
-replica, plays, and writes only its own user file (on the primary for
-an owner installation, on the device for a reader).
+## Writers and readers
 
-This narrows today's design, where any device holding the sync lock
-syncs. With one controller these cases go away instead of being
-handled:
+A **writer** is any MediaLayer installation connected to the primary
+with write access: Dean's Mac today, and a second Mac set up the same
+way. A **reader** has no write access (his daughters, or an installation
+opened on a view-only share) and writes only its own personal database.
+Dean decided this on 2026-11-28, in place of the first version's single
+controller.
 
-- two devices' member lists overwriting each other in `repo.json`
-  (sync.md, Known gaps);
-- playlists carried between devices' indexes when the primary moved on
-  (sync.md, "Every copy is a whole library");
-- other devices not following a Make Primary;
-- two devices with unsaved changes at once.
+Several writers are what today's sync already allows, one at a time,
+through the sync lock (sync.md). What keeps them consistent:
 
-`repo.json` names the controller (a field `controller`, the
-installation id). A second installation that finds it isn't the
-controller refuses to write; the sync lock and the version id catch one
-that does anyway.
+- **One at a time.** Every write to the library (indexing and
+  publishing the catalog, imports, restores, deletes, tag edits, shared
+  playlists, the records) happens inside a sync job holding the lock.
+- **Always on the newest catalog.** Each sync checks that the primary's
+  newest snapshot is the one this writer last made or took (the version
+  id check, already built); if another writer published since, it takes
+  that catalog and indexes on top of it before doing anything. With
+  playlists out of the catalog, there is nothing left of today's
+  playlist carrying between devices' indexes.
+- **Decisions come from the files and the shared logs, not from a
+  device's memory.** The deletions log, the content hashes and the
+  versions' "not duplicates" marks are in the catalog, so a delete made
+  on one Mac is applied by a sync from the other.
+- **Work a writer starts and then sees invalidated stops.** A tag edit
+  or delete names the catalog version it was made against; if the
+  catalog moved and the file changed meanwhile, it asks again rather
+  than overwriting the other writer's change.
 
-**Losing the Mac.** Every replica holds the whole library, the catalog
-and Dean's user files, but taking over needs work that doesn't exist
-today (picking a secondary as the music folder is refused, and Choose
-Music Folder browses Google Drive only):
+What multiple writers add to the work list, which one writer would
+have avoided:
 
-- **Take over a library**, from any replica: the new installation
-  reads `repo.json` for the primary and members, asks for each one's
-  sign-in, takes the newest catalog, records itself as the controller
-  (raising the generation, so the old one is refused if it comes back),
-  and takes the previous controller's user file as its own.
-- The offline fix's "this replica was written to" comes from the
-  members in `repo.json`, not only from `settings.json`, so it survives
-  the Mac too.
+- **One member list.** Today each device lists its own secondaries in
+  `repo.json`, so two devices overwrite each other's (sync.md, Known
+  gaps). `repo.json`'s members become the library's list: a writer adds
+  or removes a copy there under the lock, and every writer takes its
+  copies from it, asking for any sign-in it lacks.
+- **Following a Make Primary.** A writer that finds the primary moved
+  (a newer generation in `repo.json`) follows it, instead of stopping
+  with "the primary moved" as now.
+- **A second Mac joining.** Open the library from any copy or the
+  primary: the installation reads `repo.json`, asks for the sign-ins,
+  takes the newest catalog and is a writer. This is also what replaces a
+  lost Mac, so no separate takeover is needed; today picking a secondary
+  is refused and Choose Music Folder browses Google Drive only.
+- The offline fix's "this copy was written to" comes from the members in
+  `repo.json`, not only from `settings.json`, so every writer knows it.
+- Both Macs run automatic syncs; the lock makes the second wait, and
+  each check stays cheap when nothing changed.
 
 ## Sync rules
 
@@ -250,7 +258,7 @@ exact copies, extras removed" rule.
    the primary and pushed to every copy.
 
 So sync is two-way for adds and one-way for everything else: music can
-enter from any place, but only the controller edits or removes it, and
+enter from any place, but only a writer edits or removes it, and
 nothing a listing shows missing is ever taken as a delete.
 
 ### What counts as new (rule 1)
@@ -314,7 +322,7 @@ A file gone from the primary and not in the deletions log:
 
 ### Deleting (rule 5)
 
-The controller records each delete (path, file id, size, content and
+The writer records each delete (path, file id, size, content and
 audio hash, time) in a deletions log in the catalog. It removes the
 file from the primary to the primary's `.medialayer/trash`, then from
 each copy to its trash, 30 days, as now. A copy's file is removed only
@@ -352,17 +360,20 @@ with this audio?", yes by default for versions, asked for other albums.
 ## Dean's target, step by step
 
 Proton is the primary, the SSD and the server are copies, the Mac is the
-controller. Later a Google Drive copy is shared view-only with his
+writer (a second Mac could be another). Later a Google Drive copy is shared view-only with his
 daughters.
 
 ### Getting there
 
-This order needs no Make Primary of 16,800 tracks and none of
-consolidate.md's "filling a copy from another copy" (section 6). It
-does need two pieces that don't exist: **Proton as a new library's
-primary** (Choose Music Folder browses Google Drive only, and a Proton
-primary is reached today only by Make Primary), and **mlhost on a
-folder that isn't yet a library** (the `source.json` above).
+The app builds in no order. **The first source added becomes the
+primary** (Dean's decision), and everything else follows from the sync
+rules, so this is just Dean's plan of steps. It needs no Make Primary
+of 16,800 tracks and none of consolidate.md's "filling a copy from
+another copy" (section 6). It does need two pieces that don't exist:
+**any kind of source as the first one**, Proton included (Choose Music
+Folder browses Google Drive only, and a Proton primary is reached today
+only by Make Primary), and **mlhost priming a folder that isn't yet a
+library** (above).
 
 1. **The offline fix** (consolidate.md, section 5): a replica once
    written to that is missing is offline, never empty.
@@ -377,7 +388,7 @@ folder that isn't yet a library** (the `source.json` above).
    the server's import.
 4. **Inventory both**: mlhost with content hashes on the server, the
    Mac reading the SSD.
-5. **Choose an empty Proton folder** as the music folder.
+5. **Add an empty Proton folder first**, so it is the primary.
 6. **Import the SSD into it.** Every file is "only there", so this is
    the whole upload, resumable under the lease across days. The import
    reads each file on the Mac anyway, so it records each file's parsed
@@ -405,8 +416,8 @@ folder that isn't yet a library** (the `source.json` above).
 "Always in sync" means: after each change, a sync starts on its own and
 reaches every replica that is online; one that is offline catches up
 when it comes back, and its chip says how far behind it is. All of it
-runs while the Mac is awake, since the Mac is the controller and a
-headless one is cut.
+runs while a writer is awake, and a headless writer on the server is
+cut.
 
 - **What starts a sync.** A change made in the app (a tag edit, music
   added), a minute after the last one; the SSD being mounted
@@ -433,7 +444,8 @@ headless one is cut.
 A Google Drive folder becomes a fourth copy, filled from the Mac and
 marked shared, and is shared view-only. Their iOS apps open it as
 readers (milestone 6): the catalog and art from the snapshot, Dean's
-shared playlists read-only, and their own user files on their phones.
+shared playlists read-only, and their own personal databases on their
+phones.
 Nothing they do writes to the folder. A track they rated keeps its
 rating across Dean's retags, since its file id and audio hash stay.
 
@@ -451,17 +463,19 @@ rating across Dean's retags, since its file id and audio hash stay.
 | **A bad or partial primary listing** | Would look like thousands of files gone, and start a mass restore | Stops the sync with an error |
 | **A wrong inventory row** | A wrong tag or art until the file changes | Parser and hash versions; inventories never prove equality or decide removals |
 | **An offline replica** | The SSD, unplugged for a month, has files since deleted and lacks new ones | It applies the deletions log and copies what is new when it returns |
-| **A second controller** (a restored Mac) | Two writers | `controller` in `repo.json`, the sync lock and the version ids of catalog and user files |
+| **Two writers at once** (two Macs, or a restored Mac beside the old one) | Conflicting changes | The sync lock, the version id check, and edits that name the version they were made against |
 | **User files naming tracks that changed** | A playlist item whose track was re-indexed or replaced | The lookup order above |
 | **Installations on different hash or parser versions** | Hashes cleared, rows ignored | sync.md's rule: change these versions only with a release every installation takes, readers included |
-| **The Mac lost** | No controller | Take over from any replica (new work) |
+| **The Mac lost** | No writer | Any new installation with write access opens the library from any copy and is a writer (new work) |
+| **Personal data lost with a device** | Playlists, ratings, counts gone | Shared playlists survive in the library; cloud sync of the personal database is a later milestone |
 
 ## What is cut, on purpose
 
-1. **More than one writer of music, catalog or records.** One
-   controller. Other installations write only their own user file.
+1. **Writers at the same moment.** Any installation with write access
+   is a writer, but only one writes at a time, under the lock.
+   Readers write only their own personal database.
 2. **Two-way sync of edits and deletes.** Adds come from anywhere
-   (rule 1); edits and deletes only from the controller.
+   (rule 1); edits and deletes only from a writer.
 3. **Copies that differ from the primary.** No sparse copies, no copies
    that keep their own tags because the audio matches. What a copy has
    extra comes into the library instead.
@@ -485,8 +499,8 @@ rating across Dean's retags, since its file id and audio hash stay.
 10. **The daily limit for removals and repairs.** Only deletes made in
     the app travel, and repairs lose nothing. The limit stays for files
     changed on the primary outside the app.
-11. **A headless controller on the server.** Syncs happen while the Mac
-    is awake. Worth building only if that becomes the bottleneck.
+11. **A headless writer on the server.** Syncs happen while a Mac is
+    awake. Worth building only if that becomes the bottleneck.
 
 ## What changes, in order
 
@@ -500,44 +514,42 @@ rating across Dean's retags, since its file id and audio hash stay.
    "not duplicates", and the tag-edit rule for tracks sharing audio.
 4. `primary_version` and `location` out of the catalog into a local
    file.
-5. User data out of the catalog: a versioned file per installation with
-   `updated_at` and tombstones, today's playlists moved in, owner
-   installations' files published through the primary, a shared-only
-   file for shared replicas, ATTACHed by the app.
-6. `controller` in `repo.json`, and refusing writes from any other
-   installation.
+5. Personal data out of the catalog: a local file per installation
+   with `updated_at` and tombstones, today's playlists moved in,
+   ATTACHed by the app; shared playlists published by writers.
+6. Several writers: one member list in `repo.json`, following a Make
+   Primary, opening a library from any copy as a writer, edits that
+   name their catalog version.
 7. Content hashes in mlhost's inventory, dropped on any change-time
-   move; inventories of any source (`source.json`); a fresh pass on
-   request; the controller inventorying a local disk the same way.
-8. Proton as a new library's primary.
+   move; priming a folder that isn't a library yet; inventories of any
+   source; a fresh pass on request; a Mac inventorying a local disk the
+   same way.
+8. Any kind of source as the first one, which becomes the primary.
 9. Compare, import (recording headers as it uploads) and adopt with
    fresh hashes (consolidate.md steps 2 to 4), and the Proton check.
 10. Automatic syncs: after a change in the app, on mount, hourly.
-11. Take over a library from any replica.
 
 Ratings and play counts come with the player work that uses them, into
-the user file from the start.
+the personal database from the start. Syncing the personal database to
+a cloud is a later milestone.
 
-## Decisions for Dean
+## Decisions
 
-1. **One controller per library** (the Mac) for music, catalog, records
-   and deletes, with his other installations, the iPhone included,
-   writing only their own user files to the primary so his playlists
-   follow him. I recommend it.
-2. **Decided:** the five sync rules, the four import refinements and
-   the tag-edit rule (see "Sync rules").
-3. **Decided:** redundant byte-identical copies on a copy go to its
-   trash without asking (a fresh whole-file hash equal to the library
-   file's), the one removal made without a person, since no bytes are
-   lost.
-4. **What readers see of his data:** only playlists he marks shared, no
-   ratings or play counts. I recommend it.
-5. **Hashes:** content hashes are for comparing and adopting, made fresh
-   at adoption, never cached proof; Proton is checked by downloading
-   before the old copies follow it. I recommend it; it costs a fresh
-   read of the SSD and a fresh mlhost pass at adoption.
-6. **The order of getting there:** an empty Proton primary filled from
-   the SSD, then the server's extras, rather than consolidate.md's
-   server-first plan. I recommend it, but it needs Proton as a new
-   primary and mlhost on a non-library folder built first, and the
-   better-tagged of the SSD and the server imported first.
+All decided by Dean on 2026-11-28:
+
+1. **Writers:** any MediaLayer installation connected to the primary
+   with write access is a writer, so two Macs can both keep the library
+   up to date; they take turns through the sync lock. Readers have no
+   write access.
+2. **The sync rules**, the four import refinements and the tag-edit
+   rule (see "Sync rules").
+3. **Exact duplicates on a copy** (a fresh whole-file hash equal to a
+   library file's) go to its trash without asking.
+4. **Personal data** (playlists, ratings, play counts) leaves the
+   library's database for a personal database on each device, with cloud
+   sync later. Writers can share playlists into the library; readers
+   can't, and ratings and counts are never shared.
+5. **Priming:** the host helper builds a folder's inventory, hashes
+   included, before the folder is attached to a library; content hashes
+   are made fresh for anything that removes or replaces a file.
+6. **No built-in order:** the first source added becomes the primary.
