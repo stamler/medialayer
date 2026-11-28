@@ -1,5 +1,9 @@
 # Library data: what is kept where, and who writes it
 
+> The rules and scenarios that came out of this note are in
+> [library-spec.md](library-spec.md). Where the two differ, the spec is
+> correct. This note keeps the reasoning.
+
 A design note, written 2026-11-28 for Dean's question: should the one
 SQLite index be split into an inventory, a personal database and the
 manager's data? It answers that, says what a host helper (mlhost today,
