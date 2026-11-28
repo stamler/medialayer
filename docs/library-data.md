@@ -281,7 +281,8 @@ for a disk):
 | The file on the copy | What happens |
 |---|---|
 | Content hash already in the library, at any path | Not imported: the library has these bytes. If the copy lacks the file at the library's path, it is moved there instead of copied again; otherwise this redundant copy goes to that copy's trash, the one removal made without a person, since no bytes are lost |
-| At a library path, with other content (a stale copy, a retag made on the secondary, damage) | Not imported. The library's file is put back, the secondary's version to its trash for 30 days |
+| At a library path, with the library file's content from before its last change | A stale copy of a file changed on the primary (a retag, say): replaced with the primary's, old version to trash. This is how a retag reaches the secondaries |
+| At a library path, with any other content (a retag made on the secondary, damage) | Not imported. The library's file is put back, the secondary's version to its trash for 30 days, and the sync reports it |
 | At a new path, same audio hash as a library track, other content (a retagged copy saved elsewhere) | Imported as a **second version** of that track, at its own path |
 | At a new path, fails to decode (FLAC, ALAC) | Not imported: damaged, and left out of the library. A damaged MP3 or AAC can't be told, and comes in |
 | At a new path, anything else | Imported at its own path |
@@ -305,9 +306,31 @@ server is undone (kept 30 days in its trash), since a change sticks only
 on the primary; and anything that writes music at new paths in a
 secondary's folder (a downloader on the server, say) feeds the library.
 
-For restoring the primary and recognising moves and duplicates, the
-catalog keeps each file's content hash as the primary lists it (SHA-1
-on Proton, MD5 on Drive, or the inventory's on SMB).
+The catalog keeps each file's whole-file hash as the primary lists it
+(SHA-1 on Proton, MD5 on Drive, or the inventory's on SMB), and its hash
+from before its last change. The current hash restores the primary and
+recognises moves and duplicates; the previous one recognises a
+secondary's stale copy, even where the file was also moved, so it is
+moved and replaced rather than copied again.
+
+**Same audio, different tags.** Two files with one audio hash and
+different whole-file hashes are two library files when the primary has
+both, and the primary's catalog says which is which. A retag of one
+replaces only copies holding that file's previous whole-file hash, so
+the other version is never touched. The audio hash only groups versions
+for "pick a keeper" and for the tag-edit rule.
+
+### Adding and removing on the primary
+
+- **A file that exists on the primary is in the library.** However it
+  got there (MediaLayer, Proton's app, a shell on the server when the
+  server is the primary), the next sync indexes it and copies it to
+  every secondary. Nothing else is needed to add music.
+- **A file removed from the primary outside MediaLayer is not removed
+  anywhere else.** The next sync finds it on a secondary and copies it
+  back to the primary (rule 4, below).
+- **The only way to delete is from within MediaLayer**, which removes it
+  from the primary and then from every secondary (rule 5, below).
 
 ### Restoring the primary (rule 4)
 
@@ -520,7 +543,7 @@ rating across Dean's retags, since its file id and audio hash stay.
 1. The offline fix, with "written to" also taken from `repo.json`'s
    members.
 2. The sync rules: the deletions log with its apply rule; each file's
-   content hash in the catalog; moves matched by
+   whole-file hash, and the one before its last change, in the catalog; moves matched by
    hash; restoring the primary; `missing` rows kept; a bad primary
    listing stopping the sync.
 3. Continuous import from every copy, with versions, "pick a keeper",
