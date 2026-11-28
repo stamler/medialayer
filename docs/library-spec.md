@@ -434,7 +434,7 @@ new snapshot, with a new id. MediaLayer copies each snapshot to
 
 The catalog does not hold playlists, ratings, play counts, or facts
 about one device. The file hash is known after the hash pass reads the
-file. Until then, MediaLayer uses the provider hash, or reads the file
+file. Until then, MediaLayer uses the SHA-1 or MD5 from the listing, or reads the file
 when it must decide (I7).
 
 Shared playlists are in a separate file,
