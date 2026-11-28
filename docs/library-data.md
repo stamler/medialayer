@@ -190,9 +190,9 @@ other Mac or his iPhone unless he shares it.
 
 ## Writers and readers
 
-A **writer** is any MediaLayer installation connected to the primary
-with write access: Dean's Mac today, and a second Mac set up the same
-way. A **reader** has no write access (his daughters, or an installation
+A **writer** is any MediaLayer installation, on any device, connected
+to the primary with write access: Dean's Mac today, and later a second
+Mac or an iPhone set up the same way. A **reader** has no write access (his daughters, or an installation
 opened on a view-only share) and writes only its own personal database.
 Dean decided this on 2026-11-28, in place of the first version's single
 controller.
@@ -243,7 +243,18 @@ have avoided:
 
 Dean set these rules on 2026-11-28, after the first version of this
 note. They replace its "held for review" design and its "replicas stay
-exact copies, extras removed" rule.
+exact copies, extras removed" rule. They come down to one:
+
+> **Only the primary is the library. Each sync makes every secondary
+> match it, path by path: a path the library has gets the library's
+> file, and a path it doesn't have is brought into the library, unless
+> its bytes are already there.**
+
+A writer's change sticks only when it is made on the primary. Anything
+done to a secondary directly, by MediaLayer or anything else, is undone
+the next time an instance that has it as a secondary syncs, except a
+file at a new path, which joins the library. The five rules, as Dean
+put them:
 
 1. **Any file a source has that the library doesn't is copied to the
    primary, then to every other copy.** Every sync, not only when the
@@ -263,17 +274,17 @@ nothing a listing shows missing is ever taken as a delete.
 
 ### What counts as new (rule 1)
 
-A file on a copy that isn't the library's file at that path is
-classified by its hashes (from that place's inventory, or a fresh read
+A file on a secondary that isn't the library's file at that path is
+classified by its path, then its hashes (from that place's inventory, or a fresh read
 for a disk):
 
 | The file on the copy | What happens |
 |---|---|
 | Content hash already in the library, at any path | Not imported: the library has these bytes. If the copy lacks the file at the library's path, it is moved there instead of copied again; otherwise this redundant copy goes to that copy's trash, the one removal made without a person, since no bytes are lost |
-| At a library path, with the content the catalog recorded for that path before its last change | A stale copy of a file changed on the primary: replaced, old version to trash, as today |
-| Same audio hash as a library track, different content (a retag) | Imported as a **second version** of that track, at its own path (with a suffix if the path is taken). At a library path, the primary's version is then put back there |
-| Fails to decode (FLAC, ALAC) | Not imported: damaged. Repaired from the primary. A damaged MP3 or AAC can't be told, and comes in as a version |
-| Anything else | Imported at its own path, with a suffix if the path is taken |
+| At a library path, with other content (a stale copy, a retag made on the secondary, damage) | Not imported. The library's file is put back, the secondary's version to its trash for 30 days |
+| At a new path, same audio hash as a library track, other content (a retagged copy saved elsewhere) | Imported as a **second version** of that track, at its own path |
+| At a new path, fails to decode (FLAC, ALAC) | Not imported: damaged, and left out of the library. A damaged MP3 or AAC can't be told, and comes in |
+| At a new path, anything else | Imported at its own path |
 
 A hash that leads to removing or replacing a file on a copy must be
 current: read now on a disk, or on the server an inventory row whose
@@ -290,13 +301,13 @@ app shows the counts (files, size, versions) and asks once; after that,
 imports run on their own and the chip says what came in.
 
 Two consequences are accepted on purpose: a retag made directly on the
-server comes back into the library as a second version rather than
-being lost; and anything that writes music into a copy's folder (a
-downloader on the server, say) feeds the library.
+server is undone (kept 30 days in its trash), since a change sticks only
+on the primary; and anything that writes music at new paths in a
+secondary's folder (a downloader on the server, say) feeds the library.
 
-To classify a file at a library path, the catalog keeps, for each file,
-its content hash as the primary lists it (SHA-1 on Proton, MD5 on
-Drive, or the inventory's on SMB) and the one before its last change.
+For restoring the primary and recognising moves and duplicates, the
+catalog keeps each file's content hash as the primary lists it (SHA-1
+on Proton, MD5 on Drive, or the inventory's on SMB).
 
 ### Restoring the primary (rule 4)
 
@@ -350,9 +361,9 @@ with this audio?", yes by default for versions, asked for other albums.
 - The trash on every copy, 30 days.
 - The daily limit, only for replacements caused by files changed on the
   primary outside MediaLayer: the guard against a primary whose files
-  are being rewritten wholesale (corruption, ransomware). Repairs of a
-  copy lose nothing now (an edited copy comes in as a version), so they
-  don't count.
+  are being rewritten wholesale (corruption, ransomware). Putting a
+  secondary back to match the primary doesn't count: that is the rule
+  working, and its trash keeps what it replaced.
 - Every copy holds every library file at the library's path, byte for
   byte, once its sync ends, so any copy can be promoted. A file that a
   copy contributed is in the library by then, not an extra.
@@ -381,11 +392,13 @@ library** (above).
    Proton's per-file overhead (about 14 requests per small file) and its
    known idle upload line make the home upload speed only an upper
    bound. At 100 Mbit/s, 483 GB is about 11 hours; at 20, two days.
-3. **Choose which source goes first.** For a track on both with other
-   tags, the first source's file takes the library path and the other's
-   comes in as a second version to pick a keeper from. Import the
-   better-tagged one first, and expect the version count shown before
-   the server's import.
+3. **Choose which source goes first.** For a track at the same path on
+   both with other tags, the first source's file is the library's, and
+   the other's is replaced by it when that source becomes a secondary
+   (kept 30 days in its trash). Only files at paths the library lacks
+   come in, as files or versions. So import the better-tagged one
+   first; the count shown before the server's first sync says how many
+   of its files would be replaced.
 4. **Inventory both**: mlhost with content hashes on the server, the
    Mac reading the SSD.
 5. **Add an empty Proton folder first**, so it is the primary.
@@ -406,7 +419,7 @@ library** (above).
    match, so nothing is copied.
 9. **Add the server as a copy**, after a fresh mlhost pass requested
    for it. Files equal by fresh hash are kept where they are. Rule 1
-   imports what the library lacks, as files or versions: only those
+   imports what is at paths the library lacks: only those
    cross the 1.5 MB/s link (about 5.4 GB an hour). Rule 2 fills the
    server with the rest, uploaded into the server's site, its fast
    direction.
@@ -455,7 +468,7 @@ rating across Dean's retags, since its file id and audio hash stay.
 |---|---|---|
 | **A missing replica read as empty** (the unplugged SSD) | A full copy to the wrong disk, or an error each sync | The offline fix, first of all steps |
 | **A bad import to Proton** | The new primary is missing or damaging files while the old copies are adopted | The download check before the SSD and the server take replacements |
-| **A file changed on a copy outside MediaLayer** | The primary's version put back | The edited file comes in as a second version (rule 1), so nothing is lost |
+| **A file changed on a secondary outside MediaLayer** | The primary's version put back | The secondary's version kept in its trash for 30 days |
 | **Duplicates pile up** | Every retagged copy becomes a version | Counts shown before a source's first import; versions grouped with "pick a keeper" |
 | **Junk or damage written into a copy** | It feeds the library | Damaged lossless files are refused; anything else is deleted in the app once, everywhere |
 | **A file changed on the primary outside MediaLayer** | Copied out as a real change | Old versions in each replica's trash for 30 days; a wholesale rewrite pauses at the daily limit |
@@ -507,7 +520,7 @@ rating across Dean's retags, since its file id and audio hash stay.
 1. The offline fix, with "written to" also taken from `repo.json`'s
    members.
 2. The sync rules: the deletions log with its apply rule; each file's
-   content hash, and the one before, in the catalog; moves matched by
+   content hash in the catalog; moves matched by
    hash; restoring the primary; `missing` rows kept; a bad primary
    listing stopping the sync.
 3. Continuous import from every copy, with versions, "pick a keeper",
@@ -542,7 +555,9 @@ All decided by Dean on 2026-11-28:
    up to date; they take turns through the sync lock. Readers have no
    write access.
 2. **The sync rules**, the four import refinements and the tag-edit
-   rule (see "Sync rules").
+   rule, reduced to one: only the primary is the library, and each sync
+   makes every secondary match it path by path, with files at new paths
+   brought in (see "Sync rules").
 3. **Exact duplicates on a copy** (a fresh whole-file hash equal to a
    library file's) go to its trash without asking.
 4. **Personal data** (playlists, ratings, play counts) leaves the
