@@ -4,8 +4,8 @@ A design note, written 2026-11-28 for Dean's question: should the one
 SQLite index be split into an inventory, a per-installation user
 database and the manager's data? It answers that, says what a host
 helper (mlhost today, NFS hosts later) can build, takes up Dean's
-follow-up (adds automatic, deletes manual), lays out his target setup
-on it, and lists what is cut on purpose. Nothing here is built. The
+sync rules (adds come from anywhere, deletes only in the app, losses
+put back), lays out his target setup on it, and lists what is cut on purpose. Nothing here is built. The
 decisions to make are at the end. An independent review of the first
 draft found real gaps (the setup order relied on two things that don't
 exist, cached hashes were trusted where the docs refuse them, the user
@@ -231,94 +231,123 @@ Music Folder browses Google Drive only):
   members in `repo.json`, not only from `settings.json`, so it survives
   the Mac too.
 
-## Replicas stay copies of the primary
+## Sync rules
 
-Dean's idea: replicate everywhere, delete nothing, skip a copy when the
-file already exists by audio hash. As a one-time import that is right.
-As the steady state it breaks what makes a replica a backup you can
-switch to.
+Dean set these rules on 2026-11-28, after the first version of this
+note. They replace its "held for review" design and its "replicas stay
+exact copies, extras removed" rule.
 
-- **Same audio is not the same file.** Two files with one audio hash
-  can differ in tags and art. A replica that kept its own version
-  "because the audio matches" is not a copy: promoting it changes the
-  library's tags.
-- **Deleting nothing, ever,** leaves each replica with files the
-  library doesn't have and no record of why, so every Make Primary would
-  need a review of its extras. The next section keeps the useful part
-  (nothing leaves a replica unless a person chose it) with a record of
-  what is held.
-- **What is kept instead.** Every replica holds exactly the primary's
-  files, byte for byte, plus `.medialayer`, apart from items held for
-  review, which `member.json` lists (next section). Hashes make import and adoption cheaper, never
-  looser: an import lists a file whose audio is already in the library
-  instead of copying it, and adoption keeps a file proven equal by fresh
-  hashes instead of copying it again, and a file moved on the primary is
-  moved on the replica rather than copied again (a requirement of the
-  next section, and a large saving on the server).
+1. **Any file a source has that the library doesn't is copied to the
+   primary, then to every other copy.** Every sync, not only when the
+   source is added, and both versions are kept.
+2. **Any file the library has that a source lacks is copied to it.**
+3. **A file deleted from a copy outside MediaLayer is copied back to it
+   from the primary.**
+4. **A file deleted from the primary outside MediaLayer is copied back
+   to the primary** from a copy that still has it and whose content
+   matches the catalog.
+5. **The only way to delete is in MediaLayer.** The delete is made on
+   the primary and pushed to every copy.
 
-## Adds are automatic, deletes are manual
+So sync is two-way for adds and one-way for everything else: music can
+enter from any place, but only the controller edits or removes it, and
+nothing a listing shows missing is ever taken as a delete.
 
-Dean's follow-up: sync only ever adds on its own, and every delete is
-manual. I'd adopt it, with "manual" meaning **a person chose it in the
-app**, not "a listing showed it gone". It is not a pure
-simplification: replicas become an exact copy plus a listed set of held
-files, and a few rules are needed to keep that safe.
+### What counts as new (rule 1)
 
-| Change found | Today | With this rule |
-|---|---|---|
-| A file new on the primary | Copied | Copied |
-| A file edited in MediaLayer (a tag edit) | Replaced, old version to trash, not counted | Replaced, old version to trash, not counted |
-| A file deleted in MediaLayer | Removed to trash on each replica, counted | Removed to trash on each replica, not counted: the delete in the app was the manual act |
-| A file moved or renamed on the primary outside MediaLayer | The new path copied, the old one removed | Matched by content or audio hash and moved on the replica, not copied again |
-| A file gone from the primary, not deleted in MediaLayer (Proton's app, a shell, a failed disk) | Removed to trash, counted, pauses past the limit | **Held**: removed nowhere, listed as "Gone from the primary" |
-| A file changed outside MediaLayer, on the primary or on a replica | Replaced from the primary, old to trash, counted unless only retagged | The same, as today |
-| A file only on a replica | Removed to trash, counted | **Held**, listed as an extra on that replica |
+A file on a copy that isn't the library's file at that path is
+classified by its hashes (from that place's inventory, or a fresh read
+for a disk):
 
-So the daily limit stays, for replacements not made in the app (the
-guard against files being rewritten wholesale, by corruption or
-ransomware), and removals no longer count against it. One thing to say
-plainly: a file edited directly on a replica (a retag in a shell on the
-server) is put back from the primary, its edit kept only in that
-replica's trash for 30 days, as today.
+| The file on the copy | What happens |
+|---|---|
+| Content hash already in the library, at any path | Not imported: the library has these bytes. If the copy lacks the file at the library's path, it is moved there instead of copied again; otherwise this redundant copy goes to that copy's trash, the one removal made without a person, since no bytes are lost |
+| At a library path, with the content the catalog recorded for that path before its last change | A stale copy of a file changed on the primary: replaced, old version to trash, as today |
+| Same audio hash as a library track, different content (a retag) | Imported as a **second version** of that track, at its own path (with a suffix if the path is taken). At a library path, the primary's version is then put back there |
+| Fails to decode (FLAC, ALAC) | Not imported: damaged. Repaired from the primary. A damaged MP3 or AAC can't be told, and comes in as a version |
+| Anything else | Imported at its own path, with a suffix if the path is taken |
 
-**The deletions log.** The controller records each delete it makes
-(path, file id, size, content and audio hash, time) in a log in the
-catalog. A replica's file is removed only when the log names it, the
-primary's current listing lacks that path, and the replica's file is
-the logged version (size and hash), so a delete followed by a new file
-at the same path never removes the new one from a disk that returns
-later. The log is never pruned by age; each replica's `member.json`
-records how far into it it has applied. An in-app delete is also
-MediaLayer's first removal of music from the primary: it goes to the
-primary's `.medialayer/trash`, under the merge's per-file lease rules
-(consolidate.md).
+A hash that leads to removing or replacing a file on a copy must be
+current: read now on a disk, or on the server an inventory row whose
+content hashes were made after the file's present change time (the
+helper drops them otherwise). A cached hash may only keep a file from
+being imported. Whatever is removed or replaced goes to trash.
 
-**Held files.**
-- Each replica's `member.json` lists its held files with their paths
-  and hashes, not just a count, so Make Primary and readers can tell
-  them from library files. `synced` then means "matches this snapshot,
-  plus these held files".
-- The catalog keeps a row for a file gone from the primary, marked
-  `missing` (the column exists) with its file id, and publishes as
-  usual; playlists and ratings still point at it.
-- One review list, "Gone from the primary", offers Delete everywhere
-  (which writes the log) and Restore. Restore copies the file back to
-  the primary under its old file id, from the replica whose copy
-  matches the catalog row's hash, preferring the SSD (a mass restore
-  from the server is about 90 hours at 1.5 MB/s), with a Restore all.
-- Make Primary to a replica with held files is refused until they are
-  resolved, so files removed outside the app don't come back under new
-  ids.
-- An adoption's approval writes log entries for the files it removes,
-  so it is the manual act for them.
-- Held files take space on every replica, so the chip shows how many
-  and how large.
+Versions are shown together, as one track with a choice "pick a
+keeper"; picking deletes the others, in MediaLayer (rule 5). The same
+audio on an album and a compilation is a legitimate pair, so versions
+are never merged automatically, and a pair can be marked "not
+duplicates" to stop the app asking. Before a source's first import, the
+app shows the counts (files, size, versions) and asks once; after that,
+imports run on their own and the chip says what came in.
 
-**A bad listing is not a mass loss.** A Proton listing that fails, ends
-early or names another folder must stop the sync with an error, not
-produce 16,800 held items. The offline fix covers the primary too: a
-primary missing its `.medialayer`, or listing far fewer files than the
-catalog holds, is an error to show, not a change to apply.
+Two consequences are accepted on purpose: a retag made directly on the
+server comes back into the library as a second version rather than
+being lost; and anything that writes music into a copy's folder (a
+downloader on the server, say) feeds the library.
+
+To classify a file at a library path, the catalog keeps, for each file,
+its content hash as the primary lists it (SHA-1 on Proton, MD5 on
+Drive, or the inventory's on SMB) and the one before its last change.
+
+### Restoring the primary (rule 4)
+
+A file gone from the primary and not in the deletions log:
+
+- **Moves first.** A file whose content hash appears at a new path in
+  the primary's listing was moved or renamed, not lost: the catalog
+  keeps its file id, and each copy moves its own file rather than
+  copying again. Without this, a folder reorganised in Proton's app
+  would come back at its old path as well.
+- **Then restore**, from a copy whose file's content hash equals the
+  catalog's for that file, preferring the SSD (a mass restore from the
+  server is about 90 hours at 1.5 MB/s), under the old file id, so
+  playlists and ratings stay. It is a write of music to the primary, so
+  it follows the merge's rules (lease per file, free path checked just
+  before, temporary name; consolidate.md).
+- **No good copy anywhere:** the catalog keeps the row, marked
+  `missing` (the column exists), and the track shows as lost.
+- **A bad listing is not a mass loss.** A Proton listing that fails,
+  ends early, or lists far fewer files than the catalog must stop the
+  sync with an error, not start a 483 GB restore. The offline fix covers
+  the primary too.
+
+### Deleting (rule 5)
+
+The controller records each delete (path, file id, size, content and
+audio hash, time) in a deletions log in the catalog. It removes the
+file from the primary to the primary's `.medialayer/trash`, then from
+each copy to its trash, 30 days, as now. A copy's file is removed only
+when the log names it, the primary's current listing lacks that path,
+and the copy's file is the logged version, so a delete followed by a new
+file at the same path never removes the new one from a disk that
+returns later. The log is never pruned by age; each copy's
+`member.json` records how far into it it has applied. Removals no longer
+count toward the daily limit.
+
+### Tag edits
+
+A tag edit made in MediaLayer is written to the primary and reaches
+every copy by path, as any change does. Other library tracks with the
+same audio hash (versions, or the same recording on a compilation) get
+a field only if it had the same value there as on the edited track
+before the edit. So a fixed title or artist reaches every version and
+the compilation, while album, track number, disc, album artist and
+cover, which already differed, stay. When that would change another
+track, the app asks: "Also apply the title change to 2 other tracks
+with this audio?", yes by default for versions, asked for other albums.
+
+### What stays from today
+
+- The trash on every copy, 30 days.
+- The daily limit, only for replacements caused by files changed on the
+  primary outside MediaLayer: the guard against a primary whose files
+  are being rewritten wholesale (corruption, ransomware). Repairs of a
+  copy lose nothing now (an edited copy comes in as a version), so they
+  don't count.
+- Every copy holds every library file at the library's path, byte for
+  byte, once its sync ends, so any copy can be promoted. A file that a
+  copy contributed is in the library by then, not an extra.
 
 ## Dean's target, step by step
 
@@ -341,9 +370,11 @@ folder that isn't yet a library** (the `source.json` above).
    Proton's per-file overhead (about 14 requests per small file) and its
    known idle upload line make the home upload speed only an upper
    bound. At 100 Mbit/s, 483 GB is about 11 hours; at 20, two days.
-3. **Choose which source's tags win.** For a track on both with other
-   tags, the first source imported wins unless the review picks the
-   other. Import the better-tagged one first.
+3. **Choose which source goes first.** For a track on both with other
+   tags, the first source's file takes the library path and the other's
+   comes in as a second version to pick a keeper from. Import the
+   better-tagged one first, and expect the version count shown before
+   the server's import.
 4. **Inventory both**: mlhost with content hashes on the server, the
    Mac reading the SSD.
 5. **Choose an empty Proton folder** as the music folder.
@@ -362,14 +393,12 @@ folder that isn't yet a library** (the `source.json` above).
 8. **Adopt the SSD as a copy.** Every file is checked by a fresh read on
    the SSD against Proton's SHA-1 of the file MediaLayer uploaded; they
    match, so nothing is copied.
-9. **Import from the server** only what the SSD lacked. The compare is a
-   join of the two inventories, and only the server's extra files cross
-   the 1.5 MB/s link (about 5.4 GB an hour).
-10. **Adopt the server as a copy**, after a fresh mlhost pass requested
-    for it. Files equal by fresh hash are kept. Files that differ (a
-    retagged copy, say) are replaced from the Mac's side, an upload
-    into the server's site, its fast direction, with the server's
-    versions in its trash, after one approval of the list.
+9. **Add the server as a copy**, after a fresh mlhost pass requested
+   for it. Files equal by fresh hash are kept where they are. Rule 1
+   imports what the library lacks, as files or versions: only those
+   cross the 1.5 MB/s link (about 5.4 GB an hour). Rule 2 fills the
+   server with the rest, uploaded into the server's site, its fast
+   direction.
 
 ### Keeping three copies in step
 
@@ -391,8 +420,10 @@ headless one is cut.
   from Proton to be copied on.
 - **Tag edits** (milestone 8) are written to a local copy, uploaded to
   Proton and copied to the others from that copy.
-- **Deletes** as above: made in the app, they travel; anything else is
-  held.
+- **Deletes** only in the app (rule 5). Anything that vanishes
+  elsewhere is put back (rules 3 and 4).
+- **Music that appears on the SSD or the server** comes into the
+  library on the next sync that sees it (rule 1).
 - With a Proton primary, the device's store of audio hashes, keyed today
   by Drive's MD5 (sync.md), needs keying by SHA-1 too, or every pause
   review downloads files again.
@@ -412,10 +443,12 @@ rating across Dean's retags, since its file id and audio hash stay.
 |---|---|---|
 | **A missing replica read as empty** (the unplugged SSD) | A full copy to the wrong disk, or an error each sync | The offline fix, first of all steps |
 | **A bad import to Proton** | The new primary is missing or damaging files while the old copies are adopted | The download check before the SSD and the server take replacements |
-| **A file changed on a replica outside MediaLayer** | Put back from the primary at the next sync | Its old version goes to trash first |
+| **A file changed on a copy outside MediaLayer** | The primary's version put back | The edited file comes in as a second version (rule 1), so nothing is lost |
+| **Duplicates pile up** | Every retagged copy becomes a version | Counts shown before a source's first import; versions grouped with "pick a keeper" |
+| **Junk or damage written into a copy** | It feeds the library | Damaged lossless files are refused; anything else is deleted in the app once, everywhere |
 | **A file changed on the primary outside MediaLayer** | Copied out as a real change | Old versions in each replica's trash for 30 days; a wholesale rewrite pauses at the daily limit |
-| **A file lost from the primary** | Nothing is removed anywhere | Held, and restorable from a copy |
-| **A bad or partial primary listing** | Would look like thousands of files gone | Stops the sync with an error |
+| **A file lost from the primary** | Nothing is removed anywhere | Restored from a copy whose content matches the catalog, after moves are matched (rule 4) |
+| **A bad or partial primary listing** | Would look like thousands of files gone, and start a mass restore | Stops the sync with an error |
 | **A wrong inventory row** | A wrong tag or art until the file changes | Parser and hash versions; inventories never prove equality or decide removals |
 | **An offline replica** | The SSD, unplugged for a month, has files since deleted and lacks new ones | It applies the deletions log and copies what is new when it returns |
 | **A second controller** (a restored Mac) | Two writers | `controller` in `repo.json`, the sync lock and the version ids of catalog and user files |
@@ -427,11 +460,11 @@ rating across Dean's retags, since its file id and audio hash stay.
 
 1. **More than one writer of music, catalog or records.** One
    controller. Other installations write only their own user file.
-2. **Two-way sync of music.** Never. Music enters by the controller,
-   from a local folder or by importing a source.
-3. **Replicas that differ from the primary**, apart from held items. No
-   sparse copies, no copies that keep their own tags because the audio
-   matches, no "delete nothing" as the steady state.
+2. **Two-way sync of edits and deletes.** Adds come from anywhere
+   (rule 1); edits and deletes only from the controller.
+3. **Copies that differ from the primary.** No sparse copies, no copies
+   that keep their own tags because the audio matches. What a copy has
+   extra comes into the library instead.
 4. **A helper that decides.** Its inventory never stands in for a
    listing when removing or replacing, never proves equality from a
    cached hash, and it never writes music. smb.md's level 2 stays
@@ -449,9 +482,9 @@ rating across Dean's retags, since its file id and audio hash stay.
    path; nothing else.
 9. **Filling a copy from another copy** (consolidate.md section 6). The
    order above doesn't need it.
-10. **The daily limit for removals.** Only deletes made in the app
-    travel; anything else gone is held. The limit stays for unplanned
-    replacements.
+10. **The daily limit for removals and repairs.** Only deletes made in
+    the app travel, and repairs lose nothing. The limit stays for files
+    changed on the primary outside the app.
 11. **A headless controller on the server.** Syncs happen while the Mac
     is awake. Worth building only if that becomes the bottleneck.
 
@@ -459,26 +492,28 @@ rating across Dean's retags, since its file id and audio hash stay.
 
 1. The offline fix, with "written to" also taken from `repo.json`'s
    members.
-2. The deletions log with its apply rule, held files in `member.json`,
-   `missing` rows kept in the catalog, moves matched by hash, the
-   review list with Restore, and a bad primary listing stopping the
-   sync.
-3. `primary_version` and `location` out of the catalog into a local
+2. The sync rules: the deletions log with its apply rule; each file's
+   content hash, and the one before, in the catalog; moves matched by
+   hash; restoring the primary; `missing` rows kept; a bad primary
+   listing stopping the sync.
+3. Continuous import from every copy, with versions, "pick a keeper",
+   "not duplicates", and the tag-edit rule for tracks sharing audio.
+4. `primary_version` and `location` out of the catalog into a local
    file.
-4. User data out of the catalog: a versioned file per installation with
+5. User data out of the catalog: a versioned file per installation with
    `updated_at` and tombstones, today's playlists moved in, owner
    installations' files published through the primary, a shared-only
    file for shared replicas, ATTACHed by the app.
-5. `controller` in `repo.json`, and refusing writes from any other
+6. `controller` in `repo.json`, and refusing writes from any other
    installation.
-6. Content hashes in mlhost's inventory, dropped on any change-time
+7. Content hashes in mlhost's inventory, dropped on any change-time
    move; inventories of any source (`source.json`); a fresh pass on
    request; the controller inventorying a local disk the same way.
-7. Proton as a new library's primary.
-8. Compare, import (recording headers as it uploads) and adopt with
+8. Proton as a new library's primary.
+9. Compare, import (recording headers as it uploads) and adopt with
    fresh hashes (consolidate.md steps 2 to 4), and the Proton check.
-9. Automatic syncs: after a change in the app, on mount, hourly.
-10. Take over a library from any replica.
+10. Automatic syncs: after a change in the app, on mount, hourly.
+11. Take over a library from any replica.
 
 Ratings and play counts come with the player work that uses them, into
 the user file from the start.
@@ -489,15 +524,12 @@ the user file from the start.
    and deletes, with his other installations, the iPhone included,
    writing only their own user files to the primary so his playlists
    follow him. I recommend it.
-2. **Replicas are exact copies**, apart from items held for review;
-   "delete nothing" is the rule for imports only. I recommend it.
-3. **Adds automatic, deletes manual:** only a delete made in the app
-   reaches the replicas; a file gone any other way is held on every
-   replica and can be restored. The cost: replicas become an exact copy
-   plus a listed held set, Make Primary waits until that is reviewed,
-   edits made directly on a replica are still put back from the
-   primary, and the daily limit stays for replacements not made in the
-   app. I recommend it.
+2. **Decided:** the five sync rules, the four import refinements and
+   the tag-edit rule (see "Sync rules").
+3. **Redundant byte-identical copies on a copy** go to its trash
+   without asking, the one removal made without a person, since no
+   bytes are lost. I recommend it; the alternative is listing them for
+   a manual delete.
 4. **What readers see of his data:** only playlists he marks shared, no
    ratings or play counts. I recommend it.
 5. **Hashes:** content hashes are for comparing and adopting, made fresh
