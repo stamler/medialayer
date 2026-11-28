@@ -171,14 +171,33 @@ device and ATTACHed to the catalog so the app can join them (milestone
   playlist leaves a tombstone. Then the later sync can combine one
   person's installations without a format change: play counts add up,
   a rating or a playlist takes its newest version.
-- **Naming tracks.** Rows keep the file id, the path and `audio_sha256`.
-  A row finds its track by file id; failing that, by path with an equal
-  audio hash; failing that, by an audio hash that only one track has;
-  by path alone only when the row never had a hash. So a different
-  recording put at the same path is not taken for the old one, and a
-  compilation that shares audio with an album isn't confused with it.
-  Rows are often saved before the hash pass has reached a file, so the
-  indexer fills `audio_sha256` from an inventory where it can.
+- **Naming tracks.** Every reference to a track (a playlist item, a
+  rating, a play count, a shared playlist's item) keeps four things:
+  the file id, the whole-file hash, the audio hash and the path (Dean,
+  2026-11-28). A reference finds its track by, in order:
+  1. **the file id**, which survives retags and moves within this
+     catalog;
+  2. **the exact whole-file hash**, which survives a catalog that was
+     rebuilt or a file brought back under a new id;
+  3. **the audio hash, when one library track has it**, which survives a
+     retag on top of either;
+  4. **the audio hash shared by several tracks** (versions, or an album
+     and a compilation): the one at the reference's path if there is
+     one, otherwise the app asks which;
+  5. **the path alone**, only for a reference saved before its track had
+     any hash.
+
+  A reference that matches by anything but step 1 or 2 is shown as
+  found by its audio, so a wrong guess is visible.
+- **Keeping references current.** A retag changes the whole-file hash,
+  so stored hashes go stale. Whenever the app opens a new catalog
+  version, it refreshes each reference found by file id with that
+  file's current hashes and path. A reference the catalog's file id no
+  longer knows is looked up by the catalog's previous whole-file hash
+  (kept for every file) before the audio hash, so a retag the reference
+  missed is followed exactly. Rows are often saved before the hash pass
+  reaches a file, so the indexer fills `audio_sha256` from an inventory
+  where it can, and the next refresh adds it to the reference.
 - **Moving today's playlists.** The first release with this moves the
   playlist tables from the index into the device's personal database.
   For a new library on Proton (below), Dean's current playlists are
@@ -526,7 +545,7 @@ rating across Dean's retags, since its file id and audio hash stay.
 | **A wrong inventory row** | A wrong tag or art until the file changes | Parser and hash versions; inventories never prove equality or decide removals |
 | **An offline replica** | The SSD, unplugged for a month, has files since deleted and lacks new ones | It applies the deletions log and copies what is new when it returns |
 | **Two writers at once** (two Macs, or a restored Mac beside the old one) | Conflicting changes | The sync lock, the version id check, and edits that name the version they were made against |
-| **User files naming tracks that changed** | A playlist item whose track was re-indexed or replaced | The lookup order above |
+| **References naming tracks that changed** | A playlist item, rating or count whose track was retagged, re-indexed or replaced | File id, whole-file hash (current, then previous), audio hash, then path, refreshed with each catalog version |
 | **Installations on different hash or parser versions** | Hashes cleared, rows ignored | sync.md's rule: change these versions only with a release every installation takes, readers included |
 | **The Mac lost** | No writer | Any new installation with write access opens the library from any copy and is a writer (new work) |
 | **Personal data lost with a device** | Playlists, ratings, counts gone | Shared playlists survive in the library; cloud sync of the personal database is a later milestone |
