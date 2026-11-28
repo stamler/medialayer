@@ -347,12 +347,38 @@ A file gone from the primary and not in the deletions log:
   playlists and ratings stay. It is a write of music to the primary, so
   it follows the merge's rules (lease per file, free path checked just
   before, temporary name; consolidate.md).
-- **No good copy anywhere:** the catalog keeps the row, marked
-  `missing` (the column exists), and the track shows as lost.
+- **No good copy on any source:** see "Missing everywhere" below.
 - **A bad listing is not a mass loss.** A Proton listing that fails,
   ends early, or lists far fewer files than the catalog must stop the
   sync with an error, not start a 483 GB restore. The offline fix covers
   the primary too.
+
+### Missing everywhere
+
+A file gone from the primary and from every secondary (decided by Dean,
+2026-11-28):
+
+1. **Trash first.** Before calling it missing, the sync looks in each
+   source's trash (the primary's and every secondary's `.medialayer/trash`)
+   for a file with the catalog's whole-file hash, and restores it from
+   there as from a secondary.
+2. **Otherwise the catalog keeps the row, marked `missing`** (the column
+   exists), with its file id, so playlists and ratings still point at
+   it, and the track shows as missing. Whenever any source later shows
+   that exact whole-file hash (an offline drive plugged back in, a file
+   put back by hand), it is restored to the primary automatically, under
+   the same file id. Until then the user can, in MediaLayer:
+   - **relink** it to another file in the library, which takes over its
+     file id, playlists and ratings;
+   - or **delete** it, which writes the deletions log like any delete.
+3. **Another version may already be there.** If the library holds a file
+   with the same audio hash (normal sync will have brought in any such
+   copy a source had), the missing track says so and offers to delete
+   the missing entry in favour of it, moving its playlists and ratings
+   across. It always asks first.
+
+A missing entry is never removed on its own, however long it stays
+missing.
 
 ### Deleting (rule 5)
 
