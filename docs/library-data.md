@@ -526,10 +526,10 @@ the user file from the start.
    follow him. I recommend it.
 2. **Decided:** the five sync rules, the four import refinements and
    the tag-edit rule (see "Sync rules").
-3. **Redundant byte-identical copies on a copy** go to its trash
-   without asking, the one removal made without a person, since no
-   bytes are lost. I recommend it; the alternative is listing them for
-   a manual delete.
+3. **Decided:** redundant byte-identical copies on a copy go to its
+   trash without asking (a fresh whole-file hash equal to the library
+   file's), the one removal made without a person, since no bytes are
+   lost.
 4. **What readers see of his data:** only playlists he marks shared, no
    ratings or play counts. I recommend it.
 5. **Hashes:** content hashes are for comparing and adopting, made fresh
