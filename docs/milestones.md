@@ -210,8 +210,8 @@ and work on it continues after the AppKit table.
    secondary matches the primary.
 9. **Merging a library on another source.** Add a folder on a different
    source that already holds music, or already has its own `.medialayer`
-   library, and merge the two libraries into one. Details are to be
-   decided. Today such a folder is refused as a secondary, because sync
+   library, and merge the two libraries into one. The design, for any
+   number of sources: [consolidate.md](consolidate.md). Today such a folder is refused as a secondary, because sync
    would overwrite it (see "Checks before anything is written" in
    [sync.md](sync.md)). Open questions:
    - Which library id and primary survive, and what happens to the other
